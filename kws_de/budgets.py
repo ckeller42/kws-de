@@ -1,0 +1,53 @@
+import numpy as np
+import tensorflow as tf
+
+from kws_de import config
+
+
+def estimate_macs(model) -> int:
+    total = 0
+    for layer in model.layers:
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            _, h, w, cout = layer.output.shape
+            k = layer.kernel_size[0] * layer.kernel_size[1]
+            cin = layer.input.shape[-1]
+            total += h * w * cout * cin * k
+        elif isinstance(layer, tf.keras.layers.DepthwiseConv2D):
+            _, h, w, c = layer.output.shape
+            k = layer.kernel_size[0] * layer.kernel_size[1]
+            total += h * w * c * k
+        elif isinstance(layer, tf.keras.layers.Dense):
+            total += layer.input.shape[-1] * layer.units
+    return int(total)
+
+
+def _interp(tflite: bytes):
+    itp = tf.lite.Interpreter(model_content=tflite)
+    itp.allocate_tensors()
+    return itp
+
+
+def tflite_op_types(tflite: bytes) -> set:
+    itp = _interp(tflite)
+    return {d["op_name"] for d in itp._get_ops_details()}  # noqa: SLF001
+
+
+def is_full_int8(tflite: bytes) -> bool:
+    itp = _interp(tflite)
+    return (
+        itp.get_input_details()[0]["dtype"] == np.int8
+        and itp.get_output_details()[0]["dtype"] == np.int8
+    )
+
+
+def check_budgets(tflite: bytes, model) -> dict:
+    report = {
+        "model_bytes": len(tflite),
+        "macs": estimate_macs(model),
+        "int8": is_full_int8(tflite),
+        "ops": sorted(tflite_op_types(tflite)),
+    }
+    assert report["model_bytes"] <= config.MAX_MODEL_BYTES, "model too large"
+    assert report["macs"] <= config.MAX_MACS, "MAC budget exceeded"
+    assert report["int8"], "model is not full-INT8"
+    return report
