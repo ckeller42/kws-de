@@ -1,0 +1,36 @@
+[project]
+name = "kws-de"
+version = "0.1.0"
+description = "German keyword-spotting model for ESP32-S3 (buspi camper voice control)"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "tensorflow>=2.16",
+  "numpy>=1.26",
+  "librosa>=0.10",
+  "soundfile>=0.12",
+  "datasets>=2.19",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+# Apple-Silicon GPU (MPS) acceleration — optional, CPU training works without it.
+metal = ["tensorflow-metal>=1.1"]
+
+[project.scripts]
+kws-data = "kws_de.data:main"
+kws-train = "kws_de.train:main"
+kws-export = "kws_de.export:main"
+kws-eval = "kws_de.eval:main"
+
+[tool.ruff]
+line-length = 100
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[tool.setuptools.packages.find]
+include = ["kws_de*"]

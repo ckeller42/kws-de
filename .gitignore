@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+*.pyc
+dist/
+.pytest_cache/
+.ruff_cache/
+.superpowers/
+.coverage
+*.egg-info/
+build/
+
+# ML artifacts — recipe is versioned, bytes are not
+data/
+models/
+*.npy
+*.tflite
+!tests/fixtures/**/*.tflite
+
+# ESP-IDF firmware build
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
