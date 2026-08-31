@@ -15,19 +15,11 @@ Design & rationale (with algorithm citations): `docs/superpowers/specs/2026-08-3
 - **Out:** natural-language / free speech, cloud recognition, hardware-in-CI, a custom
   MultiNet acoustic model. See spec §11 (non-goals).
 
-## Storage
-
-The repo lives on an external SSD and is symlinked into `~/src`:
-
-```text
-/Volumes/External/Users/ext_ckeller/src/kws-de   # real repo (code + data + models)
-~/src/kws-de  ->  symlink
-```
+## Data
 
 Training corpora and model binaries are **never committed** (`.gitignore`): `data/`,
 `models/`, `*.npy`, `*.tflite`. The **scripts that fetch and build the data are
-versioned** — reproduce the dataset from code, not from checked-in bytes. Scripts guard
-on the SSD being mounted and fail with a clear message if not.
+versioned** — reproduce the dataset from code, not from checked-in bytes.
 
 ## Quick start
 
