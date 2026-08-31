@@ -1,4 +1,5 @@
 import numpy as np
+
 from kws_de import config
 from kws_de.budgets import check_budgets, estimate_macs, is_full_int8
 from kws_de.export import to_int8_tflite

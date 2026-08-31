@@ -26,6 +26,8 @@ kws-eval = "kws_de.eval:main"
 
 [tool.ruff]
 line-length = 100
+# Planning docs embed illustrative (non-executed) code fences — not real source, don't format.
+extend-exclude = ["docs/superpowers"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 

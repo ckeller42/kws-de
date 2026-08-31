@@ -1,4 +1,5 @@
 import numpy as np
+
 from kws_de import config
 from kws_de.features import mfcc
 

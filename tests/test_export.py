@@ -1,5 +1,6 @@
 import numpy as np
 import tensorflow as tf
+
 from kws_de import config
 from kws_de.export import to_int8_tflite, write_c_array
 from kws_de.model import build_dscnn

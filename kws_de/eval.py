@@ -14,8 +14,7 @@ def metrics(y_true, y_pred) -> dict:
         cm[t, p] += 1
     acc = float((y_true == y_pred).mean())
     per_class = {
-        config.LABELS[i]: (float(cm[i, i] / cm[i].sum()) if cm[i].sum() else 0.0)
-        for i in range(n)
+        config.LABELS[i]: (float(cm[i, i] / cm[i].sum()) if cm[i].sum() else 0.0) for i in range(n)
     }
     unk = config.label_index("_unknown_")
     cmd_idx = {config.label_index(c) for c in config.COMMANDS}
@@ -52,7 +51,7 @@ def render_report(results: dict) -> str:
 def main() -> None:  # pragma: no cover - I/O wrapper
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="docs/eval-report.md")
-    args = ap.parse_args()
+    ap.parse_args()
     # load model + held-out features, compute metrics + SNR sweep, then:
     # open(args.out, "w").write(render_report(results))
     raise NotImplementedError("wire held-out eval; see spec §9")
