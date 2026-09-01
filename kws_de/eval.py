@@ -169,7 +169,7 @@ def run_catalog_eval(  # pragma: no cover - orchestration (real TTS + real model
     step_ms=100,
     smooth_win=3,
     threshold=0.5,
-    refractory=5,
+    refractory=3,
 ) -> dict:
     """Run the FULL command catalog end-to-end: synthesize each catalog intent
     (several voices), run audio -> mfcc -> KeywordStream -> grammar.parse, and
@@ -360,15 +360,24 @@ def _write_catalog_report(out: str) -> None:  # pragma: no cover - I/O wrapper (
         r = run_catalog_eval(predict_fn, sweep_voices, noises=noises, snr=snr, seed=int(snr) + 1)
         sweep[snr] = r["overall_accuracy"]
 
-    # provenance: real (MSWC) vs TTS clip counts for the v2 vocab, from the raw caches
+    # provenance: real (MSWC) vs TTS clip counts for the v2 vocab. Prefer the
+    # single merged+TTS-filled cache (v1 real clips reused + v2 real fetch +
+    # TTS fill, all in one file) if present so word counts aren't double
+    # counted/overwritten across separate v1/v2 cache files.
     words = command_words()
     origin = {}
-    for cache_name in ("raw_clips.pkl", "raw_clips_v2.pkl"):
-        p = config.DATA_DIR / cache_name
-        if p.exists():
-            with open(p, "rb") as fh:
-                cached = pickle.load(fh)["clips"]
-            origin.update(_origin_counts_for(cached, words))
+    merged_path = config.DATA_DIR / "raw_clips_merged.pkl"
+    if merged_path.exists():
+        with open(merged_path, "rb") as fh:
+            cached = pickle.load(fh)["clips"]
+        origin = _origin_counts_for(cached, words)
+    else:
+        for cache_name in ("raw_clips.pkl", "raw_clips_v2.pkl"):
+            p = config.DATA_DIR / cache_name
+            if p.exists():
+                with open(p, "rb") as fh:
+                    cached = pickle.load(fh)["clips"]
+                origin.update(_origin_counts_for(cached, words))
 
     model_bytes = len(tflite_bytes)
     is_int8 = budgets.is_full_int8(tflite_bytes)

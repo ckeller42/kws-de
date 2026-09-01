@@ -231,39 +231,48 @@ def _load_noises(audio_dir: Path) -> list:  # pragma: no cover - file I/O (manua
     return noises
 
 
-def _tts_fill_word(word: str, n: int, tmp_dir: Path) -> list:  # pragma: no cover - shells out
-    """Synthesize up to n clips of `word` via macOS `say`, varied by voice/rate/
-    punctuation. Returns [(np.ndarray, speaker_id)] with speaker_id="tts:{voice}:{rate}".
-    """
+def _say_one(word: str, voice: str, rate: int, phrasing: str, wav_path: Path):  # pragma: no cover
     import soundfile as sf
+
+    subprocess.run(
+        [
+            "say",
+            "-v",
+            voice,
+            "-r",
+            str(rate),
+            "--data-format=LEI16@16000",
+            "-o",
+            str(wav_path),
+            phrasing.format(w=word),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    y, _sr = sf.read(str(wav_path))
+    wav_path.unlink()
+    return y.astype(np.float32), f"tts:{voice}:{rate}"
+
+
+def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 12) -> list:
+    # pragma: no cover - shells out
+    """Synthesize up to n clips of `word` via macOS `say` (parallelized — each
+    `say` call is an independent subprocess, so this is I/O-bound and speeds up
+    ~10x with a thread pool), varied by voice/rate/punctuation. Returns
+    [(np.ndarray, speaker_id)] with speaker_id="tts:{voice}:{rate}"."""
+    from concurrent.futures import ThreadPoolExecutor
 
     combos = list(itertools.product(_TTS_VOICES, _TTS_RATES, _TTS_PHRASINGS))
     random.Random(abs(hash(word)) % (2**32)).shuffle(combos)
+    combos = combos[:n]
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    out = []
-    for i, (voice, rate, phrasing) in enumerate(combos):
-        if len(out) >= n:
-            break
-        wav_path = tmp_dir / f"{word}_{i}.wav"
-        subprocess.run(
-            [
-                "say",
-                "-v",
-                voice,
-                "-r",
-                str(rate),
-                "--data-format=LEI16@16000",
-                "-o",
-                str(wav_path),
-                phrasing.format(w=word),
-            ],
-            check=True,
-            capture_output=True,
-        )
-        y, _sr = sf.read(str(wav_path))
-        wav_path.unlink()
-        out.append((y.astype(np.float32), f"tts:{voice}:{rate}"))
-    return out
+
+    def _job(args):
+        i, (voice, rate, phrasing) = args
+        return _say_one(word, voice, rate, phrasing, tmp_dir / f"{word}_{i}.wav")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return list(ex.map(_job, enumerate(combos)))
 
 
 def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragma: no cover
