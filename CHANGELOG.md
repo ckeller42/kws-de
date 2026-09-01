@@ -13,9 +13,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   and wired `kws_de.train.main`/`kws_de.export.main`/`kws_de.eval.main` to run the
   full pipeline end to end on real data.
 - `docs/eval-report.md` — real measured accuracy: headline real-speech INT8
-  accuracy 87.9% on Licht/Kühlschrank/Heizung + `_unknown_`/`_silence_` (vs.
-  MultiNet's ~85-95% clean-speech English baseline); full 5-word model 91.9%
-  INT8 (Camping/Wasser TTS-augmented, clearly labeled as such).
+  accuracy 91.1% (n=775) across all 5 commands weighted by real-clip
+  availability + `_unknown_`/`_silence_` (vs. MultiNet's ~85-95% clean-speech
+  English baseline); full 5-word model 93.2% INT8 (Camping/Heizung partially
+  TTS-augmented, clearly labeled as such; Wasser and Licht/Kühlschrank/
+  `_unknown_` are fully real MSWC speech).
 - Repo scaffold with gitignored `data/`/`models/` dirs (training bytes never committed).
 - Design spec `docs/superpowers/specs/2026-08-31-kws-de-design.md` — German KWS DS-CNN
   for ESP32-S3, with algorithmic documentation and cited references (§12).
