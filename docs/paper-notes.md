@@ -279,3 +279,16 @@ accuracy below synthetic eval; quantifying that gap is the contribution.
 ---
 *Update discipline: append to §3/§5 with every landed run; numbers only from committed
 eval reports.*
+
+### E7 — architecture benchmark (DONE)
+Frozen dataset, 30ep/seed0, class-weighted, val-selected, test-reported. Catalog = 3-voice subset (147 trials/arch), clean dataset (no transition aug) so lower than the 0.689 tuned model — apples-to-apples ranking:
+| arch | isolated | catalog | params | MACs | INT8 | device |
+|---|---|---|---|---|---|---|
+| ds_cnn | 0.834 | 0.544 | 5879 | 2.07M | 20KB | yes |
+| bc_resnet | 0.773 | 0.102 | 4919 | 1.39M | 31KB | yes |
+| matchboxnet | 0.903 | 0.245 | 12957 | 0.47M | 43KB | yes |
+| kwt | - | - | 106k | - | 173KB | NO (non-TFLM ops) |
+Findings: metric-dependent ranking (matchboxnet best isolated+lowest MACs; ds_cnn best catalog); bc_resnet underperforms at tiny scale; KWT INT8-exports but non-device-runnable (op-set is the gate). Chose matchboxnet as CTC encoder for E8.
+
+### E8 — streaming CTC transducer (the new model, in progress)
+MatchboxNet encoder + per-frame CTC head (blank + keyword tokens) -> greedy decode -> grammar -> intent. Target: connected-command failures (long-word Kühlschrank, boundary ghosts). vs frame-classifier baseline. *(number pending)*

@@ -234,6 +234,42 @@ protocol runs.* The multi-engine TTS infrastructure is now in place for that tes
 is itself a lesson — a diversity ablation with an in-domain test set cannot detect the effect it
 is designed to measure.
 
+### 6.7 E7 — architecture benchmark
+
+Four small-footprint encoders on the frozen dataset (§4.3), trained identically (30 epochs,
+seed 0, class-weighted, selected on val, reported on test). Catalog numbers use a 3-voice subset
+(147 trials/arch) on the clean dataset (no transition augmentation), so they are lower than the
+tuned frame-classifier of §6.2 — the value here is the apples-to-apples ranking, not the absolute
+catalog number.
+
+| Architecture | Isolated | Catalog | Params | MACs | INT8 | Device-runnable |
+|---|---|---|---|---|---|---|
+| DS-CNN | 0.834 | **0.544** | 5,879 | 2.07 M | 20 KB | ✓ |
+| BC-ResNet | 0.773 | 0.102 | 4,919 | 1.39 M | 31 KB | ✓ |
+| MatchboxNet | **0.903** | 0.245 | 12,957 | **0.47 M** | 43 KB | ✓ |
+| Keyword-Transformer | — | — | 106 k | — | 173 KB | **✗ (non-TFLM ops)** |
+
+Findings: (i) the **ranking depends on the metric** — MatchboxNet wins isolated-word accuracy and
+is the most MAC-efficient (0.47 M), yet DS-CNN wins the end-to-end catalog; again, isolated accuracy
+is not the task. (ii) BC-ResNet, strong on Google-Speech-Commands in the literature, underperforms
+at this tiny scale / 30-epoch budget — a caution against importing leaderboard rankings unchanged.
+(iii) the **Keyword-Transformer INT8-exports but is not device-runnable**: its attention ops
+(BATCH_MATMUL, GATHER, TRANSPOSE, …) fall outside the TFLM/ESP-NN kernel set — a concrete reminder
+that "small and accurate" is necessary but not sufficient for an MCU; the **op-set is the gate**,
+which is exactly why our budget test asserts it. All CNN encoders fit the budget. We select
+**MatchboxNet** as the streaming-CTC encoder for §6.8 (best isolated accuracy, lowest MACs, and a
+time-native 1-D structure).
+
+### 6.8 E8 — streaming CTC transducer (the new model) *(in progress)*
+
+The literature's fix for connected commands is a streaming sequence model that transcribes the
+keyword sequence and learns alignment natively, rather than a frame classifier + a hand-rolled
+decoder. We build a small **streaming CTC** recogniser (MatchboxNet encoder + a per-frame CTC head
+over `blank + the keyword tokens`), decode greedily into the same pure grammar, and evaluate on the
+same catalog against the frame-classifier baseline. *(Result pending the training run; reported here
+when it lands — the target is the connected-command failures, especially the long-word and
+boundary-ghost cases §6.2 left open.)*
+
 ## 7. Discussion
 
 The two-stage split — a cheap always-on wake gate before a heavier command model — is what makes
