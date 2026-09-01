@@ -21,6 +21,18 @@ def test_assemble_returns_features_labels_and_origin():
     assert is_tts.dtype == bool and is_tts.any()  # the tts:* speaker rows are flagged
 
 
+def test_assemble_rows_match_origin_flags_with_tts():
+    rng = np.random.default_rng(0)
+    clips_ws = {
+        config.COMMANDS[0]: [(_clip(rng), "real1"), (_clip(rng), "tts:say:Anna")],
+        "_unknown_": [(_clip(rng), "real2")],
+    }
+    noises = [rng.standard_normal(8000).astype(np.float32)]
+    X, y, is_tts = assemble(clips_ws, noises, rng, labels=config.LABELS, commands=config.COMMANDS)
+    assert len(X) == len(is_tts)
+    assert is_tts.sum() == 2 * (1 + 3)  # the TTS clip and its perturbed copy, clean + 3 snrs
+
+
 def test_load_split_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     X = np.zeros((3, config.N_FRAMES, config.N_MFCC), np.float32)

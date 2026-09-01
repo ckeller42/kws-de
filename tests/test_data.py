@@ -126,6 +126,33 @@ def test_origin_flags_marks_tts_rows_and_mirrors_build_dataset_order():
     assert flags.tolist() == expected
 
 
+def test_build_dataset_perturbs_synthetic_clips_only():
+    rng = np.random.default_rng(0)
+    clips = {config.COMMANDS[0]: [_clip(rng), _clip(rng)], "_unknown_": [_clip(rng)]}
+    noises = [rng.standard_normal(8000).astype(np.float32)]
+    X0, y0 = build_dataset(clips, noises, np.random.default_rng(1), snrs=(20,))
+    X1, y1 = build_dataset(
+        clips,
+        noises,
+        np.random.default_rng(1),
+        snrs=(20,),
+        synthetic={config.COMMANDS[0]: [True, False]},
+    )
+    # one flagged clip -> one extra (clean + 1 snr) pair for that label, nothing else
+    assert X1.shape[0] == X0.shape[0] + 2
+    assert (y1 == 0).sum() == (y0 == 0).sum() + 2
+    assert (y1 != 0).sum() == (y0 != 0).sum()
+
+
+def test_origin_flags_doubles_perturbed_tts_rows():
+    clips_ws = {
+        "Licht": [(np.zeros(1), "tts:say:Anna"), (np.zeros(1), "real_1")],
+        "_unknown_": [(np.zeros(1), "real_2")],
+    }
+    flags = _origin_flags(clips_ws, (20, 10, 0), perturb_tts=True)
+    assert flags.tolist() == [True] * 8 + [False] * 4 + [False] * 4 + [False] + [False]
+
+
 def test_make_transition_windows_geometry():
     # Two 5000-sample words + a 4000-sample (250ms) gap = 14000 total samples,
     # under CLIP_SAMPLES (16000) -- so regardless of where the boundary-window

@@ -23,10 +23,12 @@ from kws_de.manifest import build_manifest
 def assemble(clips_ws, noises, rng, labels, commands):
     """Raw (clip, speaker) dict for one split -> (X, y, is_tts). Wraps build_dataset
     (features + labels) and _origin_flags (per-row real/TTS origin, same iteration
-    order) -- neither is duplicated here, just composed."""
+    order) -- neither is duplicated here, just composed. TTS clips get one perturbed
+    copy (build_dataset `synthetic`), mirrored in the flags."""
     clips = {lbl: [c for c, _ in items] for lbl, items in clips_ws.items()}
-    X, y = build_dataset(clips, noises, rng, labels=labels, commands=commands)
-    is_tts = _origin_flags(clips_ws, snrs=(20, 10, 0), words=commands)
+    synthetic = {lbl: [s.startswith("tts:") for _, s in items] for lbl, items in clips_ws.items()}
+    X, y = build_dataset(clips, noises, rng, labels=labels, commands=commands, synthetic=synthetic)
+    is_tts = _origin_flags(clips_ws, snrs=(20, 10, 0), words=commands, perturb_tts=True)
     return X, y, np.asarray(is_tts, bool)
 
 

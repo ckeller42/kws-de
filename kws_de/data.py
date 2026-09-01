@@ -13,7 +13,7 @@ from urllib.request import urlopen
 import numpy as np
 
 from kws_de import config, tts
-from kws_de.augment import mix_at_snr
+from kws_de.augment import mix_at_snr, perturb
 from kws_de.features import mfcc
 
 _ESC50_URL = "https://github.com/karolpiczak/ESC-50/archive/refs/heads/master.zip"
@@ -182,10 +182,17 @@ def build_dataset(
     commands=None,
     transition_unknown=None,
     transition_positives=None,
+    synthetic=None,
 ):
     """Build (X, y) from raw clips. `labels`/`commands` default to the v1 vocab
     (`config.LABELS`/`config.COMMANDS`) so existing v1 callers are unaffected;
     pass `labels=config.COMMAND_LABELS, commands=command_words()` for v2.
+
+    `synthetic` (optional `{label: [bool]}` aligned to `clips`) marks TTS clips; each one
+    also contributes a pitch/tempo-perturbed copy (±2 semitones, 0.85–1.15× tempo, drawn
+    from `rng`) through the same clean + per-snr pipeline, so rows per TTS clip double.
+    A handful of synthetic voices need the acoustic variety real speakers bring for free;
+    real clips are left alone so the real:TTS row ratio does not get worse.
 
     Every word class (commands AND `_unknown_`) sees the SAME audio domains: one
     clean (time-shifted) copy plus a noise-mixed (time-shifted) copy at each snr
@@ -208,11 +215,18 @@ def build_dataset(
         X.append(mfcc(sig))
         y.append(labels.index(label))
 
-    def add_word_clip(clip, label):
+    def add_word_clip(clip, label, perturbed=False):
         add(_random_shift(clip, rng), label)
         for snr in snrs:
             noise = noises[int(rng.integers(0, len(noises)))]
             add(mix_at_snr(_random_shift(clip, rng), noise, snr, rng), label)
+        if perturbed:
+            n_steps = float(rng.uniform(-2.0, 2.0))
+            rate = float(rng.uniform(0.85, 1.15))
+            add_word_clip(perturb(clip, n_steps, rate, config.SAMPLE_RATE), label)
+
+    def flags_for(label):
+        return (synthetic or {}).get(label) or []
 
     def add_fixed_window(sig, label):
         add(sig, label)
@@ -221,10 +235,12 @@ def build_dataset(
             add(mix_at_snr(sig, noise, snr, rng), label)
 
     for cmd in commands:
-        for clip in clips.get(cmd, []):
-            add_word_clip(clip, cmd)
-    for clip in clips.get("_unknown_", []):
-        add_word_clip(clip, "_unknown_")
+        flags = flags_for(cmd)
+        for i, clip in enumerate(clips.get(cmd, [])):
+            add_word_clip(clip, cmd, perturbed=bool(flags[i]) if i < len(flags) else False)
+    flags = flags_for("_unknown_")
+    for i, clip in enumerate(clips.get("_unknown_", [])):
+        add_word_clip(clip, "_unknown_", perturbed=bool(flags[i]) if i < len(flags) else False)
     for win in transition_unknown or []:
         add_fixed_window(win, "_unknown_")
     for win, label in transition_positives or []:
@@ -521,19 +537,25 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
     return added
 
 
-def _origin_flags(clips_ws: dict, snrs, words=None) -> np.ndarray:
+def _origin_flags(clips_ws: dict, snrs, words=None, perturb_tts: bool = False) -> np.ndarray:
     """Boolean array flagging TTS-synthesized origin (speaker id prefix "tts:"),
     aligned row-for-row to build_dataset's output for the same clips/snrs — must
     mirror build_dataset's iteration order (commands then unknown, each clip's
-    clean copy + one row per snr, then silence, then clean silence) exactly."""
+    clean copy + one row per snr, then silence, then clean silence) exactly.
+    With `perturb_tts`, TTS clips count twice (build_dataset's perturbed copy)."""
     words = list(words) if words is not None else config.COMMANDS
     per_clip = 1 + len(snrs)
     flags = []
+
+    def rows(spk):
+        tts = spk.startswith("tts:")
+        return [tts] * (per_clip * (2 if perturb_tts and tts else 1))
+
     for cmd in words:
         for _clip, spk in clips_ws.get(cmd, []):
-            flags.extend([spk.startswith("tts:")] * per_clip)
+            flags.extend(rows(spk))
     for _clip, spk in clips_ws.get("_unknown_", []):
-        flags.extend([spk.startswith("tts:")] * per_clip)
+        flags.extend(rows(spk))
     n_sil = max(1, len(clips_ws.get("_unknown_", [])))
     flags.extend([False] * n_sil)
     n_clean_sil = max(1, n_sil // 10)
