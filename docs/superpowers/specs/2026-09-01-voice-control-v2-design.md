@@ -46,18 +46,32 @@ model runs **only** inside the post-wake window.
 
 ## 3. Vocabulary
 
+Grounded in the camper's real controllable functions (not a guess):
+
 | Slot | Words | Data source |
 |---|---|---|
-| wake | `Hey Bus` | custom phrase → TTS + optional recordings (no public corpus) |
-| device | `Licht, Heizung, Kühlschrank, Wasser` | reused from v1 (MSWC + TTS as in v1) |
-| zone *(optional)* | `Küche, Bad, Decke, Außen` | MSWC where available, else TTS |
-| action | `an, aus` | `an`/`aus` are very common → good MSWC coverage |
+| wake | `Hey Bus` | custom phrase → Piper TTS (via microWakeWord) |
+| device | `Licht, Kühlschrank, Heizung, Aufstelldach, Campingmodus, USB, Wasser, Energie` | MSWC where available, else TTS |
+| light zone (Licht only) | `Küche, Dach, Außen, Lesen` | MSWC where available, else TTS |
+| action | `an, aus, auf, zu, heller, dunkler, wärmer, kälter, leise, Eco, Max, Normal` | common ones MSWC; rare ones TTS |
 
-- A bare `<device> <action>` (no zone, e.g. "Licht an") targets the device's default/master.
-- The concrete zone set is configurable; it maps to the camper's real lighting zones at firmware
-  integration time (out of scope here — this spec treats zones purely as vocabulary + a grammar slot).
-- Rare words (`Hey Bus`, room names) are TTS-filled with the same macOS-`say` German-voice
-  approach v1 used for its thin words; per-word real-clip counts are reported honestly.
+**Actions are device-specific** — each device allows only a subset (a `DEVICE_ACTIONS` map):
+
+- `Licht`: an, aus, heller, dunkler (+ a light zone)
+- `Kühlschrank`: an, aus, leise
+- `Heizung`: an, aus, wärmer, kälter
+- `Aufstelldach`: auf, zu (up/down — not an/aus)
+- `Campingmodus` / `USB` / `Wasser`: an, aus
+- `Energie`: Eco, Max, Normal (mode)
+
+Notes:
+
+- Only `Licht` takes a zone; other devices with a zone are rejected by the grammar.
+- A bare `<device> <action>` (no zone) targets the device's default/master.
+- `Kühlschrank` is the spoken word for the fridge/cooler function (better real MSWC coverage than
+  the app's compound term).
+- Rare words are TTS-filled with the same macOS-`say` German-voice approach v1 used; per-word
+  real-clip counts are reported honestly.
 
 ## 4. Components (all Mac + CI testable)
 
@@ -100,6 +114,7 @@ A small, pure state machine over the event sequence:
 
 - Expected order: `device → (zone)? → action`.
 - `device` + `action` with no `zone` → intent targeting the default/master.
+- **Device-specific validity:** the action must be in `DEVICE_ACTIONS[device]` (e.g. "Aufstelldach an" → rejection; "Aufstelldach auf" → valid), and only `Licht` may take a zone (e.g. "Heizung Küche" → rejection).
 - Out-of-order, missing `device` or `action`, or duplicate slots → `Rejection(reason)`.
 - Unknown/`_unknown_` events are ignored (open-world rejection carries over from v1).
 
