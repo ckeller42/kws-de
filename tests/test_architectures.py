@@ -1,5 +1,29 @@
+import numpy as np
+import pytest
+
 from kws_de import config
 from kws_de.architectures import ARCHITECTURES, get
+from kws_de.budgets import check_budgets, tflite_op_types
+from kws_de.export import to_int8_tflite
+
+# Architectures proven to INT8-export within the TFLM op set (see
+# test_device_runnable_architectures_export_int8_and_fit_budget below). kwt is
+# reference-only — see kws_de/architectures/kwt.py and
+# test_kwt_is_not_tflm_device_runnable.
+DEVICE_RUNNABLE_ARCHITECTURES = ("ds_cnn", "bc_resnet", "matchboxnet")
+
+# Ops TFLM + ESP-NN run on the ESP32-S3 (DELEGATE is a host-interpreter artifact,
+# not on-device) — mirrors tests/test_budgets.py's TFLM_OPS.
+TFLM_OPS = {
+    "CONV_2D",
+    "DEPTHWISE_CONV_2D",
+    "FULLY_CONNECTED",
+    "MEAN",
+    "SOFTMAX",
+    "RESHAPE",
+    "ADD",
+    "DELEGATE",
+}
 
 
 def test_registry_has_expected_names():
@@ -24,3 +48,37 @@ def test_matchboxnet_builds():
     assert m.input_shape == (None, config.N_FRAMES, config.N_MFCC, 1)
     assert m.output_shape == (None, config.NUM_CLASSES)
     assert m.count_params() < 150_000
+
+
+def test_kwt_builds():
+    m = get("kwt")((config.N_FRAMES, config.N_MFCC, 1), n_classes=config.NUM_CLASSES)
+    assert m.input_shape == (None, config.N_FRAMES, config.N_MFCC, 1)
+    assert m.output_shape == (None, config.NUM_CLASSES)
+    assert m.count_params() < 300_000
+
+
+@pytest.mark.xfail(
+    reason=(
+        "kwt is reference-only: MultiHeadAttention/LayerNormalization lower to "
+        "BATCH_MATMUL/TRANSPOSE/GATHER/CONCATENATION/TILE plus float DEQUANTIZE/"
+        "QUANTIZE bridges, outside the TFLM op set — not device-runnable even "
+        "though it does INT8-export with int8 I/O."
+    ),
+    strict=True,
+)
+def test_kwt_is_not_tflm_device_runnable():
+    m = get("kwt")((config.N_FRAMES, config.N_MFCC, 1), n_classes=config.NUM_CLASSES)
+    rng = np.random.default_rng(0)
+    rep = rng.standard_normal((8, config.N_FRAMES, config.N_MFCC)).astype(np.float32)
+    blob = to_int8_tflite(m, rep)
+    assert tflite_op_types(blob) <= TFLM_OPS
+
+
+def test_device_runnable_architectures_export_int8_and_fit_budget():
+    n_classes = len(config.COMMAND_LABELS)
+    rng = np.random.default_rng(0)
+    rep = rng.standard_normal((8, config.N_FRAMES, config.N_MFCC)).astype(np.float32)
+    for name in DEVICE_RUNNABLE_ARCHITECTURES:
+        m = get(name)((config.N_FRAMES, config.N_MFCC, 1), n_classes=n_classes)
+        blob = to_int8_tflite(m, rep)
+        check_budgets(blob, m)  # must not raise
