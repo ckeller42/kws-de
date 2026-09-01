@@ -21,6 +21,20 @@ def test_build_dataset_shapes_and_labels():
     assert config.label_index("_silence_") in set(y.tolist())
 
 
+def test_every_word_class_gets_the_same_audio_domains():
+    # The 0.000-catalog bug: commands were noise-only, _unknown_ clean-only, so the model
+    # learned "clean audio == _unknown_". Guard: a command clip and an _unknown_ clip must
+    # yield the SAME number of samples (1 clean + len(snrs) noise-mixed).
+    rng = np.random.default_rng(0)
+    clips = {config.COMMANDS[0]: [_clip(rng)], "_unknown_": [_clip(rng)]}
+    noises = [rng.standard_normal(8000).astype(np.float32)]
+    snrs = (20, 0)
+    _X, y = build_dataset(clips, noises, rng, snrs=snrs)
+    n_cmd = (y == config.label_index(config.COMMANDS[0])).sum()
+    n_unk = (y == config.label_index("_unknown_")).sum()
+    assert n_cmd == n_unk == 1 + len(snrs)
+
+
 def test_commands_are_augmented_per_snr():
     # per-clip row count = 1 clean copy + len(snrs) noise-mixed copies, symmetric
     # between commands and _unknown_ (see data.build_dataset docstring: asymmetric
