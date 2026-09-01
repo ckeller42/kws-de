@@ -116,11 +116,39 @@ clips** (Licht, Kühlschrank, Heizung, Wasser, aus, auf, Außen[158]); 17 incl. 
   transition audio — remains, and compounds with phrase length. Flagged as a
   follow-up (multi-word transition augmentation), not further stream-param tuning.
 
-### E4 — wake word, local training feasibility
 
-microWakeWord (the ESPHome/HA wake engine) documented as Python-3.10 + Colab/GPU;
-**shown to install and import in a local uv-managed 3.10 venv on Apple Silicon** (TF 2.21,
-CPU/Metal). → custom "Hey Bus" trainable on a laptop. *(FA/hour numbers pending.)*
+- **Transition-aware training (NEGATIVE RESULT)** — added inter-word boundary windows
+  labeled `_unknown_` + in-context positives, retrained: full-intent catalog accuracy
+  **0.362 → 0.197** (REGRESSION), zone slot → 0.000. Root cause (probe): the `_unknown_`
+  transition negatives out-weighted the word positives (model predicted `_unknown_` 17.4%
+  vs 7.7% true; clip-level acc 88.5% → 78.1%). The model over-corrected toward "say nothing",
+  killing recall — worst on multi-word phrases where any missed word fails the whole intent.
+  **Lesson: naive transition-negative labeling trades boundary-precision for recall and loses
+  net.** Correct fix (future work): class-balance the transition negatives (cap at ~half the
+  per-word positive volume) and/or class-weight; or move boundary handling entirely into the
+  decoder. Best committed model remains the decoder-fix (0.362). — a genuinely publishable
+  ablation: the obvious data fix makes it worse.
+
+### E4 — wake word, local training (DONE, real numbers)
+
+microWakeWord (the ESPHome/HA wake engine) is documented as Python-3.10 + Colab/GPU. We
+trained a custom German **"Hey Bus"** wake model **end-to-end locally on an M4 laptop** — no
+Colab, no discrete GPU:
+
+| Metric | Value |
+|---|---|
+| Model | 62,304 B INT8 streaming TFLite (input [1,3,40] int8, output [1,1]); passes the <=150 KB wake budget |
+| Training | full 10,000-step upstream config, ~6m41s on CPU/Metal |
+| Positives | 2,000 synthetic (Piper `de_DE-mls-medium`, "hey bus"/"hej bus"); negatives = mWW's ~5.9 GB ambient/no-speech/speech sets |
+| Best checkpoint | val recall 71.65 %, precision 100 %, avg-viable-recall 0.649, ~2.9 false-accepts/hour |
+| @ cutoff 0.99 | false-reject 0.39, **2.0 false-accepts/hour** |
+
+First-pass / untuned: 39 % miss at the only low-FA cutoff, 100 % synthetic positives (no real
+human "Hey Bus"), no RIR reverb aug. Needs on-device threshold tuning + real recordings. But
+the **feasibility claim is now proven with numbers**: a custom German wake word trains on a
+laptop in minutes. (5 packaging/dependency blockers were fixed inside the training venv only —
+mWW's pip package ships without its `layers/`+`audio/` subpackages, `datasets>=4` drops script
+loading, PyTorch 2.6 `weights_only` breaks Piper checkpoint loading, etc. — worth a footnote.)
 
 ### E5 — TTS voice diversity (planned ablation)
 
@@ -128,6 +156,15 @@ Hypothesis: synthetic-data quality for KWS is dominated by **voice diversity**, 
 per-voice fidelity. Setup: macOS `say` only (~9 voices) vs multi-engine
 (say + Piper ~7 + Parler prompt-voices, round-robin) on the 17 zero-real words.
 *(numbers pending — compare catalog accuracy of both trainings)*
+
+
+### E6 — sim-to-real gap (planned, needs the physical CoreS3)
+
+Estimated vs MEASURED on-device performance (latency/arena/CPU/power) and clean-corpus vs
+real-mic accuracy. All numbers so far are synthetic/clean-corpus; the CoreS3's dual-MEMS +
+ES7210 + ESP-SR 2-mic AFE and the van acoustics are an unmodeled domain. Spec:
+`docs/superpowers/specs/2026-09-01-on-device-hw-mic-followup-design.md`. Expected result: real
+accuracy below synthetic eval; quantifying that gap is the contribution.
 
 ## 4. Method details worth a figure
 
