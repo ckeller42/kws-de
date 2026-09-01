@@ -19,6 +19,10 @@ dependencies = [
 dev = ["pytest>=8", "ruff>=0.6"]
 # Apple-Silicon GPU (MPS) acceleration — optional, CPU training works without it.
 metal = ["tensorflow-metal>=1.1"]
+# Wake-stage training only (Piper TTS "Hey Bus" positives + microWakeWord's
+# trainer); runtime just loads the resulting tflite, no extra deps needed.
+# Not on PyPI — installed straight from its GitHub repo.
+train = ["microwakeword @ git+https://github.com/kahrendt/microWakeWord"]
 
 [project.scripts]
 kws-data = "kws_de.data:main"
