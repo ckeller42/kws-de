@@ -51,3 +51,20 @@ def check_budgets(tflite: bytes, model) -> dict:
     assert report["macs"] <= config.MAX_MACS, "MAC budget exceeded"
     assert report["int8"], "model is not full-INT8"
     return report
+
+
+# Wake stage budget: always-on, so held tighter than the command model. The wake
+# tflite is an external microWakeWord artifact (no Keras graph to hand), so this
+# checks bytes/ops only — no MACs estimate (see check_budgets for the command model).
+MAX_WAKE_MODEL_BYTES = 150_000
+
+
+def check_wake_budgets(tflite: bytes) -> dict:
+    report = {
+        "model_bytes": len(tflite),
+        "int8": is_full_int8(tflite),
+        "ops": sorted(tflite_op_types(tflite)),
+    }
+    assert report["model_bytes"] <= MAX_WAKE_MODEL_BYTES, "wake model too large"
+    assert report["int8"], "wake model is not full-INT8"
+    return report
