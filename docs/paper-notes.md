@@ -315,3 +315,52 @@ Metal decision: **dropped** (`uv sync`, no `--extra metal`). `uv sync --extra de
 CPU@128 vs CPU@32: ~1.17x faster — modest, as expected for models this tiny (per-step overhead, not compute, dominates at batch 32).
 
 batch 128 from E9 on; E7 numbers were batch 32 — not re-run.
+
+### E9/E10 — distillation + balanced calibration (feat/real-speech-distill)
+
+2026-09-01. Frozen v2 features (`data/features_{train,val,test}.npz`, 23 classes). Command:
+`uv run kws-distill --features features --epochs 40 --seed 0` (~15 min wall-clock on Apple M4 CPU,
+batch 128: KWT teacher + DS-CNN baseline + DS-CNN distilled student, each 40 epochs, plus INT8
+export/eval ×3 and a 3-voice catalog TTS pass per row). Report: `docs/distill-report.md` /
+`docs/distill-benchmark.json` (untracked, like the transducer report). Teacher (KWT) float test
+accuracy: **0.894**.
+
+| Architecture | Float | Isolated | Catalog | Params | MACs | INT8 | Budget |
+|---|---|---|---|---|---|---|---|
+| ds_cnn (first-200 calib) | 0.862 | 0.842 | 0.218 | 5,879 | 2,070,496 | 20,224 | yes |
+| ds_cnn (balanced calib) | 0.862 | 0.853 | 0.259 | 5,879 | 2,070,496 | 20,224 | yes |
+| ds_cnn distilled (balanced calib) | 0.842 | 0.833 | 0.667 | 5,879 | 2,070,496 | 20,272 | yes |
+
+E9 (distillation): isolated accuracy fell (float 0.862->0.842, INT8 0.853->0.833, both -2.0 pts) but
+catalog jumped 0.259->0.667 (+40.8 pts, 2.6x) — a system-level win despite a slightly worse per-clip
+number; consistent with §6.2's "isolated accuracy is not the task."
+
+E10 (calibration): float->INT8 gap 2.0 pts with `X_train[:200]` calib, 0.9 pts with balanced calib —
+recovers 1.1 of 2.0 pts (55%) on this run. (E7's originally-quoted 1.63-pt gap was a different run,
+30ep/batch32; this run's own first-200 row, 40ep/batch128, is the baseline the recovery is measured
+against.)
+
+QAT decision (spec §5 gate: >1% absolute balanced-calib gap -> QAT next spec, else closed): measured
+balanced gap **0.9% < 1%** -> **QAT closed as unnecessary**.
+
+### TTS breadth + perturbation (feat/real-speech-distill)
+
+Audit of `raw_clips_merged.pkl` (the v2 build) found the TTS backstop was macOS `say` only: 9 voices
+x 9 rates, 6 622 clips — and TTS speaker ids were `tts:{engine}:{voice}:{rate}`, so the same voice at
+two rates could land in both train and test (a rate-in-speaker-id split leak, TTS rows in the
+speaker-disjoint split were not actually disjoint). Fix (Tasks 10-11): Piper voices discovered from
+the local cache (multi-speaker voices expanded per speaker) alongside `say`, speaker id dropped to
+`tts:{engine}:{voice}` (rate becomes augmentation, not identity, closing the leak), and every TTS
+clip gets one pitch/tempo-perturbed copy at build time. v2 feature files are untouched (frozen); the
+effect is measured with v3.
+
+## Open questions
+
+- Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
+  effective n ≈ (speaker, word) pairs; `kws-benchmark --folds 5` over real speakers only, TTS always
+  train-side, mean ± std + per-speaker table. Build after v3 once ≥ 5 speaker groups cover every
+  command.
+- Probabilistic slot decoding (spec §10): detector thresholds before the grammar can weigh in;
+  n-best lattice parse over the existing posteriors (≤ 8 sequences per phrase, score = ∏ probs,
+  accept on tau/delta, temperature-calibrated), E11 offline re-decode of the catalog eval with
+  false-accept rate on negatives as the gate; catalog DP decoding only if > 5 points remain.

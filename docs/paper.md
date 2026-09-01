@@ -293,6 +293,43 @@ The **frame-classifier + grammar (0.689, 20 KB INT8) remains the working, deploy
 the streaming transducer is now a device-runnable but under-trained direction whose one remaining
 blocker this experiment names precisely — phrase-data scale.
 
+### E9 — Knowledge distillation (KWT → DS-CNN)
+
+On the frozen v2 split (§4.3), we distilled the KWT teacher (§6.7; INT8-exports but is not
+device-runnable) into the unchanged DS-CNN student (`kws_de.distill.distill`, `T=4.0`, `alpha=0.5`,
+40 epochs, seed 0, batch 128 — see
+`docs/superpowers/specs/2026-09-01-real-speech-distill-design.md` §4). Teacher float test accuracy:
+**0.894**.
+
+| Architecture | Float | Isolated | Catalog | Params | MACs | INT8 | Budget |
+|---|---|---|---|---|---|---|---|
+| ds_cnn (first-200 calib) | 0.862 | 0.842 | 0.218 | 5,879 | 2,070,496 | 20,224 | yes |
+| ds_cnn (balanced calib) | 0.862 | 0.853 | 0.259 | 5,879 | 2,070,496 | 20,224 | yes |
+| ds_cnn distilled (balanced calib) | 0.842 | 0.833 | 0.667 | 5,879 | 2,070,496 | 20,272 | yes |
+
+Distillation did **not** beat the baseline on the isolated per-clip metric — float accuracy fell
+0.862 → 0.842 and INT8-isolated fell 0.853 → 0.833 (both −2.0 points, balanced calibration on both
+rows). But it produced the paper's largest single-change win on the metric that reflects the
+deployed system: full-intent **catalog accuracy rose 0.259 → 0.667**, +40.8 points, 2.6× the
+undistilled baseline. This echoes §6.2/§6.7's lesson that isolated accuracy is not the task — the
+KWT teacher's softened targets appear to move the student's decision boundaries in a way that
+materially helps stream+grammar composition (fewer boundary-transition ghosts, §6.2/§6.3) even
+while very slightly hurting raw per-clip accuracy. We report this honestly as a system-level win,
+not an unqualified win on every metric.
+
+### E10 — INT8 calibration
+
+Rows 1–2 above differ only in the PTQ calibration set (`X_train[:200]` vs class-balanced
+`kws_de.export.balanced_calibration`, spec §5). Float→INT8 gap: first-200 calibration 0.862 → 0.842
+(2.0 points); balanced calibration 0.862 → 0.853 (0.9 points) — balanced calibration recovers 1.1 of
+the 2.0-point gap (55 %) on this run. (E7's originally reported 1.63-point gap, 0.8661 → 0.8498, was
+measured on an earlier ds_cnn run at 30 epochs/batch 32; this run's own first-200 row, 40
+epochs/batch 128, is the baseline the recovery above is measured against.)
+
+Per the spec's decision gate (§5): a hand-rolled fake-quant QAT becomes the next spec only if the
+balanced-calibration gap exceeds 1 % absolute. The measured balanced gap is **0.9 %**, under the
+threshold, so **QAT is closed as unnecessary** — balanced calibration alone is sufficient.
+
 ## 7. Discussion
 
 The two-stage split — a cheap always-on wake gate before a heavier command model — is what makes
@@ -338,7 +375,10 @@ steps) — plus a documented, reusable German MCU-KWS dataset. We also benchmark
 that dataset (MatchboxNet the most MAC-efficient; the Keyword Transformer accurate but not
 device-runnable) and built a streaming CTC transducer which — once its head was reformulated to a
 1×1-Conv2D and exported at fixed length — runs device-side at 42.9 KB full INT8, leaving phrase-data
-scale as the one remaining thing a connected-command model must fix here.
+scale as the one remaining thing a connected-command model must fix here. Distilling the KWT teacher
+into the deployed DS-CNN (E9) traded a small isolated-accuracy loss for a large catalog-accuracy
+gain (0.259 → 0.667), and class-balanced PTQ calibration (E10) recovered the INT8 gap to 0.9
+points — under the spec's 1 %-gate, closing QAT as unnecessary for now.
 Everything is open-source at the repository above.
 
 ## References
