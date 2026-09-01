@@ -1,7 +1,7 @@
 import numpy as np
 
 from kws_de import config
-from kws_de.data import _origin_flags, build_dataset, split_by_speaker
+from kws_de.data import _origin_flags, build_dataset, make_transition_windows, split_by_speaker
 
 
 def _clip(rng):
@@ -102,3 +102,68 @@ def test_origin_flags_marks_tts_rows_and_mirrors_build_dataset_order():
     # then n_clean_sil = max(1, n_sil // 10) = 1 clean silence row (False).
     expected = [True] * 4 + [False] * 4 + [False] * 4 + [False] * 1 + [False] * 1
     assert flags.tolist() == expected
+
+
+def test_make_transition_windows_geometry():
+    # Two 5000-sample words + a 4000-sample (250ms) gap = 14000 total samples,
+    # under CLIP_SAMPLES (16000) -- so regardless of where the boundary-window
+    # jitter lands within the gap, the CLIP_SAMPLES cut always overlaps both
+    # words (worked out from the window-vs-gap arithmetic, not just observed):
+    # min B-overlap is 4000 samples, min A-overlap is 4000 samples. Makes the
+    # "straddles both words" assertion below deterministic, not seed-lucky.
+    rng = np.random.default_rng(0)
+    clips_by_word = {
+        "A": [np.full(5000, 1.0, np.float32)],
+        "B": [np.full(5000, 2.0, np.float32)],
+    }
+    n_pairs = 5
+    unknown, positives = make_transition_windows(clips_by_word, rng, n_pairs, gap_ms=250)
+
+    assert len(unknown) == n_pairs
+    assert len(positives) == 2 * n_pairs
+
+    center = config.CLIP_SAMPLES // 2
+    for win in unknown:
+        assert win.shape == (config.CLIP_SAMPLES,)
+        assert win.dtype == np.float32
+        # straddles the boundary: both words' audio present, neither alone
+        assert (win == 1.0).any()
+        assert (win == 2.0).any()
+
+    for win, label in positives:
+        assert win.shape == (config.CLIP_SAMPLES,)
+        assert label in ("A", "B")
+        expected = 1.0 if label == "A" else 2.0
+        # window is cut centered exactly on the labeled word's clip-center sample
+        assert win[center] == expected
+
+
+def test_make_transition_windows_empty_when_no_clips():
+    rng = np.random.default_rng(0)
+    assert make_transition_windows({}, rng, n_pairs=3) == ([], [])
+    assert make_transition_windows({"A": []}, rng, n_pairs=3) == ([], [])
+
+
+def test_build_dataset_includes_transition_windows():
+    rng = np.random.default_rng(5)
+    clips = {c: [_clip(rng) for _ in range(2)] for c in config.COMMANDS}
+    clips["_unknown_"] = [_clip(rng) for _ in range(2)]
+    noises = [rng.standard_normal(8000).astype(np.float32) for _ in range(2)]
+    licht = config.label_index("Licht")
+    unknown = config.label_index("_unknown_")
+
+    trans_unknown = [_clip(rng) for _ in range(3)]
+    trans_positive = [(_clip(rng), "Licht") for _ in range(2)]
+    X, y = build_dataset(
+        clips,
+        noises,
+        rng,
+        snrs=(20,),
+        transition_unknown=trans_unknown,
+        transition_positives=trans_positive,
+    )
+    X0, y0 = build_dataset(clips, noises, rng, snrs=(20,))
+
+    # per_clip = 1 + len(snrs) = 2 rows per transition window
+    assert (y == licht).sum() == (y0 == licht).sum() + 2 * len(trans_positive)
+    assert (y == unknown).sum() == (y0 == unknown).sum() + 2 * len(trans_unknown)

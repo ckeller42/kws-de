@@ -77,7 +77,77 @@ def _random_shift(clip, rng, max_shift_ms: int = 200):
     return out
 
 
-def build_dataset(clips, noises, rng, snrs=(20, 10, 0), labels=None, commands=None):
+def make_transition_windows(clips_by_word, rng, n_pairs, gap_ms=250):
+    """Build transition-aware training windows from TRAIN-split word clips only
+    (never test -- see `_build_and_split`, which is the only caller and enforces
+    this by only ever passing it the train-split clips dict).
+
+    Concatenates two random command words with `gap_ms` of silence between them
+    -- the SAME gap `eval._intent_audio` uses to build catalog phrases -- then
+    cuts CLIP_SAMPLES windows two ways:
+      - straddling the boundary (tail-of-A + gap + head-of-B, neither word's
+        center inside the window) -> these are the boundary-transition ghosts
+        the streaming decoder actually sees; labeled "_unknown_" so the model
+        learns "not any single word" instead of guessing one.
+      - centered on one word with the neighbor's audio bleeding in at an edge
+        -> "in-context positive", labeled with the centered word -- matches
+        what streaming actually feeds the model (a word rarely arrives alone
+        in its 1s window).
+
+    Returns (unknown_windows, context_positives):
+      unknown_windows: list[np.ndarray] of CLIP_SAMPLES float32 arrays.
+      context_positives: list[(np.ndarray, str)] of (window, word_label).
+    """
+    words = [w for w, clips in clips_by_word.items() if clips]
+    if not words:
+        return [], []
+    n = config.CLIP_SAMPLES
+    gap = np.zeros(int(config.SAMPLE_RATE * gap_ms / 1000), np.float32)
+
+    def cut(seq, center):
+        """CLIP_SAMPLES window of `seq` centered at sample `center`, zero-padded
+        past either end -- works whether `seq` is longer or shorter than
+        CLIP_SAMPLES, so short clips don't need special-casing."""
+        start = int(round(center)) - n // 2
+        out = np.zeros(n, np.float32)
+        src_start, src_end = max(start, 0), min(start + n, len(seq))
+        if src_end > src_start:
+            dst = src_start - start
+            out[dst : dst + (src_end - src_start)] = seq[src_start:src_end]
+        return out
+
+    unknown_windows = []
+    context_positives = []
+    for _ in range(n_pairs):
+        # distinct words when possible -- an unrelated-word ghost is the
+        # failure mode this targets; only fall back to a repeat if there's
+        # just one command word to draw from.
+        wa, wb = rng.choice(words, size=2, replace=len(words) < 2)
+        clip_a = clips_by_word[wa][int(rng.integers(0, len(clips_by_word[wa])))]
+        clip_b = clips_by_word[wb][int(rng.integers(0, len(clips_by_word[wb])))]
+        a = np.asarray(clip_a, np.float32).ravel()
+        b = np.asarray(clip_b, np.float32).ravel()
+        seq = np.concatenate([a, gap, b])
+        len_a, len_gap = len(a), len(gap)
+
+        jitter = int(rng.integers(-len_gap // 2, len_gap // 2 + 1)) if len_gap else 0
+        unknown_windows.append(cut(seq, len_a + len_gap / 2 + jitter))
+        context_positives.append((cut(seq, len_a / 2), wa))
+        context_positives.append((cut(seq, len_a + len_gap + len(b) / 2), wb))
+
+    return unknown_windows, context_positives
+
+
+def build_dataset(
+    clips,
+    noises,
+    rng,
+    snrs=(20, 10, 0),
+    labels=None,
+    commands=None,
+    transition_unknown=None,
+    transition_positives=None,
+):
     """Build (X, y) from raw clips. `labels`/`commands` default to the v1 vocab
     (`config.LABELS`/`config.COMMANDS`) so existing v1 callers are unaffected;
     pass `labels=config.COMMAND_LABELS, commands=command_words()` for v2.
@@ -89,6 +159,11 @@ def build_dataset(clips, noises, rng, snrs=(20, 10, 0), labels=None, commands=No
     _unknown_" instead of the actual words. `_silence_` stays noise-only (that IS
     its definition) plus a few pure-zero clean samples so clean input alone
     doesn't uniquely signal any one class.
+
+    `transition_unknown`/`transition_positives` (from `make_transition_windows`,
+    train-split only) are already-cut CLIP_SAMPLES windows with deliberate
+    boundary geometry, so they skip `_random_shift` (which would destroy that
+    geometry) but still get the same clean+per-snr noise augmentation.
     """
     labels = list(labels) if labels is not None else config.LABELS
     commands = list(commands) if commands is not None else config.COMMANDS
@@ -104,11 +179,21 @@ def build_dataset(clips, noises, rng, snrs=(20, 10, 0), labels=None, commands=No
             noise = noises[int(rng.integers(0, len(noises)))]
             add(mix_at_snr(_random_shift(clip, rng), noise, snr, rng), label)
 
+    def add_fixed_window(sig, label):
+        add(sig, label)
+        for snr in snrs:
+            noise = noises[int(rng.integers(0, len(noises)))]
+            add(mix_at_snr(sig, noise, snr, rng), label)
+
     for cmd in commands:
         for clip in clips.get(cmd, []):
             add_word_clip(clip, cmd)
     for clip in clips.get("_unknown_", []):
         add_word_clip(clip, "_unknown_")
+    for win in transition_unknown or []:
+        add_fixed_window(win, "_unknown_")
+    for win, label in transition_positives or []:
+        add_fixed_window(win, label)
     n_sil = max(1, len(clips.get("_unknown_", [])))
     for _ in range(n_sil):
         noise = noises[int(rng.integers(0, len(noises)))]
@@ -394,8 +479,24 @@ def _build_and_split(
     train_clips = {k: [c for c, _ in v] for k, v in train_ws.items()}
     test_clips = {k: [c for c, _ in v] for k, v in test_ws.items()}
 
+    # Transition-aware training data (see make_transition_windows docstring):
+    # built from TRAIN-split command-word clips ONLY, never test, to avoid
+    # leakage. ~2000 boundary-straddling "_unknown_" negatives + ~4000
+    # word-in-context positives (2 per pair) -- teaches the model what
+    # inter-word transition audio looks like, which isolated-word clips never
+    # show it.
+    command_train_clips = {w: train_clips[w] for w in words if train_clips.get(w)}
+    trans_unknown, trans_positive = make_transition_windows(command_train_clips, rng, n_pairs=2000)
+
     X_train, y_train = build_dataset(
-        train_clips, noises, rng, snrs=snrs, labels=labels, commands=words
+        train_clips,
+        noises,
+        rng,
+        snrs=snrs,
+        labels=labels,
+        commands=words,
+        transition_unknown=trans_unknown,
+        transition_positives=trans_positive,
     )
     X_test, y_test = build_dataset(
         test_clips, noises, rng, snrs=snrs, labels=labels, commands=words
