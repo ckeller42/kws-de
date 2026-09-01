@@ -26,3 +26,16 @@ MODELS_DIR = _REPO_ROOT / "models"  # gitignored
 
 def label_index(label: str) -> int:
     return LABELS.index(label)
+
+
+# --- v2: wake word + slot commands (additive; v1 constants above untouched) ---
+WAKE_WORD = "Hey Bus"
+WAKE_LABELS = ["wake", "_not_"]
+DEVICES = ["Licht", "Heizung", "Kühlschrank", "Wasser"]
+ZONES = ["Küche", "Bad", "Decke", "Außen"]
+ACTIONS = ["an", "aus"]
+COMMAND_LABELS = DEVICES + ZONES + ACTIONS + ["_unknown_", "_silence_"]
+
+
+def command_index(label: str) -> int:
+    return COMMAND_LABELS.index(label)
