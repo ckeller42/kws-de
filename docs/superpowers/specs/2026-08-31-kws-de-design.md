@@ -38,7 +38,7 @@ van + ESC-50 noise ──┘        (librosa, matched          │              
 Units, each independently testable:
 
 - `kws_de.data` — fetch MSWC-de keyword subset + noise, build augmented dataset, cache
-  features. Guards on SSD mount.
+  features.
 - `kws_de.features` — MFCC front-end; **must match the on-device implementation**.
 - `kws_de.model` — DS-CNN definition.
 - `kws_de.train` — training loop (local/manual; not run in CI).
@@ -78,7 +78,7 @@ and hurt robustness. Add later only if needed.
 - **Positives + hard negatives:** MSWC German (CC BY 4.0), pulled **per-keyword via
   HuggingFace `datasets` streaming** — only the ~8 command words + a sample of random words
   for `_unknown_`. Downloading the full 1083 h to use 8 words is waste; the subset is a few
-  hundred MB and CI-reproducible. A full-corpus run is possible on the SSD as an opt-in.
+  hundred MB and CI-reproducible. A full-corpus run is possible as an opt-in.
 - **Voice-diversity fill:** optional German TTS (piper, offline) to boost positive count and
   speaker variety for words with few MSWC clips.
 - **Noise:** ESC-50 (~600 MB) + on-site van recordings, for SNR augmentation (§12-D).
@@ -144,9 +144,9 @@ hardware smoke test.
 HuggingFace `datasets` (MSWC pull) · piper (offline German TTS) · ESC-50 + van recordings ·
 esp-idf (buspi) · optional esp-idf docker for CI firmware build.
 
-Hardware: Mac = Apple M4, 10-core CPU/GPU, 16 GB, macOS 26.6 — more than enough for a tiny
-DS-CNN (minutes to low hours; compute is not the constraint, disk was — solved by the SSD +
-keyword-subset). Repo + data live on the external APFS SSD (1.6 TB free).
+Hardware: a modern laptop trains this tiny DS-CNN in minutes to low hours — compute is not
+the constraint. The keyword-subset keeps the data footprint small (a few hundred MB), so no
+special storage is required. Optional GPU acceleration on Apple Silicon via tensorflow-metal.
 
 ## 11. Non-goals (YAGNI)
 
@@ -250,8 +250,8 @@ the agent skill in `~/src/sphinx-likec4/skills/` (or its `llms.txt`). Build via
 Views to model in `docs/likec4/`:
 
 - **Pipeline view** — data flow (MSWC/TTS/noise → MFCC → DS-CNN → INT8 → artifact).
-- **Deployment view** — Mac train host + external SSD, CI (budget gates), buspi (firmware
-  build/flash), CoreS3 device (AFE → TFLM → LVGL display).
+- **Deployment view** — training host, CI (budget gates), the Pi that builds/flashes the
+  firmware, CoreS3 device (AFE → TFLM → LVGL display).
 - **Dynamic view (sequence)** — on-device runtime (mic → AFE → MFCC → TFLM → LVGL label),
   a `sequences.c4` dynamic view.
 

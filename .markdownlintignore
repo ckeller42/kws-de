@@ -1,0 +1,5 @@
+node_modules/
+data/
+models/
+# Internal planning docs carry illustrative (non-executed) code fences — not prose to lint.
+docs/superpowers/

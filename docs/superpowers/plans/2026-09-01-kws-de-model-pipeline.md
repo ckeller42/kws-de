@@ -17,7 +17,7 @@
 - Audio: 16 kHz mono, 1000 ms clips. MFCC: 30 ms window (480 samples), 20 ms hop (320 samples), 40 mel bins, 10 cepstra → feature shape `(49, 10)`.
 - Exported model: full-INT8 (int8 input+output), all ops TFLM-supported. Budgets: model ≤ 500 000 bytes, tensor-arena ≤ 300 000 bytes, MACs/inference ≤ 3 000 000, estimated latency < 30 ms.
 - Training data and model binaries are gitignored (`data/`, `models/`, `*.npy`, `*.tflite` except `tests/fixtures/**`). Data-fetch scripts are versioned; downloaded bytes are not.
-- Repo lives on the external SSD, symlinked to `~/src/kws-de`. Never commit training data or the decompiled-app provenance.
+- No machine-specific paths in code or docs (data lives under the repo's gitignored `data/`/`models/`; where those are stored is a local detail, not the project's concern).
 - Commit style: end messages with the Co-Authored-By + Claude-Session trailers. Work on a branch → PR → CI + CodeRabbit → merge; never commit to `main` directly.
 
 ---
@@ -30,13 +30,12 @@
 - Test: `tests/test_config.py`
 
 **Interfaces:**
-- Produces: `kws_de.config` with constants `SAMPLE_RATE=16000`, `CLIP_MS=1000`, `CLIP_SAMPLES=16000`, `WIN_SAMPLES=480`, `HOP_SAMPLES=320`, `N_MELS=40`, `N_MFCC=10`, `N_FRAMES=49`, `COMMANDS: list[str]`, `LABELS: list[str]`, `NUM_CLASSES=7`; budget constants `MAX_MODEL_BYTES`, `MAX_ARENA_BYTES`, `MAX_MACS`, `MAX_LATENCY_MS`; `DATA_DIR`, `MODELS_DIR` (`pathlib.Path`); `label_index(label: str) -> int`; `require_external_mounted() -> None`.
+- Produces: `kws_de.config` with constants `SAMPLE_RATE=16000`, `CLIP_MS=1000`, `CLIP_SAMPLES=16000`, `WIN_SAMPLES=480`, `HOP_SAMPLES=320`, `N_MELS=40`, `N_MFCC=10`, `N_FRAMES=49`, `COMMANDS: list[str]`, `LABELS: list[str]`, `NUM_CLASSES=7`; budget constants `MAX_MODEL_BYTES`, `MAX_ARENA_BYTES`, `MAX_MACS`, `MAX_LATENCY_MS`; `DATA_DIR`, `MODELS_DIR` (`pathlib.Path`, relative to the repo root); `label_index(label: str) -> int`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_config.py
-import pytest
 from kws_de import config
 
 def test_labels_are_commands_plus_aux():
@@ -53,10 +52,10 @@ def test_frame_count_matches_audio_geometry():
     expected = (config.CLIP_SAMPLES - config.WIN_SAMPLES) // config.HOP_SAMPLES + 1
     assert config.N_FRAMES == expected
 
-def test_require_external_mounted_raises_when_missing(monkeypatch):
-    monkeypatch.setattr(config, "EXTERNAL_MOUNT", "/no/such/mount")
-    with pytest.raises(RuntimeError, match="mount"):
-        config.require_external_mounted()
+def test_data_dirs_are_under_repo_root():
+    # Paths are repo-relative — no machine-specific absolute locations.
+    assert config.DATA_DIR.name == "data"
+    assert config.MODELS_DIR.name == "models"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -93,19 +92,11 @@ MAX_MACS = 3_000_000
 MAX_LATENCY_MS = 30
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = _REPO_ROOT / "data"
-MODELS_DIR = _REPO_ROOT / "models"
-EXTERNAL_MOUNT = "/Volumes/External"
+DATA_DIR = _REPO_ROOT / "data"      # gitignored; where it physically lives is a local detail
+MODELS_DIR = _REPO_ROOT / "models"  # gitignored
 
 def label_index(label: str) -> int:
     return LABELS.index(label)
-
-def require_external_mounted() -> None:
-    if not Path(EXTERNAL_MOUNT).is_dir():
-        raise RuntimeError(
-            f"External SSD not mounted at {EXTERNAL_MOUNT}: mount it before running "
-            "data/training steps (the repo and its data/ live on it)."
-        )
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -311,7 +302,7 @@ git commit -m "feat: SNR-targeted noise mixing for augmentation"
 - Consumes: `kws_de.config`, `kws_de.features.mfcc`, `kws_de.augment`.
 - Produces:
   - `build_dataset(clips: dict[str, list[np.ndarray]], noises: list[np.ndarray], rng, snrs=(20,10,0)) -> tuple[np.ndarray, np.ndarray]` — pure: turns per-label raw clips into `(X, y)` where `X` is float32 `(N, N_FRAMES, N_MFCC)` and `y` is int labels; commands get noise-augmented copies at each SNR, `_silence_` from noise-only, `_unknown_` from clips under key `_unknown_`.
-  - `main()` — CLI entry (`kws-data --fetch`): calls `config.require_external_mounted()`, downloads the MSWC German per-keyword subset (HF `datasets` streaming) + ESC-50, caches features to `DATA_DIR`. Thin I/O wrapper, not unit-tested.
+  - `main()` — CLI entry (`kws-data --fetch`): downloads the MSWC German per-keyword subset (HF `datasets` streaming) + ESC-50, caches features to `DATA_DIR`. Thin I/O wrapper, not unit-tested.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -384,7 +375,6 @@ def main() -> None:  # pragma: no cover - thin I/O wrapper (manual/integration)
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true")
     args = ap.parse_args()
-    config.require_external_mounted()
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     if args.fetch:
         _fetch_and_cache()
@@ -534,7 +524,7 @@ def train(X, y, epochs=30, seed=0):
 def main() -> None:  # pragma: no cover - I/O wrapper
     ap = argparse.ArgumentParser(); ap.add_argument("--epochs", type=int, default=30)
     args = ap.parse_args()
-    config.require_external_mounted(); config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     X = np.load(config.DATA_DIR / "features.npz")
     model, _ = train(X["X"], X["y"], epochs=args.epochs)
     model.save(config.MODELS_DIR / "kws.keras")
