@@ -3,6 +3,7 @@ import pytest
 
 from kws_de import config
 from kws_de.architectures import ARCHITECTURES, get
+from kws_de.architectures.ctc_encoder import build_ctc_encoder
 from kws_de.budgets import check_budgets, tflite_op_types
 from kws_de.export import to_int8_tflite
 
@@ -82,3 +83,25 @@ def test_device_runnable_architectures_export_int8_and_fit_budget():
         m = get(name)((config.N_FRAMES, config.N_MFCC, 1), n_classes=n_classes)
         blob = to_int8_tflite(m, rep)
         check_budgets(blob, m)  # must not raise
+
+
+def test_ctc_encoder_variable_length_logits():
+    from kws_de.ctc import CTC_TOKENS
+
+    n_tokens = len(CTC_TOKENS)
+    m = build_ctc_encoder(n_tokens, encoder="matchboxnet")
+    assert m.input_shape == (None, None, config.N_MFCC, 1)
+    assert m.output_shape == (None, None, n_tokens)
+
+    rng = np.random.default_rng(0)
+    x60 = rng.standard_normal((1, 60, config.N_MFCC, 1)).astype(np.float32)
+    x90 = rng.standard_normal((1, 90, config.N_MFCC, 1)).astype(np.float32)
+    out60 = m(x60, training=False).numpy()
+    out90 = m(x90, training=False).numpy()
+    assert out60.shape == (1, 60, n_tokens)
+    assert out90.shape == (1, 90, n_tokens)
+
+
+def test_ctc_encoder_rejects_unknown_encoder():
+    with pytest.raises(ValueError):
+        build_ctc_encoder(10, encoder="not-a-real-encoder")
