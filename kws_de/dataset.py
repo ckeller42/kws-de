@@ -4,11 +4,20 @@ docs/superpowers/plans/2026-09-01-kws-dataset-phase0.md.
 """
 
 import argparse
+import json
+import pickle
 
 import numpy as np
 
 from kws_de import config
-from kws_de.data import _origin_flags, build_dataset
+from kws_de.data import (
+    _fill_with_tts,
+    _origin_flags,
+    build_dataset,
+    command_words,
+    split_three_way,
+)
+from kws_de.manifest import build_manifest
 
 
 def assemble(clips_ws, noises, rng, labels, commands):
@@ -27,15 +36,44 @@ def load_split(name: str):
     return d["X"], d["y"], d["is_tts"]
 
 
-def main() -> None:  # pragma: no cover - I/O wrapper (needs the raw-clip cache)
+def build(seed: int = 0, cache_name: str = "raw_clips_merged.pkl"):  # pragma: no cover - I/O
+    """Deterministic dataset build: cached raw clips -> speaker-disjoint train/val/test
+    features + manifest, written under config.DATA_DIR. Clean per-word features only
+    (no transition-window augmentation — that is a training-time choice, kept out of the
+    reusable dataset). Returns the manifest dict."""
+    words = command_words()
+    labels = config.COMMAND_LABELS
+    # pickle: our own gitignored local cache written by kws_de.data, never untrusted input.
+    with open(config.DATA_DIR / cache_name, "rb") as fh:
+        clips_ws = pickle.load(fh)["clips"]  # noqa: S301
+    with open(config.DATA_DIR / "noise.pkl", "rb") as fh:
+        noises = pickle.load(fh)
+
+    _fill_with_tts(clips_ws, words=words)  # ensure every command word has clips
+    # Split assignment is deterministic in `seed`; augmentation uses a derived stream
+    # so the split (the reproducibility contract) is independent of augmentation draws.
+    tr_ws, va_ws, te_ws = split_three_way(clips_ws, np.random.default_rng(seed), keep_speaker=True)
+    splits = {}
+    for i, (name, ws) in enumerate((("train", tr_ws), ("val", va_ws), ("test", te_ws))):
+        X, y, is_tts = assemble(ws, noises, np.random.default_rng(seed + 1 + i), labels, words)
+        np.savez(config.DATA_DIR / f"features_{name}.npz", X=X, y=y, is_tts=is_tts)
+        splits[name] = (X, y, is_tts)
+
+    manifest = build_manifest(splits, seed=seed, labels=labels)
+    (config.DATA_DIR / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False)
+    )
+    print(
+        f"[dataset] built seed={seed}: " + ", ".join(f"{n}={splits[n][0].shape[0]}" for n in splits)
+    )
+    return manifest
+
+
+def main() -> None:  # pragma: no cover - CLI wrapper
     """`kws-dataset build [--seed N]`."""
     ap = argparse.ArgumentParser(prog="kws-dataset")
     ap.add_argument("command", choices=["build"])
     ap.add_argument("--seed", type=int, default=0)
-    ap.parse_args()
-    # 1. load cached raw (clip, speaker) dict (real MSWC + TTS-filled), see kws_de.data
-    # 2. rng = np.random.default_rng(args.seed); split_three_way(..., keep_speaker=True)
-    # 3. assemble(...) each split; np.savez data/features_{train,val,test}.npz
-    # 4. manifest = build_manifest({...}, seed=args.seed, labels=config.COMMAND_LABELS)
-    #    (config.DATA_DIR/"manifest.json").write_text(json.dumps(manifest, indent=2))
-    raise NotImplementedError("wire the cached raw clips -> split_three_way -> assemble; see plan")
+    args = ap.parse_args()
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    build(seed=args.seed)
