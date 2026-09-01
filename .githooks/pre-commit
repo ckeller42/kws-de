@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Local mirror of the fast gates in .github/workflows/ci.yml, so a lint break
+# never reaches CI. Activate once per clone with scripts/setup-hooks.sh.
+# Bypass in a pinch with `git commit --no-verify`.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+fail=0
+
+echo "[pre-commit] ruff check + format"
+uv run ruff check . || fail=1
+uv run ruff format --check . || fail=1
+
+echo "[pre-commit] markdownlint (tracked *.md; mirrors CI's ignore set)"
+# Explicit file paths skip .markdownlintignore, so replicate its dirs here. Only
+# tracked files -- CI lints a fresh checkout, so untracked/generated md (e.g.
+# docs/transducer-report.md) is intentionally out of scope. NUL-delimited +
+# xargs so it works on macOS's bash 3.2 (no mapfile) and on paths with spaces.
+md=$(git ls-files '*.md' | grep -vE '^(docs/superpowers|data|models)/')
+if [ -n "$md" ]; then
+  printf '%s\n' "$md" | tr '\n' '\0' \
+    | xargs -0 npx --yes markdownlint-cli@0.42.0 --config .markdownlint.json || fail=1
+fi
+
+if command -v gitleaks >/dev/null 2>&1; then
+  echo "[pre-commit] gitleaks"
+  gitleaks detect --source . --no-git --redact -v || fail=1
+else
+  echo "[pre-commit] gitleaks not installed -- skipped (CI still runs it)"
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "[pre-commit] FAILED -- fix the above, or 'git commit --no-verify' to bypass." >&2
+  exit 1
+fi
+echo "[pre-commit] OK"

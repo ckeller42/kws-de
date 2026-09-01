@@ -16,15 +16,26 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+# ruff pinned exactly: `ruff format` output drifts across releases, so an
+# unpinned floor makes CI's format-check flake whenever a new ruff ships.
+dev = ["pytest>=8", "ruff==0.16.5"]
 # Apple-Silicon GPU (MPS) acceleration — optional, CPU training works without it.
 metal = ["tensorflow-metal>=1.1"]
+# Piper neural TTS engine (offline, permissive-licensed German voices).
+tts = ["piper-tts>=1.2"]
+# Wake-stage training only (Piper TTS "Hey Bus" positives + microWakeWord's
+# trainer); runtime just loads the resulting tflite, no extra deps needed.
+# Not on PyPI — installed straight from its GitHub repo.
+train = ["microwakeword @ git+https://github.com/kahrendt/microWakeWord"]
 
 [project.scripts]
 kws-data = "kws_de.data:main"
 kws-train = "kws_de.train:main"
 kws-export = "kws_de.export:main"
 kws-eval = "kws_de.eval:main"
+kws-dataset = "kws_de.dataset:main"
+kws-benchmark = "kws_de.benchmark:main"
+kws-transducer = "kws_de.transducer:main"
 
 [tool.pytest.ini_options]
 # data/ is a gitignored local cache (raw MSWC/ESC-50 clips); ESC-50 ships its own

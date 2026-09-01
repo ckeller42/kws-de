@@ -22,3 +22,10 @@ firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
 firmware/dependencies.lock
+
+# local training environments + data (train/mww etc.)
+train/**/.venv/
+train/**/datasets/
+train/**/*.wav
+train/**/*.npy
+docs/_build/

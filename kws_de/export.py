@@ -32,9 +32,9 @@ def write_c_array(tflite: bytes, path) -> None:
         fh.write(f"const unsigned int g_model_len = {len(tflite)};\n")
 
 
-def write_metadata(path) -> None:
+def write_metadata(path, labels=None) -> None:
     meta = {
-        "labels": config.LABELS,
+        "labels": list(labels) if labels is not None else config.LABELS,
         "mfcc": {
             "n_mfcc": config.N_MFCC,
             "n_frames": config.N_FRAMES,
@@ -56,12 +56,19 @@ def write_metadata(path) -> None:
 def main() -> None:  # pragma: no cover - I/O wrapper
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(config.MODELS_DIR))
+    ap.add_argument("--v2", action="store_true", help="export the v2 command model (26 classes)")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    model = tf.keras.models.load_model(config.MODELS_DIR / "kws.keras")
-    feats = np.load(config.DATA_DIR / "features_train.npz")["X"][:200]
+    model_name = "command.keras" if args.v2 else "kws.keras"
+    prefix = "features_v2" if args.v2 else "features"
+    tflite_name = "command.tflite" if args.v2 else "model.tflite"
+    header_name = "command_data.h" if args.v2 else "model_data.h"
+    labels = config.COMMAND_LABELS if args.v2 else config.LABELS
+    model = tf.keras.models.load_model(config.MODELS_DIR / model_name)
+    feats = np.load(config.DATA_DIR / f"{prefix}_train.npz")["X"][:200]
     blob = to_int8_tflite(model, feats)
-    (out / "model.tflite").write_bytes(blob)
-    write_c_array(blob, out / "model_data.h")
+    (out / tflite_name).write_bytes(blob)
+    write_c_array(blob, out / header_name)
+    write_metadata(out / ("command_metadata.json" if args.v2 else "metadata.json"), labels=labels)
     write_metadata(out / "metadata.json")

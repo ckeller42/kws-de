@@ -35,6 +35,216 @@ def snr_sweep(eval_fn, snrs) -> dict:
     return {float(s): float(eval_fn(s)) for s in snrs}
 
 
+def intent_accuracy(true_intents, pred_intents) -> float:
+    """Fraction of predictions where device+zone+action all match the true intent
+    (an `Intent`/`Rejection` mismatch, e.g. a wrong slot or a rejected parse,
+    counts as wrong)."""
+    pairs = list(zip(true_intents, pred_intents, strict=True))
+    if not pairs:
+        return 0.0
+    return sum(t == p for t, p in pairs) / len(pairs)
+
+
+def evaluate_streaming(predict_fn, clips_sequences) -> dict:  # pragma: no cover
+    """Run `KeywordStream` over held-out command-clip sequences, `grammar.parse`
+    the resulting events, and score against each sequence's true intent. Thin
+    I/O glue over `intent_accuracy` — not wired up yet (v2 Task 6 follow-on)."""
+    raise NotImplementedError("wire KeywordStream + grammar.parse; see plan Task 6")
+
+
+# --- v2 Task 8 step 5: the full command catalog, end-to-end -----------------
+
+
+def build_catalog() -> list:
+    """Every VALID intent enumerated from `config.DEVICE_ACTIONS` (+ zones for
+    `config.ZONED_DEVICES` only): e.g. Intent("Licht", None, "an"),
+    Intent("Licht", "Küche", "an"), Intent("Heizung", None, "waermer"), ...
+    Bare `device action` (no zone) is included for every device, plus one
+    zoned variant per zone for zoned devices."""
+    from kws_de.grammar import Intent
+
+    catalog = []
+    for device in config.DEVICES:
+        for action in config.DEVICE_ACTIONS[device]:
+            catalog.append(Intent(device, None, action))
+            if device in config.ZONED_DEVICES:
+                for zone in config.ZONES:
+                    catalog.append(Intent(device, zone, action))
+    return catalog
+
+
+def _tts_word_clip(word: str, voice: str, rate: int = 170):  # pragma: no cover - shells out
+    """Synthesize one word via macOS `say` -> 16 kHz mono float32 array."""
+    import subprocess
+    import tempfile
+
+    import soundfile as sf
+
+    with tempfile.NamedTemporaryFile(suffix=".wav") as tf_:
+        subprocess.run(
+            [
+                "say",
+                "-v",
+                voice,
+                "-r",
+                str(rate),
+                "--data-format=LEI16@16000",
+                "-o",
+                tf_.name,
+                word,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        y, _sr = sf.read(tf_.name)
+    return y.astype(np.float32)
+
+
+def _intent_audio(intent, voice: str, word_cache: dict, gap_ms=250, pad_ms=400):  # pragma: no cover
+    """Concatenate the per-word TTS clips for one catalog intent (device [zone]
+    action), separated by silence gaps, padded with silence front/back — the
+    continuous audio a streaming detector would see."""
+    tokens = [intent.device, *([intent.zone] if intent.zone else []), intent.action]
+    gap = np.zeros(int(config.SAMPLE_RATE * gap_ms / 1000), np.float32)
+    pad = np.zeros(int(config.SAMPLE_RATE * pad_ms / 1000), np.float32)
+    parts = [pad]
+    for tok in tokens:
+        parts.append(word_cache[(tok, voice)])
+        parts.append(gap)
+    parts.append(pad)
+    return np.concatenate(parts)
+
+
+def make_command_predict_fn(tflite_bytes: bytes):  # pragma: no cover - needs tflite runtime
+    """INT8-tflite command model -> predict_fn(1s window) -> float posterior
+    over config.COMMAND_LABELS (dequantized from the int8 output tensor)."""
+    import tensorflow as tf
+
+    from kws_de.features import mfcc
+
+    itp = tf.lite.Interpreter(model_content=tflite_bytes)
+    itp.allocate_tensors()
+    inp = itp.get_input_details()[0]
+    out = itp.get_output_details()[0]
+    in_scale, in_zp = inp["quantization"]
+    out_scale, out_zp = out["quantization"]
+
+    def predict_fn(window: np.ndarray) -> np.ndarray:
+        feat = mfcc(window)[None, ..., None].astype(np.float32)
+        q = np.round(feat / in_scale + in_zp).astype(np.int8)
+        itp.set_tensor(inp["index"], q)
+        itp.invoke()
+        raw = itp.get_tensor(out["index"])[0].astype(np.float32)
+        return (raw - out_zp) * out_scale
+
+    return predict_fn
+
+
+def _stream_events(predict_fn, audio, labels, step_samples, **stream_kwargs) -> list:
+    # pragma: no cover - I/O glue (real model + real audio)
+    """Slide a trailing 1s window over `audio` every `step_samples`, running
+    `predict_fn` + `KeywordStream` to collect the ordered keyword events."""
+    from kws_de.stream import KeywordStream
+
+    ks = KeywordStream(predict_fn, labels, **stream_kwargs)
+    events = []
+    n = len(audio)
+    pos = config.CLIP_SAMPLES
+    if n < pos:
+        audio = np.pad(audio, (pos - n, 0))
+        n = pos
+    while pos <= n:
+        window = audio[pos - config.CLIP_SAMPLES : pos]
+        events += ks.push(predict_fn(window))
+        pos += step_samples
+    return events
+
+
+def run_catalog_eval(  # pragma: no cover - orchestration (real TTS + real model)
+    predict_fn,
+    voices,
+    noises=None,
+    snr=None,
+    seed=0,
+    step_ms=100,
+    smooth_win=3,
+    threshold=0.5,
+    min_consecutive=2,
+    gap_steps=2,
+) -> dict:
+    """Run the FULL command catalog end-to-end: synthesize each catalog intent
+    (several voices), run audio -> mfcc -> KeywordStream -> grammar.parse, and
+    score against the true intent. Returns overall + per-entry + per-slot
+    accuracy. `noises`/`snr` optionally mix the synthesized audio for the SNR
+    sweep (see docs/eval-report-v2.md)."""
+    from kws_de.augment import mix_at_snr
+    from kws_de.data import command_words
+    from kws_de.grammar import Intent, parse
+
+    rng = np.random.default_rng(seed)
+    catalog = build_catalog()
+    words = command_words()
+    word_cache = {(w, v): _tts_word_clip(w, v) for w in words for v in voices}
+    step_samples = int(config.SAMPLE_RATE * step_ms / 1000)
+
+    per_entry = []
+    total = correct = 0
+    device_correct = action_correct = 0
+    zone_correct = zone_total = 0
+    for intent in catalog:
+        entry_trials = entry_correct = 0
+        for voice in voices:
+            audio = _intent_audio(intent, voice, word_cache)
+            if noises is not None and snr is not None:
+                noise_clip = noises[int(rng.integers(0, len(noises)))]
+                audio = mix_at_snr(audio, noise_clip, snr, rng)
+            events = _stream_events(
+                predict_fn,
+                audio,
+                config.COMMAND_LABELS,
+                step_samples,
+                smooth_win=smooth_win,
+                threshold=threshold,
+                min_consecutive=min_consecutive,
+                gap_steps=gap_steps,
+            )
+            pred = parse(events)
+            total += 1
+            entry_trials += 1
+            if pred == intent:
+                correct += 1
+                entry_correct += 1
+            if isinstance(pred, Intent):
+                device_correct += int(pred.device == intent.device)
+                action_correct += int(pred.action == intent.action)
+            if intent.zone is not None:
+                zone_total += 1
+                if isinstance(pred, Intent) and pred.zone == intent.zone:
+                    zone_correct += 1
+        per_entry.append(
+            {
+                "intent": intent,
+                "trials": entry_trials,
+                "correct": entry_correct,
+                "accuracy": entry_correct / entry_trials if entry_trials else 0.0,
+            }
+        )
+    return {
+        "overall_accuracy": correct / total if total else 0.0,
+        "total_trials": total,
+        "per_entry": per_entry,
+        "device_accuracy": device_correct / total if total else 0.0,
+        "action_accuracy": action_correct / total if total else 0.0,
+        "zone_accuracy": (zone_correct / zone_total) if zone_total else None,
+        "voices": list(voices),
+        "smooth_win": smooth_win,
+        "threshold": threshold,
+        "min_consecutive": min_consecutive,
+        "gap_steps": gap_steps,
+        "step_ms": step_ms,
+    }
+
+
 def render_report(results: dict) -> str:
     lines = [
         "## Evaluation summary",
@@ -118,6 +328,166 @@ def _origin_counts(cached_clips: dict) -> dict:
     return counts
 
 
+def _origin_counts_for(cached_clips: dict, words: list) -> dict:
+    """Like `_origin_counts` but over an arbitrary word list (v2 vocab)."""
+    counts = {}
+    for label in [*words, "_unknown_"]:
+        items = cached_clips.get(label, [])
+        n_tts = sum(1 for _, spk in items if spk.startswith("tts:"))
+        counts[label] = {"real": len(items) - n_tts, "tts": n_tts, "total": len(items)}
+    return counts
+
+
+def _write_catalog_report(out: str) -> None:  # pragma: no cover - I/O wrapper (manual/integration)
+    """Task 8 step 5: build+run the full command catalog end-to-end (audio ->
+    mfcc -> KeywordStream -> grammar.parse -> Intent) against the trained
+    INT8 command model, and write docs/eval-report-v2.md."""
+    import pickle
+
+    from kws_de import budgets
+    from kws_de.data import _TTS_RATES, _TTS_VOICES, command_words
+
+    tflite_bytes = (config.MODELS_DIR / "command.tflite").read_bytes()
+    predict_fn = make_command_predict_fn(tflite_bytes)
+
+    with open(config.DATA_DIR / "noise.pkl", "rb") as fh:
+        noises = pickle.load(fh)
+
+    eval_voices = _TTS_VOICES[:4]
+    sweep_voices = _TTS_VOICES[:2]
+
+    clean = run_catalog_eval(predict_fn, eval_voices, seed=0)
+    snr_points = [20.0, 10.0, 0.0]
+    sweep = {}
+    for snr in snr_points:
+        r = run_catalog_eval(predict_fn, sweep_voices, noises=noises, snr=snr, seed=int(snr) + 1)
+        sweep[snr] = r["overall_accuracy"]
+
+    # provenance: real (MSWC) vs TTS clip counts for the v2 vocab. Prefer the
+    # single merged+TTS-filled cache (v1 real clips reused + v2 real fetch +
+    # TTS fill, all in one file) if present so word counts aren't double
+    # counted/overwritten across separate v1/v2 cache files.
+    words = command_words()
+    origin = {}
+    merged_path = config.DATA_DIR / "raw_clips_merged.pkl"
+    if merged_path.exists():
+        with open(merged_path, "rb") as fh:
+            cached = pickle.load(fh)["clips"]
+        origin = _origin_counts_for(cached, words)
+    else:
+        for cache_name in ("raw_clips.pkl", "raw_clips_v2.pkl"):
+            p = config.DATA_DIR / cache_name
+            if p.exists():
+                with open(p, "rb") as fh:
+                    cached = pickle.load(fh)["clips"]
+                origin.update(_origin_counts_for(cached, words))
+
+    model_bytes = len(tflite_bytes)
+    is_int8 = budgets.is_full_int8(tflite_bytes)
+    ops = sorted(budgets.tflite_op_types(tflite_bytes))
+
+    wake_report = None
+    wake_path = config.MODELS_DIR / "hey_bus.tflite"
+    if wake_path.exists():
+        wake_report = budgets.check_wake_budgets(wake_path.read_bytes())
+
+    report = "# kws-de v2 Evaluation Report — command catalog (Task 8)\n\n"
+    report += (
+        "**Method:** every entry below is a VALID intent enumerated from "
+        "`config.DEVICE_ACTIONS` (+ zones for `Licht` only). For each entry, the "
+        "device/zone/action WORDS are TTS-synthesized (macOS `say`, several German "
+        f"voices: {', '.join(eval_voices)}) and concatenated with silence gaps into "
+        "one continuous utterance — the audio a streaming detector would see. That "
+        "audio is run through the FULL pipeline: sliding-window `kws_de.features.mfcc` "
+        "-> the trained INT8 command model -> `kws_de.stream.KeywordStream` -> "
+        "`kws_de.grammar.parse` -> `Intent`, compared against the true intent. "
+        "**All catalog phrases are TTS, not real recorded commands** — this measures "
+        "the streaming+grammar composition end-to-end, not raw word-recognition "
+        "accuracy on natural speech (see the per-word real/TTS provenance table for "
+        "how much of the underlying vocabulary is real MSWC speech vs TTS-filled).\n\n"
+    )
+
+    report += f"## Overall full-intent accuracy: {clean['overall_accuracy']:.3f}\n\n"
+    report += f"({clean['total_trials']} trials = {len(clean['per_entry'])} catalog entries "
+    report += f"x {len(eval_voices)} voices)\n\n"
+    report += "## Per-slot accuracy (clean)\n\n"
+    report += f"- Device: {clean['device_accuracy']:.3f}\n"
+    report += f"- Action: {clean['action_accuracy']:.3f}\n"
+    zone_acc = clean["zone_accuracy"]
+    report += f"- Zone (Licht only): {zone_acc:.3f}\n" if zone_acc is not None else ""
+
+    report += "\n## Command catalog — per-entry full-intent accuracy\n\n"
+    report += "| Device | Zone | Action | Accuracy | Trials |\n|---|---|---|---|---|\n"
+    for row in clean["per_entry"]:
+        i = row["intent"]
+        report += (
+            f"| {i.device} | {i.zone or '-'} | {i.action} | "
+            f"{row['accuracy']:.3f} | {row['trials']} |\n"
+        )
+
+    report += "\n## SNR sweep — overall full-intent accuracy\n\n"
+    report += f"(2 voices per entry: {', '.join(sweep_voices)})\n\n"
+    report += "| SNR (dB) | Full-intent accuracy |\n|---|---|\n"
+    report += f"| clean | {clean['overall_accuracy']:.3f} |\n"
+    for snr in snr_points:
+        report += f"| {snr:.0f} | {sweep[snr]:.3f} |\n"
+
+    report += "\n## Command model budget (INT8)\n\n"
+    report += f"- Model size: {model_bytes} bytes (budget {config.MAX_MODEL_BYTES})\n"
+    report += f"- Full INT8: {is_int8}\n"
+    report += f"- Ops: {', '.join(ops)}\n"
+
+    report += '\n## Wake model ("Hey Bus") budget\n\n'
+    if wake_report is not None:
+        report += f"- Model size: {wake_report['model_bytes']} bytes (budget 150 000)\n"
+        report += (
+            f"- 8-bit quantized: {wake_report['quantized_8bit']} "
+            f"(int8 I/O: {wake_report['int8']}; microWakeWord exports uint8)\n"
+        )
+    else:
+        report += (
+            "Not trained in this run — microWakeWord's trainer requires Piper "
+            "sample generation (a separate ~cloned repo + TTS voice checkpoint, "
+            "not present locally) plus several GB of pre-generated negative/ambient "
+            "spectrogram feature sets from HuggingFace (`kahrendt/microwakeword`: "
+            "dinner_party, dinner_party_eval, no_speech, speech). Neither was fetched "
+            "in this run (out of scope for the time budget here). The local 3.10 "
+            "venv with `microwakeword` installed and importable is proven "
+            "(`train/mww/setup.sh`), and the runtime integration path — "
+            "`kws_de.wake.WakeDetector` + `load_wake_tflite` + "
+            "`kws_de.budgets.check_wake_budgets` — is unit-tested against a "
+            "stand-in INT8 tflite, but no real `hey_bus.tflite` was produced.\n"
+        )
+
+    report += "\n## Vocabulary provenance (real MSWC vs TTS-added)\n\n"
+    report += "| Word | Real (MSWC) | TTS-added | Total |\n|---|---|---|---|\n"
+    for w in words:
+        o = origin.get(w, {"real": 0, "tts": 0, "total": 0})
+        report += f"| {w} | {o['real']} | {o['tts']} | {o['total']} |\n"
+    report += (
+        f"\nTTS source for both training-data fill and catalog synthesis: macOS `say`, "
+        f"German voices ({', '.join(_TTS_VOICES)}) at rates "
+        f"{_TTS_RATES[0]}-{_TTS_RATES[-1]} wpm.\n"
+    )
+
+    report += (
+        "\n## vs v1 / MultiNet\n\n"
+        "v1 measured word-level command accuracy on 5 devices (no grammar, no "
+        "streaming composition). v2 measures a strictly harder, end-to-end task: "
+        "full intent (device+zone+action) recovered from continuous synthesized "
+        "speech through the streaming detector and grammar — a single wrong/missed "
+        "word anywhere in the phrase fails the whole entry. The headline number "
+        "above is therefore not directly comparable to v1's per-word accuracy or "
+        "to MultiNet's isolated-word numbers; it is the number that matters for "
+        "actually using the assistant.\n"
+    )
+
+    out_path = config.DATA_DIR.parent / out
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(report)
+    print(f"wrote {out_path}")
+
+
 def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
     import tensorflow as tf
 
@@ -126,7 +496,16 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="docs/eval-report.md")
+    ap.add_argument(
+        "--v2-catalog",
+        action="store_true",
+        help="run the v2 full command-catalog end-to-end eval instead of the v1 report",
+    )
     args = ap.parse_args()
+    if args.v2_catalog:
+        out = args.out if args.out != "docs/eval-report.md" else "docs/eval-report-v2.md"
+        _write_catalog_report(out)
+        return
 
     model = tf.keras.models.load_model(config.MODELS_DIR / "kws.keras")
     tflite_bytes = (config.MODELS_DIR / "model.tflite").read_bytes()

@@ -1,0 +1,109 @@
+// kws-de architecture model — training pipeline, deployment, on-device runtime.
+// Views are embedded in the Sphinx docs via `.. likec4-view:: <id>`.
+
+specification {
+  element actor
+  element system
+  element container
+  element component
+  element datastore
+
+  tag v1
+  tag v2
+  tag external
+}
+
+model {
+  user = actor 'Camper occupant' 'Speaks German commands in the van'
+
+  // ---------------- training side (Mac, offline) ----------------
+  trainhost = system 'Training host' 'Laptop — Python 3.11 (uv), TensorFlow/Keras' {
+
+    data = container 'Data pipeline' 'kws_de.data' {
+      description 'MSWC keyword fetch (streaming, early-stop), TTS gap-fill, SNR noise augmentation, speaker/voice-disjoint split'
+    }
+    tts = container 'Multi-engine TTS' 'kws_de.tts' {
+      description 'macOS say + Piper + Parler (+ optional XTTS-v2), round-robin across voices for diversity'
+    }
+    features = container 'MFCC front-end' 'kws_de.features' {
+      description '16 kHz / 1 s clips → (49×10) MFCC. Same math as on-device; golden-vector contract'
+    }
+    training = container 'Training' 'kws_de.model + kws_de.train' {
+      description 'DS-CNN (depthwise-separable); v1: 7 classes, v2: 26-class slot vocab'
+    }
+    export = container 'INT8 export' 'kws_de.export' {
+      description 'full-INT8 TFLite + C-array header + metadata.json'
+    }
+    budgets = container 'Budget gates' 'kws_de.budgets' {
+      description 'size / MACs / INT8 / TFLM-ops assertions — the "fits the ESP32" proof without hardware'
+    }
+    evalcat = container 'Catalog eval' 'kws_de.eval' {
+      description 'end-to-end: synth utterance → MFCC → stream → grammar → intent; per-command accuracy, SNR sweep'
+    }
+    mww = container 'microWakeWord trainer' 'train/mww (own Python 3.10 venv)' {
+      #external
+      description 'Piper positives for "Hey Bus" → streaming wake model (TFLite-Micro)'
+    }
+  }
+
+  mswc = datastore 'MSWC' 'Multilingual Spoken Words Corpus — real German word clips (CC BY 4.0)' { #external }
+  esc50 = datastore 'ESC-50' 'environmental noise clips for SNR augmentation' { #external }
+
+  ci = system 'GitHub CI' 'pytest + coverage gate, ruff, markdownlint, gitleaks; budget gates rerun on fixtures' { #external }
+
+  // ---------------- device side ----------------
+  pi = system 'Edge box (Raspberry Pi)' 'holds the ESP-IDF toolchain; builds + flashes the firmware' { #external }
+
+  esp = system 'ESP32-S3 satellite (M5Stack CoreS3)' 'always-on voice control, fully offline' {
+    mic = component 'Mics + AFE' 'ESP-SR: AEC, noise suppression, VAD' { #v2 }
+    mfccdev = component 'MFCC (esp-dsp)' 'must match the host front-end bit-for-bit' { #v1 }
+    wake = component 'Wake detector' '"Hey Bus" — microWakeWord streaming model, always-on, tiny' { #v2 }
+    cmdmodel = component 'Command recogniser' 'INT8 DS-CNN via TFLite-Micro + ESP-NN, streamed' { #v1 }
+    stream = component 'KeywordStream' 'posterior smoothing + threshold + debounce → keyword events' { #v2 }
+    grammar = component 'Grammar slot-filler' 'device → zone? → action; DEVICE_ACTIONS validity → Intent' { #v2 }
+    display = component 'LCD (LVGL)' 'shows the recognised word / intent' { #v1 }
+    ble = component 'Camper control' 'BLE write to the camper unit (firmware follow-on)' { #v2 }
+  }
+
+  // ---------------- relations ----------------
+  mswc -> data 'real word clips (streaming fetch)'
+  esc50 -> data 'noise clips'
+  tts -> data 'synthetic clips for words MSWC lacks'
+  data -> features 'augmented clips'
+  features -> training 'MFCC tensors'
+  training -> export 'trained Keras model'
+  export -> budgets 'model.tflite'
+  export -> evalcat 'INT8 command model'
+  mww -> budgets 'hey_bus.tflite (byte-level budget check)'
+  trainhost -> ci 'push → PR checks'
+  export -> pi 'model_data.h / command_data.h'
+  mww -> pi 'hey_bus.tflite'
+  pi -> esp 'build + flash (USB)'
+
+  user -> mic 'speaks "Hey Bus … Licht Küche an"'
+  mic -> mfccdev 'clean audio frames'
+  mfccdev -> wake 'features (always-on path)'
+  wake -> cmdmodel 'opens ~3 s command window'
+  cmdmodel -> stream 'per-class posteriors'
+  stream -> grammar 'keyword events'
+  grammar -> display 'intent (shown)'
+  grammar -> ble 'intent → control write'
+}
+
+views {
+
+  view pipeline of trainhost {
+    title 'Training pipeline (Mac)'
+    include *, mswc, esc50, ci, pi
+  }
+
+  view deployment {
+    title 'Deployment — who runs what'
+    include user, trainhost, ci, pi, esp, mswc, esc50
+  }
+
+  view device of esp {
+    title 'On-device runtime (ESP32-S3)'
+    include *, user, pi
+  }
+}

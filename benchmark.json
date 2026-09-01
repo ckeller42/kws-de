@@ -1,0 +1,32 @@
+[
+  {
+    "name": "ds_cnn",
+    "isolated_acc": 0.8344878772884711,
+    "catalog_acc": 0.54421768707483,
+    "catalog_trials": 147,
+    "params": 5879,
+    "macs": 2070496,
+    "int8_bytes": 20216,
+    "budget_ok": true
+  },
+  {
+    "name": "bc_resnet",
+    "isolated_acc": 0.7733795150915388,
+    "catalog_acc": 0.10204081632653061,
+    "catalog_trials": 147,
+    "params": 4919,
+    "macs": 1390584,
+    "int8_bytes": 31152,
+    "budget_ok": true
+  },
+  {
+    "name": "matchboxnet",
+    "isolated_acc": 0.9030183077684315,
+    "catalog_acc": 0.24489795918367346,
+    "catalog_trials": 147,
+    "params": 12957,
+    "macs": 467070,
+    "int8_bytes": 42840,
+    "budget_ok": true
+  }
+]

@@ -6,7 +6,9 @@ Trains a tiny INT8 DS-CNN on public German speech data, exports a
 `model.tflite` + C-array header that runs on-device via TensorFlow Lite Micro + ESP-NN,
 and ships a minimal ESP-IDF demo that shows the recognised word on the CoreS3 display.
 
-Design & rationale (with algorithm citations): `docs/superpowers/specs/2026-08-31-kws-de-design.md`.
+Design & rationale (with algorithm citations): `docs/superpowers/specs/`.
+**Docs site** (architecture + LikeC4 diagrams + eval reports): <https://ckeller42.github.io/kws-de/>
+— build locally with `pip install -r docs/requirements.txt && python -m sphinx -b html docs docs/_build/html` (node ≥ 20 required).
 
 ## Scope
 
@@ -40,9 +42,15 @@ Model is embedded as a C array (no SD card — the CoreS3 BSP cannot use SD and 
 ## Development
 
 ```bash
+./scripts/setup-hooks.sh   # once per clone: activate the git hooks (.githooks/)
 uv run ruff check . && uv run ruff format --check .
 uv run pytest -q
 ```
+
+`setup-hooks.sh` points `core.hooksPath` at `.githooks/`: **pre-commit** runs ruff +
+markdownlint (+ gitleaks if installed), **pre-push** runs the tests — the same gates as CI,
+so a break is caught locally. Bypass a hook with `--no-verify`. Claude Code sessions also lint
+each edited file via a `.claude/` PostToolUse hook.
 
 CI (`.github/workflows/ci.yml`): ruff + pytest/coverage, markdownlint, gitleaks. Work on a
 branch, open a PR, wait for CI + CodeRabbit, then merge — never commit straight to `main`.

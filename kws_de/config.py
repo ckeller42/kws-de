@@ -26,3 +26,38 @@ MODELS_DIR = _REPO_ROOT / "models"  # gitignored
 
 def label_index(label: str) -> int:
     return LABELS.index(label)
+
+
+# --- v2: wake word + slot commands (additive; v1 constants above untouched) ---
+WAKE_WORD = "Hey Bus"
+WAKE_LABELS = ["wake", "_not_"]
+DEVICES = ["Licht", "Kühlschrank", "Heizung", "Aufstelldach"]
+ZONES = ["Küche", "Dach", "Außen", "Lesen"]  # light zones — apply to Licht only
+# Light brightness levels (Licht only). Spoken German number words (single tokens for KWS);
+# map to the app's 0-10 brightness scale: fünfundzwanzig≈3, fünfzig=5, fünfundsiebzig≈8, hundert=10.
+LIGHT_LEVELS = ["fünfundzwanzig", "fünfzig", "fünfundsiebzig", "hundert"]
+ACTIONS = [
+    "an",
+    "aus",
+    "auf",
+    "zu",
+    "heller",
+    "dunkler",
+    "wärmer",
+    "kälter",
+    "leise",
+    *LIGHT_LEVELS,
+]
+ZONED_DEVICES = ["Licht"]
+# Per-device allowed actions — grounded in the real controllable functions.
+DEVICE_ACTIONS = {
+    "Licht": ["an", "aus", "heller", "dunkler", *LIGHT_LEVELS],
+    "Kühlschrank": ["an", "aus", "leise"],
+    "Heizung": ["an", "aus", "wärmer", "kälter"],
+    "Aufstelldach": ["auf", "zu"],
+}
+COMMAND_LABELS = DEVICES + ZONES + ACTIONS + ["_unknown_", "_silence_"]
+
+
+def command_index(label: str) -> int:
+    return COMMAND_LABELS.index(label)
