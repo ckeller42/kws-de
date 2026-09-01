@@ -4,9 +4,9 @@ project = "kws-de"
 author = "kws-de"
 
 extensions = [
-    "myst_parser",             # markdown pages on the site
-    "sphinxcontrib.mermaid",   # ```mermaid fences
-    "sphinx_likec4",           # .. likec4-view:: <id> — architecture diagrams
+    "myst_parser",  # markdown pages on the site
+    "sphinxcontrib.mermaid",  # ```mermaid fences
+    "sphinx_likec4",  # .. likec4-view:: <id> — architecture diagrams
 ]
 likec4_source_dir = "likec4"
 
