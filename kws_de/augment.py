@@ -26,3 +26,18 @@ def measure_snr(signal, noisy):
     p_sig = float(np.mean(sig**2))
     p_nz = float(np.mean(nz**2)) or 1e-12
     return 10 * np.log10(p_sig / p_nz)
+
+
+def perturb(sig, n_steps: float, rate: float, sr: int = 16000) -> np.ndarray:
+    """Pitch-shift by `n_steps` semitones and time-stretch by `rate` (>1 = faster, shorter).
+    Length changes with `rate`; callers re-fit to CLIP_SAMPLES (build_dataset's
+    _random_shift pads/crops). Pure and deterministic in its arguments — the caller draws
+    the random n_steps/rate so the dataset build stays reproducible from one seed."""
+    import librosa
+
+    x = np.asarray(sig, dtype=np.float32)
+    if n_steps:
+        x = librosa.effects.pitch_shift(x, sr=sr, n_steps=n_steps)
+    if rate != 1.0:
+        x = librosa.effects.time_stretch(x, rate=rate)
+    return np.asarray(x, dtype=np.float32)

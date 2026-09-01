@@ -115,22 +115,97 @@ speaker. This is the paper's central honesty discipline.
 ### 4.3 Splits and reproducibility
 
 Splits are **speaker-disjoint**: real words split by `speaker_id`; TTS words by a synthetic speaker
-id (`engine:voice:rate`) so a voice never straddles train and test. The reusable dataset (in
+id (`engine:voice`) so a voice never straddles train and test. The reusable dataset (in
 progress) adds a **validation split** (so model selection never touches test), a **manifest**
 (per-word counts, config, content hashes — verifiable without shipping audio), a **deterministic
-rebuild** from one seed, and a **datasheet** (Gebru et al.) stating that 17/23 words are synthetic
-and that a real-microphone benchmark remains future work.
+rebuild** from one seed given the cached clips (Piper synthesis itself is stochastic per call, so
+the clip cache — pinned by the manifest's content hashes — is the actual reproducibility anchor),
+and a **datasheet** (Gebru et al.) stating that 15 of the 21 command words
+are synthetic-only and that a real-microphone benchmark remains future work.
+
+### 4.4 Statistics and examples
+
+The frozen v2 feature set (seed 0) holds **28 259 one-second examples** over 23 classes: 21 command
+words plus `_unknown_` (other MSWC-German words, at most a few clips per word so no single
+distractor dominates) and `_silence_` (noise-only). Each source clip yields four rows — a randomly
+time-shifted clean copy and ESC-50 noise mixes at 20, 10 and 0 dB SNR — so 1 200 rows ≈ 300 source
+clips per word. Splits are speaker-disjoint (§4.3):
+
+| Split | Rows | Real | TTS |
+|---|---|---|---|
+| train | 20 116 | 6 544 | 13 572 |
+| val | 4 101 | 1 241 | 2 860 |
+| test | 4 042 | 1 186 | 2 856 |
+
+Provenance per word (rows, all splits):
+
+| Provenance | Words | Rows per word |
+|---|---|---|
+| real only (MSWC) | Licht, Kühlschrank, aus, auf | 1 200 real |
+| mixed | Heizung (480 real + 720 TTS), Außen (632 + 568) | 1 200 |
+| TTS only | Aufstelldach, Küche, Dach, Lesen, an, zu, heller, dunkler, wärmer, kälter, leise, fünfundzwanzig, fünfzig, fünfundsiebzig, hundert | 1 200 TTS |
+| non-command | `_unknown_` 2 400 real, `_silence_` 659 real | – |
+
+Real-speech numbers exclude every TTS row; in this set that leaves six words and the two
+non-command classes, while the fifteen TTS-only words shape the confusion structure but never the
+headline number. Synthetic speakers carry ids such as `tts:piper:de_DE-thorsten-medium`
+(v2 ids also carried the speaking rate) so the split holds out whole voices.
+
+Concise examples of what the system sees and decides:
+
+- **Word clip → class.** A 1 s clip of "Kühlschrank" → MFCC 49×10 → class `Kühlschrank`; an MSWC
+  clip of "Fenster" → `_unknown_`; 1 s of ESC-50 rain → `_silence_`.
+- **Event sequence → intent (grammar, §3).** `[Licht, Küche, an]` →
+  `Intent(device=Licht, zone=Küche, action=an)`; `[Heizung, wärmer]` →
+  `Intent(Heizung, –, wärmer)`; `[Licht, fünfzig]` → `Intent(Licht, –, fünfzig)` (50 %).
+- **Rejections (no model involved).** `[Kühlschrank, heller]` → `Rejection("heller invalid for
+  Kühlschrank")`; `[Küche, an]` → `Rejection("zone out of order")`.
+- **Catalog (E3).** The grammar's 49 valid intents — every (device, zone?, action) the van can
+  execute — synthesised as spoken phrases per voice, e.g. "Licht Außen aus", "Aufstelldach zu".
 
 ## 5. Method
 
-**Front-end.** 16 kHz, 1 s clips → MFCC (30 ms window / 20 ms hop, 40 mel, 10 cepstra → 49×10). The
-host (librosa) and device (esp-dsp) front-ends are pinned bit-for-bit by a fixed-input **golden-vector
-test** — the classic silent train/deploy mismatch becomes a unit test.
+**Front-end.** 16 kHz, 1 s clips → MFCC (30 ms periodic-Hann window / 20 ms hop, 480-point FFT
+(241 bins), 40 Slaney mel bands, log with an 80 dB floor, DCT-II, 10 cepstra → a 49×10 feature map).
+The host front-end is librosa; the device front-end is a table-driven C port (window, mel and DCT
+matrices generated from the same Python configuration) pinned to the host by a fixed-input
+**golden-vector test** — the classic silent train/deploy mismatch becomes a unit test.
 
-**Model and quantization.** A small DS-CNN (~5 k params), full-INT8 via representative-dataset
-calibration, exported to TFLite-Micro (ESP-NN kernels). **CI budget gates** assert model ≤ 500 KB,
-MACs ≤ 3 M, INT8-only I/O, and that every op is device-runnable — "fits the MCU" as a test, no
-hardware required.
+**Model architecture.** The deployed command recogniser is a depthwise-separable CNN in the
+"Hello Edge" family (Zhang et al., 2017), kept deliberately plain so every layer lowers to a
+TFLite-Micro builtin:
+
+| Stage | Layer | Output | Params |
+|---|---|---|---|
+| input | MFCC map (frames × cepstra × 1) | 49×10×1 | – |
+| stem | Conv2D 3×3, 32 filters, no bias → BatchNorm → ReLU | 49×10×32 | 288 + 128 |
+| block ×3 | DepthwiseConv2D 3×3 → BN → ReLU → Conv2D 1×1, 32 filters → BN → ReLU | 49×10×32 | 3 × (288 + 128 + 1 024 + 128) |
+| pool | global average over time and cepstra (`MEAN`) | 32 | – |
+| head | Dense 32 → 23, softmax | 23 | 759 |
+
+5 879 parameters, 2.07 M MACs per 1 s window (the 1×1 pointwise convolutions dominate:
+49·10·32·32 ≈ 0.5 M each). There is no striding, pooling or dropout inside the stack — the feature
+map stays at full 49×10 resolution and the receptive field grows only through the four 3×3 stages
+(9 frames ≈ 190 ms of context per output cell, with global pooling supplying the rest). BatchNorm is
+folded into the convolutions at export; the INT8 graph uses exactly `CONV_2D`, `DEPTHWISE_CONV_2D`,
+`MEAN`, `FULLY_CONNECTED` and `SOFTMAX` and is 20.2 KB. Output classes are the 21 command words plus
+`_unknown_` and `_silence_` (§3). Three alternative encoders (MatchboxNet, BC-ResNet, the Keyword
+Transformer) are benchmarked against it in §6.7.
+
+**Teacher and distillation (E9).** The teacher is a Keyword Transformer (Berg et al., 2021): each of
+the 49 MFCC frames is linearly projected to d = 64, a learned class token is prepended and learned
+positional embeddings added, then 3 pre-LayerNorm encoder blocks (4-head self-attention with key
+dimension 16, MLP 64 → 128 → 64 with ReLU, residuals) and a final LayerNorm; the class-token output
+feeds a Dense softmax (106 k parameters, float only — its attention/LayerNorm ops do not lower to
+INT8 TFLite-Micro, §6.7). The student is the unchanged DS-CNN above, trained on
+α · CE(y, p_s) + (1 − α) · T² · KL(p_t^T ‖ p_s^T) with T = 4, α = 0.5, where p^T denotes the
+softmax at temperature T (Hinton et al., 2015).
+
+**Quantization and budget gates.** Full-INT8 post-training quantization with a class-balanced
+representative set (E10), exported to TFLite-Micro (ESP-NN kernels). **CI budget gates** assert
+model ≤ 500 KB, MACs ≤ 3 M, INT8-only I/O, and that every op is device-runnable — "fits the MCU" as
+a test, no hardware required. Batch size 32 through E8, 128 from E9 on (throughput; see
+`docs/paper-notes.md`).
 
 **Two-stage runtime.** An always-on **wake detector** ("Hey Bus", microWakeWord) gates the heavier
 **command recogniser**, which runs streaming inside the post-wake window. The command model's
@@ -293,6 +368,43 @@ The **frame-classifier + grammar (0.689, 20 KB INT8) remains the working, deploy
 the streaming transducer is now a device-runnable but under-trained direction whose one remaining
 blocker this experiment names precisely — phrase-data scale.
 
+### E9 — Knowledge distillation (KWT → DS-CNN)
+
+On the frozen v2 split (§4.3), we distilled the KWT teacher (§6.7; INT8-exports but is not
+device-runnable) into the unchanged DS-CNN student (`kws_de.distill.distill`, `T=4.0`, `alpha=0.5`,
+40 epochs, seed 0, batch 128 — see
+`docs/superpowers/specs/2026-09-01-real-speech-distill-design.md` §4). Teacher float test accuracy:
+**0.894**.
+
+| Architecture | Float | Isolated | Catalog | Params | MACs | INT8 | Budget |
+|---|---|---|---|---|---|---|---|
+| ds_cnn (first-200 calib) | 0.862 | 0.842 | 0.218 | 5,879 | 2,070,496 | 20,224 | yes |
+| ds_cnn (balanced calib) | 0.862 | 0.853 | 0.259 | 5,879 | 2,070,496 | 20,224 | yes |
+| ds_cnn distilled (balanced calib) | 0.842 | 0.833 | 0.667 | 5,879 | 2,070,496 | 20,272 | yes |
+
+Distillation did **not** beat the baseline on the isolated per-clip metric — float accuracy fell
+0.862 → 0.842 and INT8-isolated fell 0.853 → 0.833 (both −2.0 points, balanced calibration on both
+rows). But it produced the paper's largest single-change win on the metric that reflects the
+deployed system: full-intent **catalog accuracy rose 0.259 → 0.667**, +40.8 points, 2.6× the
+undistilled baseline. This echoes §6.2/§6.7's lesson that isolated accuracy is not the task — the
+KWT teacher's softened targets appear to move the student's decision boundaries in a way that
+materially helps stream+grammar composition (fewer boundary-transition ghosts, §6.2/§6.3) even
+while very slightly hurting raw per-clip accuracy. We report this honestly as a system-level win,
+not an unqualified win on every metric.
+
+### E10 — INT8 calibration
+
+Rows 1–2 above differ only in the PTQ calibration set (`X_train[:200]` vs class-balanced
+`kws_de.export.balanced_calibration`, spec §5). Float→INT8 gap: first-200 calibration 0.862 → 0.842
+(2.0 points); balanced calibration 0.862 → 0.853 (0.9 points) — balanced calibration recovers 1.1 of
+the 2.0-point gap (55 %) on this run. (E7's originally reported 1.63-point gap, 0.8661 → 0.8498, was
+measured on an earlier ds_cnn run at 30 epochs/batch 32; this run's own first-200 row, 40
+epochs/batch 128, is the baseline the recovery above is measured against.)
+
+Per the spec's decision gate (§5): a hand-rolled fake-quant QAT becomes the next spec only if the
+balanced-calibration gap exceeds 1 % absolute. The measured balanced gap is **0.9 %**, under the
+threshold, so **QAT is closed as unnecessary** — balanced calibration alone is sufficient.
+
 ## 7. Discussion
 
 The two-stage split — a cheap always-on wake gate before a heavier command model — is what makes
@@ -311,7 +423,7 @@ data to win *on-device*.
 
 ## 8. Limitations and future work
 
-- **Synthetic data.** 17 of 23 words are TTS-only; those per-word numbers are not real-speech
+- **Synthetic data.** 15 of 21 command words are TTS-only; those per-word numbers are not real-speech
   performance. A recorded real-speaker (and real-microphone) test set is planned.
 - **Per-device robustness.** The catalog result is lighting-dominated; long compound words
   (Kühlschrank) fail under the current frame-classification + hand-rolled decoder.
@@ -338,7 +450,10 @@ steps) — plus a documented, reusable German MCU-KWS dataset. We also benchmark
 that dataset (MatchboxNet the most MAC-efficient; the Keyword Transformer accurate but not
 device-runnable) and built a streaming CTC transducer which — once its head was reformulated to a
 1×1-Conv2D and exported at fixed length — runs device-side at 42.9 KB full INT8, leaving phrase-data
-scale as the one remaining thing a connected-command model must fix here.
+scale as the one remaining thing a connected-command model must fix here. Distilling the KWT teacher
+into the deployed DS-CNN (E9) traded a small isolated-accuracy loss for a large catalog-accuracy
+gain (0.259 → 0.667), and class-balanced PTQ calibration (E10) recovered the INT8 gap to 0.9
+points — under the spec's 1 %-gate, closing QAT as unnecessary for now.
 Everything is open-source at the repository above.
 
 ## References

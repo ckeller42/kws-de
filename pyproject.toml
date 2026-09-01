@@ -36,6 +36,7 @@ kws-eval = "kws_de.eval:main"
 kws-dataset = "kws_de.dataset:main"
 kws-benchmark = "kws_de.benchmark:main"
 kws-transducer = "kws_de.transducer:main"
+kws-distill = "kws_de.distill:main"
 
 [tool.pytest.ini_options]
 # data/ is a gitignored local cache (raw MSWC/ESC-50 clips); ESC-50 ships its own

@@ -18,6 +18,7 @@ jobs:
           pytest -q --cov=kws_de.features --cov=kws_de.budgets --cov=kws_de.data \
             --cov=kws_de.grammar --cov=kws_de.stream --cov=kws_de.manifest \
             --cov=kws_de.ctc --cov=kws_de.phrases \
+            --cov=kws_de.mswc --cov=kws_de.recordings --cov=kws_de.distill \
             --cov-fail-under=85
   markdownlint:
     runs-on: ubuntu-latest
