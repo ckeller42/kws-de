@@ -1,0 +1,27 @@
+name: firmware
+on:
+  push: {branches: [main]}
+  pull_request:
+permissions: {contents: read}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: idf.py build (pinned IDF)
+        uses: espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d # v1
+        with:
+          esp_idf_version: IDF_TAG
+          target: esp32s3
+          path: firmware
+      - name: merge single flashable image
+        run: |
+          pip install esptool
+          cd firmware/build
+          esptool.py --chip esp32s3 merge_bin -o "kws-de-fw-${GITHUB_SHA::7}.bin" @flash_args
+          ls -l kws-de-fw-*.bin
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kws-de-fw-${{ github.sha }}
+          path: firmware/build/kws-de-fw-*.bin
+          retention-days: 30
