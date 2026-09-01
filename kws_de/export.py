@@ -24,6 +24,22 @@ def to_int8_tflite(model, rep_samples) -> bytes:
     return conv.convert()
 
 
+def balanced_calibration(X, y, *, per_class: int = 20, seed: int = 0) -> np.ndarray:
+    """Stratified PTQ calibration set: up to `per_class` rows per class
+    (seeded pick within class), so the quantizer sees every class's
+    activation range instead of whatever `X[:200]` happened to hold
+    (training data is grouped by label, so a prefix slice is a handful
+    of classes)."""
+    rng = np.random.default_rng(seed)
+    X = np.asarray(X, np.float32)
+    y = np.asarray(y)
+    rows = []
+    for c in np.unique(y):
+        idx = np.flatnonzero(y == c)
+        rows.extend(rng.permutation(idx)[:per_class].tolist())
+    return X[np.asarray(rows, dtype=np.int64)]
+
+
 def write_c_array(tflite: bytes, path) -> None:
     body = ", ".join(str(b) for b in tflite)
     with open(path, "w") as fh:
@@ -66,8 +82,8 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     header_name = "command_data.h" if args.v2 else "model_data.h"
     labels = config.COMMAND_LABELS if args.v2 else config.LABELS
     model = tf.keras.models.load_model(config.MODELS_DIR / model_name)
-    feats = np.load(config.DATA_DIR / f"{prefix}_train.npz")["X"][:200]
-    blob = to_int8_tflite(model, feats)
+    d = np.load(config.DATA_DIR / f"{prefix}_train.npz")
+    blob = to_int8_tflite(model, balanced_calibration(d["X"], d["y"]))
     (out / tflite_name).write_bytes(blob)
     write_c_array(blob, out / header_name)
     write_metadata(out / ("command_metadata.json" if args.v2 else "metadata.json"), labels=labels)
