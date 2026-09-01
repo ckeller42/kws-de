@@ -129,6 +129,19 @@ clips** (Licht, Kühlschrank, Heizung, Wasser, aus, auf, Außen[158]); 17 incl. 
   decoder. Best committed model remains the decoder-fix (0.362). — a genuinely publishable
   ablation: the obvious data fix makes it worse.
 
+
+- **Balanced transition fix + final command set (BEST so far)** — cut transition `_unknown_`
+  negatives (n_pairs 2000->600) + inverse-frequency `class_weight` in training, on the trimmed
+  command set (4 devices; dropped readout-only Wasser + Campingmodus/USB/Energie; added Licht
+  brightness levels 25/50/75/100 %). Full-intent catalog accuracy **0.362 -> 0.689** (196 trials,
+  49 entries x 4 voices; zone slot **0.156 -> 0.789**). This reverses the E3 negative result:
+  balanced correctly, transition-aware training + class-weighting is a large net win.
+  BUT the 0.689 is **Licht-dominated** (40 of 49 catalog entries are Licht, mostly 0.75-1.0
+  incl. the new brightness words); the non-Licht devices are weak — **Kühlschrank 0.00 (all 3),
+  Heizung ~0.25, Aufstelldach 0.6** — a per-word/streaming issue worth its own probe (Kühlschrank
+  is a long word with 300 REAL clips, yet 0/4 end-to-end -> likely stream-segmentation of the
+  long compound, not data). Honest headline: strong on lights, per-device work remains.
+
 ### E4 — wake word, local training (DONE, real numbers)
 
 microWakeWord (the ESPHome/HA wake engine) is documented as Python-3.10 + Colab/GPU. We

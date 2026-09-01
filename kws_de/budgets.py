@@ -40,6 +40,17 @@ def is_full_int8(tflite: bytes) -> bool:
     )
 
 
+def is_8bit_quantized(tflite: bytes) -> bool:
+    """8-bit quantized I/O (int8 OR uint8) — both run on TFLM/ESP-NN. microWakeWord
+    exports uint8 I/O, so the wake model is device-runnable but not strictly int8."""
+    itp = _interp(tflite)
+    ok = {np.int8, np.uint8}
+    return (
+        itp.get_input_details()[0]["dtype"] in ok
+        and itp.get_output_details()[0]["dtype"] in ok
+    )
+
+
 def check_budgets(tflite: bytes, model) -> dict:
     report = {
         "model_bytes": len(tflite),
@@ -63,8 +74,10 @@ def check_wake_budgets(tflite: bytes) -> dict:
     report = {
         "model_bytes": len(tflite),
         "int8": is_full_int8(tflite),
+        "quantized_8bit": is_8bit_quantized(tflite),
         "ops": sorted(tflite_op_types(tflite)),
     }
     assert report["model_bytes"] <= MAX_WAKE_MODEL_BYTES, "wake model too large"
-    assert report["int8"], "wake model is not full-INT8"
+    # microWakeWord exports uint8 I/O — 8-bit quantized is the device requirement, not int8.
+    assert report["quantized_8bit"], "wake model is not 8-bit quantized"
     return report

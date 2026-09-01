@@ -2,58 +2,69 @@
 
 **Method:** every entry below is a VALID intent enumerated from `config.DEVICE_ACTIONS` (+ zones for `Licht` only). For each entry, the device/zone/action WORDS are TTS-synthesized (macOS `say`, several German voices: Anna, Eddy, Flo, Grandma) and concatenated with silence gaps into one continuous utterance — the audio a streaming detector would see. That audio is run through the FULL pipeline: sliding-window `kws_de.features.mfcc` -> the trained INT8 command model -> `kws_de.stream.KeywordStream` -> `kws_de.grammar.parse` -> `Intent`, compared against the true intent. **All catalog phrases are TTS, not real recorded commands** — this measures the streaming+grammar composition end-to-end, not raw word-recognition accuracy on natural speech (see the per-word real/TTS provenance table for how much of the underlying vocabulary is real MSWC speech vs TTS-filled).
 
-## Overall full-intent accuracy: 0.362
+## Overall full-intent accuracy: 0.689
 
-(152 trials = 38 catalog entries x 4 voices)
+(196 trials = 49 catalog entries x 4 voices)
 
 ## Per-slot accuracy (clean)
 
-- Device: 0.362
-- Action: 0.362
-- Zone (Licht only): 0.156
+- Device: 0.714
+- Action: 0.714
+- Zone (Licht only): 0.789
 
 ## Command catalog — per-entry full-intent accuracy
 
 | Device | Zone | Action | Accuracy | Trials |
 |---|---|---|---|---|
-| Licht | - | an | 0.250 | 4 |
-| Licht | Küche | an | 0.000 | 4 |
-| Licht | Dach | an | 0.000 | 4 |
-| Licht | Außen | an | 0.250 | 4 |
-| Licht | Lesen | an | 0.250 | 4 |
-| Licht | - | aus | 0.250 | 4 |
-| Licht | Küche | aus | 0.250 | 4 |
-| Licht | Dach | aus | 0.000 | 4 |
-| Licht | Außen | aus | 0.250 | 4 |
+| Licht | - | an | 1.000 | 4 |
+| Licht | Küche | an | 0.750 | 4 |
+| Licht | Dach | an | 1.000 | 4 |
+| Licht | Außen | an | 1.000 | 4 |
+| Licht | Lesen | an | 1.000 | 4 |
+| Licht | - | aus | 1.000 | 4 |
+| Licht | Küche | aus | 0.750 | 4 |
+| Licht | Dach | aus | 0.750 | 4 |
+| Licht | Außen | aus | 1.000 | 4 |
 | Licht | Lesen | aus | 0.000 | 4 |
-| Licht | - | heller | 0.250 | 4 |
-| Licht | Küche | heller | 0.250 | 4 |
-| Licht | Dach | heller | 0.250 | 4 |
-| Licht | Außen | heller | 0.250 | 4 |
-| Licht | Lesen | heller | 0.250 | 4 |
-| Licht | - | dunkler | 0.250 | 4 |
-| Licht | Küche | dunkler | 0.000 | 4 |
-| Licht | Dach | dunkler | 0.000 | 4 |
-| Licht | Außen | dunkler | 0.250 | 4 |
-| Licht | Lesen | dunkler | 0.250 | 4 |
-| Kühlschrank | - | an | 0.250 | 4 |
-| Kühlschrank | - | aus | 0.250 | 4 |
-| Kühlschrank | - | leise | 0.250 | 4 |
-| Heizung | - | an | 1.000 | 4 |
-| Heizung | - | aus | 1.000 | 4 |
-| Heizung | - | wärmer | 1.000 | 4 |
-| Heizung | - | kälter | 1.000 | 4 |
+| Licht | - | heller | 1.000 | 4 |
+| Licht | Küche | heller | 0.750 | 4 |
+| Licht | Dach | heller | 0.750 | 4 |
+| Licht | Außen | heller | 1.000 | 4 |
+| Licht | Lesen | heller | 0.750 | 4 |
+| Licht | - | dunkler | 1.000 | 4 |
+| Licht | Küche | dunkler | 1.000 | 4 |
+| Licht | Dach | dunkler | 1.000 | 4 |
+| Licht | Außen | dunkler | 1.000 | 4 |
+| Licht | Lesen | dunkler | 0.750 | 4 |
+| Licht | - | fünfundzwanzig | 0.750 | 4 |
+| Licht | Küche | fünfundzwanzig | 0.750 | 4 |
+| Licht | Dach | fünfundzwanzig | 0.750 | 4 |
+| Licht | Außen | fünfundzwanzig | 0.750 | 4 |
+| Licht | Lesen | fünfundzwanzig | 0.750 | 4 |
+| Licht | - | fünfzig | 0.750 | 4 |
+| Licht | Küche | fünfzig | 1.000 | 4 |
+| Licht | Dach | fünfzig | 0.750 | 4 |
+| Licht | Außen | fünfzig | 1.000 | 4 |
+| Licht | Lesen | fünfzig | 0.750 | 4 |
+| Licht | - | fünfundsiebzig | 0.000 | 4 |
+| Licht | Küche | fünfundsiebzig | 0.750 | 4 |
+| Licht | Dach | fünfundsiebzig | 0.750 | 4 |
+| Licht | Außen | fünfundsiebzig | 0.750 | 4 |
+| Licht | Lesen | fünfundsiebzig | 0.000 | 4 |
+| Licht | - | hundert | 1.000 | 4 |
+| Licht | Küche | hundert | 0.750 | 4 |
+| Licht | Dach | hundert | 0.750 | 4 |
+| Licht | Außen | hundert | 1.000 | 4 |
+| Licht | Lesen | hundert | 0.750 | 4 |
+| Kühlschrank | - | an | 0.000 | 4 |
+| Kühlschrank | - | aus | 0.000 | 4 |
+| Kühlschrank | - | leise | 0.000 | 4 |
+| Heizung | - | an | 0.250 | 4 |
+| Heizung | - | aus | 0.000 | 4 |
+| Heizung | - | wärmer | 0.250 | 4 |
+| Heizung | - | kälter | 0.250 | 4 |
 | Aufstelldach | - | auf | 0.250 | 4 |
-| Aufstelldach | - | zu | 0.000 | 4 |
-| Campingmodus | - | an | 0.000 | 4 |
-| Campingmodus | - | aus | 0.750 | 4 |
-| USB | - | an | 1.000 | 4 |
-| USB | - | aus | 1.000 | 4 |
-| Wasser | - | an | 0.000 | 4 |
-| Wasser | - | aus | 0.000 | 4 |
-| Energie | - | Eco | 0.750 | 4 |
-| Energie | - | Max | 0.750 | 4 |
-| Energie | - | Normal | 1.000 | 4 |
+| Aufstelldach | - | zu | 1.000 | 4 |
 
 ## SNR sweep — overall full-intent accuracy
 
@@ -61,20 +72,21 @@
 
 | SNR (dB) | Full-intent accuracy |
 |---|---|
-| clean | 0.362 |
-| 20 | 0.368 |
-| 10 | 0.276 |
-| 0 | 0.158 |
+| clean | 0.689 |
+| 20 | 0.469 |
+| 10 | 0.306 |
+| 0 | 0.184 |
 
 ## Command model budget (INT8)
 
-- Model size: 20392 bytes (budget 500000)
+- Model size: 20216 bytes (budget 500000)
 - Full INT8: True
 - Ops: CONV_2D, DELEGATE, DEPTHWISE_CONV_2D, FULLY_CONNECTED, MEAN, SOFTMAX
 
 ## Wake model ("Hey Bus") budget
 
-Not trained in this run — microWakeWord's trainer requires Piper sample generation (a separate ~cloned repo + TTS voice checkpoint, not present locally) plus several GB of pre-generated negative/ambient spectrogram feature sets from HuggingFace (`kahrendt/microwakeword`: dinner_party, dinner_party_eval, no_speech, speech). Neither was fetched in this run (out of scope for the time budget here). The local 3.10 venv with `microwakeword` installed and importable is proven (`train/mww/setup.sh`), and the runtime integration path — `kws_de.wake.WakeDetector` + `load_wake_tflite` + `kws_de.budgets.check_wake_budgets` — is unit-tested against a stand-in INT8 tflite, but no real `hey_bus.tflite` was produced.
+- Model size: 62304 bytes (budget 150 000)
+- 8-bit quantized: True (int8 I/O: False; microWakeWord exports uint8)
 
 ## Vocabulary provenance (real MSWC vs TTS-added)
 
@@ -84,10 +96,6 @@ Not trained in this run — microWakeWord's trainer requires Piper sample genera
 | Kühlschrank | 300 | 0 | 300 |
 | Heizung | 120 | 180 | 300 |
 | Aufstelldach | 0 | 300 | 300 |
-| Campingmodus | 0 | 300 | 300 |
-| USB | 0 | 300 | 300 |
-| Wasser | 300 | 0 | 300 |
-| Energie | 0 | 300 | 300 |
 | Küche | 0 | 300 | 300 |
 | Dach | 0 | 300 | 300 |
 | Außen | 158 | 142 | 300 |
@@ -101,9 +109,10 @@ Not trained in this run — microWakeWord's trainer requires Piper sample genera
 | wärmer | 0 | 300 | 300 |
 | kälter | 0 | 300 | 300 |
 | leise | 0 | 300 | 300 |
-| Eco | 0 | 300 | 300 |
-| Max | 0 | 300 | 300 |
-| Normal | 0 | 300 | 300 |
+| fünfundzwanzig | 0 | 300 | 300 |
+| fünfzig | 0 | 300 | 300 |
+| fünfundsiebzig | 0 | 300 | 300 |
+| hundert | 0 | 300 | 300 |
 
 TTS source for both training-data fill and catalog synthesis: macOS `say`, German voices (Anna, Eddy, Flo, Grandma, Grandpa, Reed, Rocko, Sandy, Shelley) at rates 120-280 wpm.
 

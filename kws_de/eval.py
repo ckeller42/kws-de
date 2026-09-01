@@ -440,7 +440,10 @@ def _write_catalog_report(out: str) -> None:  # pragma: no cover - I/O wrapper (
     report += '\n## Wake model ("Hey Bus") budget\n\n'
     if wake_report is not None:
         report += f"- Model size: {wake_report['model_bytes']} bytes (budget 150 000)\n"
-        report += f"- Full INT8: {wake_report['int8']}\n"
+        report += (
+            f"- 8-bit quantized: {wake_report['quantized_8bit']} "
+            f"(int8 I/O: {wake_report['int8']}; microWakeWord exports uint8)\n"
+        )
     else:
         report += (
             "Not trained in this run — microWakeWord's trainer requires Piper "
