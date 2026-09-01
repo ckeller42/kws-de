@@ -252,3 +252,25 @@ spec. Otherwise QAT is closed as unnecessary.
 `docs/paper.md`: new dataset v3 section (real-speech coverage table
 before/after), E9 distillation, E10 calibration/INT8 gap, updated
 conclusion. `docs/paper-notes.md` gets one entry per landed result.
+
+## 9. Follow-up (not built now): grouped speaker k-fold evaluation
+
+Why: the single speaker-disjoint split tests on a handful of held-out real
+voices. Augmented rows of one recording are correlated, so the effective
+test n is the number of (speaker, word) pairs, not 5 474 rows — a reseed
+moves accuracy by points. Leave-one-speaker-out would fix that but costs one
+training per speaker (hundreds once Piper voices count), so:
+
+- `kws-benchmark --folds K` (default 0 = current single split): K-fold over
+  **real speakers only** (`sklearn.model_selection.GroupKFold` on the
+  `rec:`/MSWC speaker ids from `manifest_v3.json`); TTS clips are always
+  train-side, never a test fold. Per fold: train the chosen architecture
+  with the existing recipe, evaluate float + INT8 (balanced calibration from
+  that fold's train split), collect per-speaker accuracy.
+- Output: mean ± std over folds, plus a per-speaker table sorted by
+  accuracy (the hard-voice list drives the next recording session).
+- Deployed model is still trained on all data; folds are evaluation only.
+- Prerequisite: dataset v3 (needs enough real speakers to form K ≥ 5 groups
+  with every command present in each). Decision to build it is taken from
+  the v3 datasheet, same as §3.3. Distillation per fold (teacher + student)
+  is optional and doubles the cost; start with the plain student.
