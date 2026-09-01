@@ -1,0 +1,28 @@
+// Dynamic views — runtime sequences, rendered as sequence diagrams
+// via `.. likec4-view:: <id>` + `:mode: sequence`.
+
+views {
+
+  dynamic view voiceCommand {
+    title 'Voice command: "Hey Bus" → "Licht Küche an"'
+    user -> esp.mic 'says "Hey Bus"'
+    esp.mic -> esp.mfccdev 'AFE-cleaned frames'
+    esp.mfccdev -> esp.wake 'features (always-on)'
+    esp.wake -> esp.cmdmodel 'wake fired → open ~3 s command window'
+    user -> esp.mic 'says "Licht Küche an"'
+    esp.cmdmodel -> esp.stream 'posteriors every hop'
+    esp.stream -> esp.grammar 'events: [Licht] [Küche] [an]'
+    esp.grammar -> esp.display 'Intent(Licht, Küche, an)'
+    esp.grammar -> esp.ble 'lighting control write'
+  }
+
+  dynamic view trainingRun {
+    title 'Training run: data → INT8 artifact → eval report'
+    trainhost.data -> trainhost.features 'fetch MSWC + TTS-fill + augment'
+    trainhost.features -> trainhost.training 'MFCC tensors (speaker-disjoint split)'
+    trainhost.training -> trainhost.export 'command.keras'
+    trainhost.export -> trainhost.budgets 'command.tflite → size/MACs/INT8 gates'
+    trainhost.export -> trainhost.evalcat 'INT8 model'
+    trainhost.evalcat -> trainhost.evalcat 'catalog: audio → stream → grammar → intent'
+  }
+}

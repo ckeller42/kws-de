@@ -6,7 +6,9 @@ Trains a tiny INT8 DS-CNN on public German speech data, exports a
 `model.tflite` + C-array header that runs on-device via TensorFlow Lite Micro + ESP-NN,
 and ships a minimal ESP-IDF demo that shows the recognised word on the CoreS3 display.
 
-Design & rationale (with algorithm citations): `docs/superpowers/specs/2026-08-31-kws-de-design.md`.
+Design & rationale (with algorithm citations): `docs/superpowers/specs/`.
+**Docs site** (architecture + LikeC4 diagrams + eval reports): <https://ckeller42.github.io/kws-de/>
+— build locally with `pip install -r docs/requirements.txt && python -m sphinx -b html docs docs/_build/html` (node ≥ 20 required).
 
 ## Scope
 

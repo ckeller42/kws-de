@@ -28,3 +28,4 @@ train/**/.venv/
 train/**/datasets/
 train/**/*.wav
 train/**/*.npy
+docs/_build/
