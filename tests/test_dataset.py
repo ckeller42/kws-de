@@ -1,6 +1,6 @@
 import numpy as np
 
-from kws_de import config
+from kws_de import config, dataset
 from kws_de.dataset import assemble, load_split
 
 
@@ -29,3 +29,15 @@ def test_load_split_roundtrip(tmp_path, monkeypatch):
     np.savez(tmp_path / "features_val.npz", X=X, y=y, is_tts=is_tts)
     Xl, yl, tl = load_split("val")
     assert Xl.shape == X.shape and list(yl) == [0, 1, 2] and list(tl) == [True, False, True]
+
+
+def test_load_split_prefix_selects_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    np.savez(
+        tmp_path / "features_v3_test.npz",
+        X=np.zeros((2, 49, 10), np.float32),
+        y=np.array([1, 2]),
+        is_tts=np.array([False, True]),
+    )
+    X, y, is_tts = dataset.load_split("test", prefix="features_v3")
+    assert X.shape == (2, 49, 10) and list(y) == [1, 2] and list(is_tts) == [False, True]

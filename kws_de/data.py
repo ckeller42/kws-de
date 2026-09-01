@@ -259,14 +259,32 @@ def main() -> None:  # pragma: no cover - thin I/O wrapper (manual/integration)
     ap.add_argument(
         "--v2", action="store_true", help="use the v2 slot-command vocab instead of v1 COMMANDS"
     )
+    ap.add_argument(
+        "--v3",
+        action="store_true",
+        help="v2 vocab, real speech mined from an extracted MSWC-de tarball "
+        "(--mswc-root) plus data/recordings/, TTS only as backstop",
+    )
+    ap.add_argument(
+        "--mswc-root",
+        default=str(config.DATA_DIR / "mswc" / "de"),
+        help="extracted MSWC-de tarball root (contains clips/ and de_splits.csv)",
+    )
     args = ap.parse_args()
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    words = command_words() if args.v2 else None
-    cache_name = "raw_clips_v2.pkl" if args.v2 else "raw_clips.pkl"
-    labels = config.COMMAND_LABELS if args.v2 else None
-    out_prefix = "features_v2" if args.v2 else "features"
+    v2 = args.v2 or args.v3
+    words = command_words() if v2 else None
+    cache_name = "raw_clips_v3.pkl" if args.v3 else ("raw_clips_v2.pkl" if v2 else "raw_clips.pkl")
+    labels = config.COMMAND_LABELS if v2 else None
+    out_prefix = "features_v3" if args.v3 else ("features_v2" if v2 else "features")
     if args.fetch:
-        _fetch_and_cache(safety_cap=args.safety_cap, words=words, cache_name=cache_name)
+        _fetch_and_cache(
+            safety_cap=args.safety_cap,
+            words=words,
+            cache_name=cache_name,
+            mswc_root=Path(args.mswc_root) if args.v3 else None,
+            n_unknown=2000 if args.v3 else 600,
+        )
     if args.build:
         _build_and_split(cache_name=cache_name, words=words, labels=labels, out_prefix=out_prefix)
 
@@ -277,18 +295,30 @@ def _fetch_and_cache(
     safety_cap=300_000,
     words=None,
     cache_name="raw_clips.pkl",
+    mswc_root: Path | None = None,
 ) -> None:  # pragma: no cover
     """Stream MSWC-de (MLCommons/ml_spoken_words, config 'de_wav') + download ESC-50
     noise, caching raw clips under config.DATA_DIR so re-runs don't re-download.
     `words` defaults to `config.COMMANDS` (v1); pass `command_words()` for v2 (cache
-    under a different `cache_name` so the v1 cache is untouched).
+    under a different `cache_name` so the v1 cache is untouched). With `mswc_root`,
+    mine the extracted tarball (`kws_de.mswc.mine`) and merge `data/recordings/`
+    instead of streaming; `_unknown_` gets `n_unknown` clips either way.
     """
     words = list(words) if words is not None else config.COMMANDS
     clips_path = config.DATA_DIR / cache_name
     if clips_path.exists():
         print(f"[mswc] cache hit: {clips_path}")
     else:
-        clips, scanned = _fetch_mswc(words, n_per_word, n_unknown, safety_cap)
+        if mswc_root is not None:
+            from kws_de.mswc import mine
+            from kws_de.recordings import load_recordings
+
+            clips = mine(mswc_root, words, n_per_word=n_per_word, n_unknown=n_unknown)
+            for w, items in load_recordings(config.DATA_DIR / "recordings", words).items():
+                clips[w].extend(items)
+            scanned = "mswc-tarball"
+        else:
+            clips, scanned = _fetch_mswc(words, n_per_word, n_unknown, safety_cap)
         counts = {c: len(clips[c]) for c in words}
         print(f"[mswc] done: scanned={scanned} counts={counts} unknown={len(clips['_unknown_'])}")
         with open(clips_path, "wb") as fh:

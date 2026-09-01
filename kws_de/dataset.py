@@ -30,17 +30,21 @@ def assemble(clips_ws, noises, rng, labels, commands):
     return X, y, np.asarray(is_tts, bool)
 
 
-def load_split(name: str):
-    """Load `data/features_{name}.npz` -> (X, y, is_tts)."""
-    d = np.load(config.DATA_DIR / f"features_{name}.npz")
+def load_split(name: str, prefix: str = "features"):
+    """Load `data/{prefix}_{name}.npz` -> (X, y, is_tts). prefix "features" is the
+    frozen v2 dataset, "features_v3" the real-speech rebuild."""
+    d = np.load(config.DATA_DIR / f"{prefix}_{name}.npz")
     return d["X"], d["y"], d["is_tts"]
 
 
-def build(seed: int = 0, cache_name: str = "raw_clips_merged.pkl"):  # pragma: no cover - I/O
+def build(  # pragma: no cover - I/O
+    seed: int = 0, cache_name: str = "raw_clips_merged.pkl", out_prefix: str = "features"
+):
     """Deterministic dataset build: cached raw clips -> speaker-disjoint train/val/test
     features + manifest, written under config.DATA_DIR. Clean per-word features only
     (no transition-window augmentation — that is a training-time choice, kept out of the
-    reusable dataset). Returns the manifest dict."""
+    reusable dataset). Writes `data/manifest<suffix>.json` (suffix `_v3` for prefix
+    `features_v3`). Returns the manifest dict."""
     words = command_words()
     labels = config.COMMAND_LABELS
     # pickle: our own gitignored local cache written by kws_de.data, never untrusted input.
@@ -56,11 +60,12 @@ def build(seed: int = 0, cache_name: str = "raw_clips_merged.pkl"):  # pragma: n
     splits = {}
     for i, (name, ws) in enumerate((("train", tr_ws), ("val", va_ws), ("test", te_ws))):
         X, y, is_tts = assemble(ws, noises, np.random.default_rng(seed + 1 + i), labels, words)
-        np.savez(config.DATA_DIR / f"features_{name}.npz", X=X, y=y, is_tts=is_tts)
+        np.savez(config.DATA_DIR / f"{out_prefix}_{name}.npz", X=X, y=y, is_tts=is_tts)
         splits[name] = (X, y, is_tts)
 
     manifest = build_manifest(splits, seed=seed, labels=labels)
-    (config.DATA_DIR / "manifest.json").write_text(
+    suffix = out_prefix.removeprefix("features")
+    (config.DATA_DIR / f"manifest{suffix}.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False)
     )
     print(
@@ -70,10 +75,12 @@ def build(seed: int = 0, cache_name: str = "raw_clips_merged.pkl"):  # pragma: n
 
 
 def main() -> None:  # pragma: no cover - CLI wrapper
-    """`kws-dataset build [--seed N]`."""
+    """`kws-dataset build [--seed N] [--cache raw_clips_v3.pkl] [--prefix features_v3]`."""
     ap = argparse.ArgumentParser(prog="kws-dataset")
     ap.add_argument("command", choices=["build"])
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--cache", default="raw_clips_merged.pkl", help="raw clip cache under data/")
+    ap.add_argument("--prefix", default="features", help="output npz prefix (features_v3 ...)")
     args = ap.parse_args()
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    build(seed=args.seed)
+    build(seed=args.seed, cache_name=args.cache, out_prefix=args.prefix)
