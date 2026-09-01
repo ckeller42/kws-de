@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import tensorflow as tf
 
@@ -22,7 +24,7 @@ def estimate_macs(model) -> int:
 
 
 def _interp(tflite: bytes):
-    itp = tf.lite.Interpreter(model_content=tflite)
+    itp = tf.lite.Interpreter(model_content=tflite, num_threads=os.cpu_count())
     itp.allocate_tensors()
     return itp
 

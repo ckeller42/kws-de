@@ -1,6 +1,7 @@
 # NOTE: pickle here only reads this repo's own local, gitignored data/ cache
 # (raw_clips.pkl / noise.pkl, written by kws_de.data) — never untrusted input.
 import argparse
+import os
 import pickle
 
 import numpy as np
@@ -122,7 +123,7 @@ def make_command_predict_fn(tflite_bytes: bytes):  # pragma: no cover - needs tf
 
     from kws_de.features import mfcc
 
-    itp = tf.lite.Interpreter(model_content=tflite_bytes)
+    itp = tf.lite.Interpreter(model_content=tflite_bytes, num_threads=os.cpu_count())
     itp.allocate_tensors()
     inp = itp.get_input_details()[0]
     out = itp.get_output_details()[0]
@@ -269,7 +270,7 @@ def _tflite_predict(tflite_bytes: bytes, X) -> np.ndarray:
     """
     import tensorflow as tf
 
-    itp = tf.lite.Interpreter(model_content=tflite_bytes)
+    itp = tf.lite.Interpreter(model_content=tflite_bytes, num_threads=os.cpu_count())
     itp.allocate_tensors()
     inp = itp.get_input_details()[0]
     out = itp.get_output_details()[0]

@@ -43,7 +43,7 @@ def train(
         X,
         y,
         epochs=epochs,
-        batch_size=32,
+        batch_size=config.BATCH_SIZE,
         verbose=0,
         class_weight=cw,
         validation_data=validation_data,

@@ -13,6 +13,10 @@ COMMANDS = ["Licht", "Kühlschrank", "Camping", "Heizung", "Wasser"]
 LABELS = COMMANDS + ["_unknown_", "_silence_"]
 NUM_CLASSES = len(LABELS)  # 7
 
+# Training mini-batch. 128 (not 32) since E9: the nets are tiny (tens of k params on
+# 49x10 MFCC), so per-step overhead dominated; 4x fewer steps, same Adam defaults.
+BATCH_SIZE = 128
+
 # On-device resource budgets (see spec Global Constraints).
 MAX_MODEL_BYTES = 500_000
 MAX_ARENA_BYTES = 300_000

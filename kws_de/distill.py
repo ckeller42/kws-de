@@ -77,10 +77,13 @@ def distill(
     alpha: float = 0.5,
     validation_data=None,
     callbacks=None,
+    batch_size: int | None = None,
 ):
     """Train a fresh `build_dscnn` student on (X, y) against `teacher`'s frozen
-    probabilities. Mirrors `kws_de.train.train` (adam, batch 32, inverse-frequency
-    balancing) but via `sample_weight`, since a 2-D target rules out `class_weight`."""
+    probabilities. Mirrors `kws_de.train.train` (adam, batch `config.BATCH_SIZE`,
+    inverse-frequency balancing) but via `sample_weight`, since a 2-D target rules
+    out `class_weight`. `batch_size` overrides `config.BATCH_SIZE` — only meant for
+    toy-data tests too small to take a full-size batch as one training step."""
     tf.keras.utils.set_random_seed(seed)
     num_classes = num_classes if num_classes is not None else len(config.COMMAND_LABELS)
     Xc = np.asarray(X, np.float32)[..., None]
@@ -105,7 +108,7 @@ def distill(
         targets,
         sample_weight=sample_weight,
         epochs=epochs,
-        batch_size=32,
+        batch_size=batch_size if batch_size is not None else config.BATCH_SIZE,
         verbose=0,
         validation_data=validation_data,
         callbacks=callbacks,

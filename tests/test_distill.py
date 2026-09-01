@@ -71,7 +71,30 @@ def test_distill_student_learns_separable_toy():
     # reads 1.0 -- verified against the pre-existing kws_de.train.train too, so
     # it's a BN-momentum/epoch-budget property of build_dscnn, not a distill()
     # bug. 300 epochs is comfortably past the ~200-epoch point where it clears.
-    student, history = distill(X, y, Teacher(), epochs=300, seed=0, num_classes=2)
+    # batch_size=32 (not config.BATCH_SIZE=128): with only 64 toy samples, a
+    # batch of 128 clips to one step/epoch and the BN moving stats never converge.
+    student, history = distill(X, y, Teacher(), epochs=300, seed=0, num_classes=2, batch_size=32)
     assert history["accuracy"][-1] > 0.9
     preds = np.argmax(student.predict(X[..., None], verbose=0), 1)
     assert (preds == y).mean() > 0.9
+
+
+def test_distill_with_validation_data_reports_val_accuracy():
+    X, y = _toy()
+
+    class Teacher:
+        def predict(self, Xc, verbose=0):
+            hot = (Xc.reshape(len(Xc), -1).mean(1) > 1.0).astype(np.float32)
+            return np.stack([1 - hot, hot], 1) * 0.8 + 0.1
+
+    _, history = distill(
+        X,
+        y,
+        Teacher(),
+        epochs=2,
+        seed=0,
+        num_classes=2,
+        batch_size=32,
+        validation_data=(X, y),
+    )
+    assert "val_accuracy" in history

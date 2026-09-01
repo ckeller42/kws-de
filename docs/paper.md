@@ -130,7 +130,7 @@ test** — the classic silent train/deploy mismatch becomes a unit test.
 **Model and quantization.** A small DS-CNN (~5 k params), full-INT8 via representative-dataset
 calibration, exported to TFLite-Micro (ESP-NN kernels). **CI budget gates** assert model ≤ 500 KB,
 MACs ≤ 3 M, INT8-only I/O, and that every op is device-runnable — "fits the MCU" as a test, no
-hardware required.
+hardware required. Batch size 32 through E8, 128 from E9 on (throughput; §notes).
 
 **Two-stage runtime.** An always-on **wake detector** ("Hey Bus", microWakeWord) gates the heavier
 **command recogniser**, which runs streaming inside the post-wake window. The command model's
