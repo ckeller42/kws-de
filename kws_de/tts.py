@@ -5,7 +5,7 @@ diversity** — a model trained on one synth voice memorizes that voice instead 
 the word. So we stack several offline German TTS engines and rotate across their voices:
 
 - ``say``    — macOS `say` (~9 German voices). Always available on macOS. Permissive.
-- ``piper``  — Piper neural voices (thorsten, kerstin, eva_k, ramona, karlsson, …). Permissive.
+- ``piper``  — Piper neural voices (cache-discovered, multi-speaker aware). Permissive.
 - ``parler`` — Parler-TTS, voice from a text description (Apache-2.0). Many voices on demand.
 - ``xtts``   — Coqui XTTS-v2 zero-shot cloning (non-commercial) — clone many reference speakers.
 
@@ -17,15 +17,15 @@ and unit-tested. Generated audio is 16 kHz mono float32, gitignored training dat
 from __future__ import annotations
 
 import itertools
+import json
 from pathlib import Path
 
 # Per-engine voice pools (extend as more are installed). Kept as data so voice_combos is pure.
 ENGINE_VOICES: dict[str, list[str]] = {
     "say": ["Anna", "Eddy", "Flo", "Grandma", "Grandpa", "Reed", "Rocko", "Sandy", "Shelley"],
-    # Voices actually cached under data/piper-voices/ (see _piper_voice_path) — full
-    # rhasspy/piper-voices ids "<locale>-<name>-<quality>". To add more, download the
-    # matching .onnx + .onnx.json pair from huggingface.co/rhasspy/piper-voices into
-    # data/piper-voices/<name>/<quality>/ and list the id here.
+    # Fallback when data/piper-voices/ is empty (fresh checkout, CI). At runtime
+    # `engine_voices("piper")` discovers whatever is cached there instead — see
+    # README "TTS backstop voices" for how to add one.
     "piper": [
         "de_DE-thorsten-medium",
         "de_DE-eva_k-x_low",
@@ -41,10 +41,33 @@ ENGINE_VOICES: dict[str, list[str]] = {
     ],
     "xtts": [],  # filled at runtime from reference speaker clips (e.g. Common Voice DE)
 }
-RATES = [120, 140, 160, 180, 200, 220, 240, 260, 280]  # wpm; say maps directly, piper ignores it
-# but still benefits — Piper's default noise_scale makes every synthesis call stochastic
-# (verified: same voice+rate produces different audio each call), so more (voice, rate)
-# labels means more distinct clips even though rate itself isn't wired into Piper's config.
+RATES = [120, 140, 160, 180, 200, 220, 240, 260, 280]
+# wpm; say maps directly, piper via length_scale = 160/rate
+
+PIPER_BASE_RATE = 160  # wpm that maps to Piper length_scale 1.0
+
+
+def piper_voices(root: Path) -> list[str]:
+    """Piper voice ids cached under ``root`` (``<name>/<quality>/<id>.onnx`` + ``.onnx.json``),
+    sorted. A multi-speaker voice (``num_speakers > 1`` in its json) expands to one id per
+    speaker, ``<id>#<speaker_id>``, so every speaker is its own voice for the split. Pure
+    directory scan; empty when nothing is cached."""
+    out: list[str] = []
+    for onnx in root.glob("*/*/*.onnx"):
+        meta = onnx.with_suffix(".onnx.json")
+        n = json.loads(meta.read_text()).get("num_speakers", 1) if meta.exists() else 1
+        out.extend([onnx.stem] if n <= 1 else [f"{onnx.stem}#{i}" for i in range(n)])
+    return sorted(out)
+
+
+def engine_voices(engine: str) -> list[str]:
+    """Voices to draw from for ``engine``. Piper: whatever is cached on disk, falling back to
+    ``ENGINE_VOICES`` when the cache is empty; other engines: the static list."""
+    if engine == "piper":
+        from kws_de import config
+
+        return piper_voices(config.DATA_DIR / "piper-voices") or ENGINE_VOICES["piper"]
+    return ENGINE_VOICES.get(engine) or ["default"]
 
 
 def available_engines() -> list[str]:  # pragma: no cover - probes optional backends
@@ -68,8 +91,8 @@ def voice_combos(n: int, engines: list[str]) -> list[tuple[str, str, int]]:
     Pure — no backends touched."""
     per_engine = []
     for e in engines:
-        voices = ENGINE_VOICES.get(e) or ["default"]
-        per_engine.append([(e, v, r) for v, r in itertools.product(voices, RATES)])
+        voices = engine_voices(e)
+        per_engine.append([(e, v, r) for r, v in itertools.product(RATES, voices)])
     combos: list[tuple[str, str, int]] = []
     # interleave engines: take one from each in turn until we have n
     idx = 0
@@ -92,7 +115,7 @@ def synthesize(word: str, engine: str, voice: str, rate: int, out_wav):  # pragm
         r = _say_one(word, voice, rate, "{w}", out_wav)
         return None if r is None else r[0]
     if engine == "piper":
-        return _piper_say(word, voice, out_wav)
+        return _piper_say(word, voice, rate, out_wav)
     if engine == "parler":
         return _parler_say(word, voice, out_wav)
     if engine == "xtts":
@@ -107,6 +130,7 @@ def _piper_voice_path(voice: str) -> Path:
     logic — no filesystem access, so it's unit-testable without the voice files present."""
     from kws_de import config
 
+    voice = voice.split("#", 1)[0]  # "<id>#<speaker_id>" -> the shared model file
     _locale, rest = voice.split("-", 1)
     name, quality = rest.rsplit("-", 1)
     return config.DATA_DIR / "piper-voices" / name / quality / f"{voice}.onnx"
@@ -118,6 +142,7 @@ _PIPER_VOICE_CACHE: dict[str, object] = {}  # voice id -> loaded piper.PiperVoic
 def _piper_load_voice(voice: str):  # pragma: no cover - loads an onnx model
     """Load (and memoize) a Piper voice model. Raises FileNotFoundError if it hasn't been
     downloaded into data/piper-voices/ yet."""
+    voice = voice.split("#", 1)[0]
     if voice not in _PIPER_VOICE_CACHE:
         from piper import PiperVoice
 
@@ -131,15 +156,18 @@ def _piper_load_voice(voice: str):  # pragma: no cover - loads an onnx model
     return _PIPER_VOICE_CACHE[voice]
 
 
-def _piper_say(word, voice, out_wav):  # pragma: no cover - loads model, shells out to onnxruntime
+def _piper_say(word, voice, rate, out_wav):  # pragma: no cover - loads model, runs onnxruntime
     import numpy as np
     import soundfile as sf
+    from piper import SynthesisConfig
 
     from kws_de import config
 
+    base, _, sid = voice.partition("#")
+    cfg = SynthesisConfig(speaker_id=int(sid) if sid else None, length_scale=PIPER_BASE_RATE / rate)
     try:
-        pv = _piper_load_voice(voice)
-        chunks = list(pv.synthesize(word))
+        pv = _piper_load_voice(base)
+        chunks = list(pv.synthesize(word, cfg))
         if not chunks:
             return None
         sr = chunks[0].sample_rate

@@ -472,7 +472,7 @@ def _tts_combo_plan(word: str, n: int, engines: list[str]) -> list[tuple[str, st
     the redundancy any oversampling scheme adds. No backends touched."""
     if not engines:
         return []
-    pool = min(len(tts.ENGINE_VOICES.get(e) or ["default"]) * len(tts.RATES) for e in engines)
+    pool = min(len(tts.engine_voices(e)) * len(tts.RATES) for e in engines)
     base = tts.voice_combos(len(engines) * pool, engines)
     if not base:
         return []
@@ -485,8 +485,8 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4) -> li
     """Synthesize up to n clips of `word` across all engines from `tts_engines()`
     (parallelized — each synthesis call is independent, so this is I/O/compute-bound and
     speeds up with a thread pool), varied by engine/voice/rate. Returns
-    [(np.ndarray, speaker_id)] with speaker_id="tts:{engine}:{voice}:{rate}" so the
-    speaker-disjoint split holds out whole voice combos, per engine."""
+    [(np.ndarray, speaker_id)] with speaker_id="tts:{engine}:{voice}" — rate is augmentation,
+    not identity, so the speaker-disjoint split holds out whole voices."""
     from concurrent.futures import ThreadPoolExecutor
 
     combos = _tts_combo_plan(word, n, tts_engines())
@@ -495,7 +495,7 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4) -> li
     def _job(args):
         i, (engine, voice, rate) = args
         audio = tts.synthesize(word, engine, voice, rate, tmp_dir / f"{word}_{i}.wav")
-        return None if audio is None else (audio, f"tts:{engine}:{voice}:{rate}")
+        return None if audio is None else (audio, f"tts:{engine}:{voice}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         results = list(ex.map(_job, enumerate(combos)))
