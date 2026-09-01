@@ -167,7 +167,7 @@ firmware/
     wav.c/.h                header writer, pure C
     ui/                     LVGL screens
     gen/                    model_data.h labels.h prompts.h features_config.h
-  test/                     host unit tests (linux target)
+  test/                     host unit tests (Makefile, plain cc)
   README.md                 IDF version pin, flash + pull how-to, manual checklist
 scripts/
   flash.sh                  esptool.py --chip esp32s3 write_flash 0x0 <merged.bin>
@@ -180,7 +180,7 @@ scripts/
   esp-bsp do not build there, fall back to v5.5 LTS and install it beside
   6.2 on buspi (`~/esp/esp-idf-v5.5`). The Mac gets the same pin via
   `idf-installer` or the VS Code extension.
-- **Build hosts:** Mac (primary) and CI. **Flash hosts:** any machine
+- **Build hosts:** Mac (primary, via `docker run espressif/idf:<tag>` — no local IDF install), buspi (native IDF), and CI. **Flash hosts:** any machine
   with `esptool.py` — Mac, second Mac, buspi — using the merged binary,
   so no IDF install is needed to flash. `scripts/flash.sh` takes the
   bin path and optional port; auto-detects `/dev/cu.usbmodem*` /
@@ -201,7 +201,7 @@ protection as required checks (user action, one-time):
 | Job | What | Gate |
 |---|---|---|
 | `build` | `espressif/esp-idf-ci-action@v1` at the pinned tag, `idf.py -DIDF_TARGET=esp32s3 build`, then `esptool.py --chip esp32s3 merge_bin -o kws-de-fw-<sha>.bin @flash_args` | build must succeed; artifact uploaded (30-day retention) |
-| `host-test` | same action, `idf.py --preview set-target linux && idf.py build && ./build/kws_de_fw_test.elf` in `firmware/test` (Unity) | all tests pass |
+| `host-test` | `ubuntu-latest`, `make -C firmware/test` — plain `cc` + assert-based tests, no IDF | all tests pass |
 | `gen-fresh` | in the Python CI: `uv run kws-export --firmware --out /tmp/gen && diff -r /tmp/gen firmware/main/gen` | committed headers match the exporter; fails when someone changes `config`/`phrases` without regenerating |
 
 Plus existing jobs extended: ruff/pytest already cover `export.py` and
@@ -210,7 +210,7 @@ Plus existing jobs extended: ruff/pytest already cover `export.py` and
 
 ## 7. Testing
 
-**Host unit tests (`firmware/test`, Unity, run in CI):**
+**Host unit tests (`firmware/test`, plain C + `assert`, `make -C firmware/test`, run on Mac/Pi/CI without IDF):**
 
 - `mfcc`: 1 s fixture WAV → 49×10 int8; every coefficient within 1
   quantisation step of the Python `features.mfcc` output stored as a
