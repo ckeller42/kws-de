@@ -49,3 +49,15 @@ def test_render_table_empty_rows_still_has_header():
     md = render_table([])
     assert "Architecture" in md
     assert md.count("\n") >= 2  # header + separator
+
+
+def test_render_table_float_column_optional():
+    base = {"catalog_acc": 0.5, "params": 1, "macs": 1, "int8_bytes": 1, "budget_ok": True}
+    md = render_table(
+        [
+            {"name": "a", "isolated_acc": 0.90, "float_acc": 0.95, **base},
+            {"name": "b", "isolated_acc": 0.80, **base},
+        ]
+    )
+    assert "| Float |" in md
+    assert "| 0.950 |" in md and "| - |" in md
