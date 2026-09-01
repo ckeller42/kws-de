@@ -271,19 +271,27 @@ train-split clips only), 60 epochs, decoded greedily into the same pure grammar.
 
 The result is a negative one, and instructive. Training loss fell (370 → 28), yet greedy decoding
 **collapsed to empty sequences** — the model emits near-all-blank — so catalog full-intent was
-**0.000** vs the frame-classifier's 0.689. Two concrete causes, each a signpost for the follow-up:
+**0.000** vs the frame-classifier's 0.689. We separate the two causes, because they resolve very
+differently:
 
-1. **CTC is data-hungry.** 392 phrases is far too few to learn alignment for 21 tokens; all-blank
-   collapse is the classic small-data CTC failure. Generating orders-of-magnitude more phrase data
-   — a strength of the synthetic pipeline — is the first fix.
-2. **The streaming variable-length encoder does not INT8-export.** Its time-distributed loop emits
-   a `TensorListReserve` op outside the TFLM builtin set (it needs `SELECT_TF_OPS` or a fixed-window
-   reformulation). So even a well-trained transducer would not be device-runnable as built — the same
-   op-set gate that ruled out the Keyword Transformer (§6.7).
+1. **CTC is data-hungry (open).** 392 phrases is far too few to learn alignment for 21 tokens;
+   all-blank collapse is the classic small-data CTC failure. Generating orders-of-magnitude more
+   phrase data — a strength of the synthetic pipeline — is the first fix, and the reason the
+   accuracy number above is preliminary rather than a verdict on the architecture.
+2. **The op-set/export blocker (resolved).** As first built, the streaming head was a
+   `TimeDistributed(Dense)` that unrolled into a `tf.while` loop and emitted a `TensorListReserve`
+   op the INT8-builtins-only converter (no `SELECT_TF_OPS`) could not legalize — the same op-set
+   gate that ruled out the Keyword Transformer (§6.7). Replacing it with a **1×1 Conv2D per-frame
+   head** (identical per-frame projection, one static `CONV_2D`) and exporting a **fixed-T,
+   batch-1 clone** — the honest on-device shape, one chunk at a time behind a ring buffer, with
+   weights transferred from the variable-length trained model — makes the encoder export at
+   **42.9 KB, full INT8, with every op inside the TFLM builtin set** (`CONV_2D`,
+   `DEPTHWISE_CONV_2D`, `ADD`, `RESHAPE`). The streaming transducer is therefore now
+   **device-runnable**; only the data-scale gap (cause 1) stands between it and a real comparison.
 
-The **frame-classifier + grammar (0.689, 20 KB INT8) therefore remains the working, deployable
-system**; the streaming transducer is a promising but unfinished direction whose two blockers this
-experiment names precisely (phrase-data scale, and an export-friendly streaming formulation).
+The **frame-classifier + grammar (0.689, 20 KB INT8) remains the working, deployable system today**;
+the streaming transducer is now a device-runnable but under-trained direction whose one remaining
+blocker this experiment names precisely — phrase-data scale.
 
 ## 7. Discussion
 
@@ -296,9 +304,10 @@ per-clip metrics structurally cannot. The ablation arc (§6.2) is itself a contr
 sequence in which each fix isolates one failure mode, including a negative result. The
 architecture benchmark (§6.7) sharpens the deployability point — the Keyword Transformer is small
 and accurate yet not device-runnable, so the **op-set, not the parameter count, is the true MCU
-gate** — and the streaming transducer (§6.8), the literature's connected-command fix, neither beat
-the frame-classifier at our data scale nor exported, a reminder that a principled architecture still
-needs enough data and an export-friendly form to win *on-device*.
+gate** — and the streaming transducer (§6.8), the literature's connected-command fix, once its head
+was reformulated to clear that same op-set gate, exports device-runnable but does not yet beat the
+frame-classifier at our data scale, a reminder that a principled architecture still needs enough
+data to win *on-device*.
 
 ## 8. Limitations and future work
 
@@ -306,11 +315,13 @@ needs enough data and an export-friendly form to win *on-device*.
   performance. A recorded real-speaker (and real-microphone) test set is planned.
 - **Per-device robustness.** The catalog result is lighting-dominated; long compound words
   (Kühlschrank) fail under the current frame-classification + hand-rolled decoder.
-- **The streaming transducer (E8) has two named blockers.** The naive CTC model collapsed to
-  all-blank at 392 phrases and does not INT8-export. The follow-up is concrete: (a) generate
-  orders-of-magnitude more phrase data (the synthetic pipeline scales), possibly with a label-prior
-  or entropy regulariser to avoid blank collapse, and (b) a fixed-window or `SELECT_TF_OPS`-free
-  streaming reformulation so the encoder is device-runnable. RNN-T (implicit LM) is the further step.
+- **The streaming transducer (E8): export solved, data open.** The export blocker is closed — a
+  1×1-Conv2D per-frame head plus a fixed-T, batch-1 export makes the encoder device-runnable
+  (42.9 KB, full INT8, TFLM builtins only). The remaining blocker is data: the naive CTC model
+  collapsed to all-blank at 392 phrases. The follow-up is concrete — generate orders-of-magnitude
+  more phrase data (the synthetic pipeline scales), possibly with a label-prior or entropy
+  regulariser to avoid blank collapse, then re-run the on-device comparison. RNN-T (implicit LM) is
+  the further step.
 - **Sim-to-real (E6) is the biggest open item.** Measured on-device latency/RAM/power and
   real-microphone accuracy on the CoreS3 (dual-MEMS + ES7210 + ESP-SR 2-mic AFE) are specified as a
   follow-up; we expect real accuracy below the synthetic eval and see quantifying that gap as a result.
@@ -325,8 +336,9 @@ provenance, end-to-end evaluation that catches what per-clip metrics miss, budge
 "fits the MCU" a test, and reproducible ablations (with negative results that name their own next
 steps) — plus a documented, reusable German MCU-KWS dataset. We also benchmarked four encoders on
 that dataset (MatchboxNet the most MAC-efficient; the Keyword Transformer accurate but not
-device-runnable) and built a streaming CTC transducer whose negative result maps precisely the two
-things a connected-command model must fix — phrase-data scale and an export-friendly streaming form.
+device-runnable) and built a streaming CTC transducer which — once its head was reformulated to a
+1×1-Conv2D and exported at fixed length — runs device-side at 42.9 KB full INT8, leaving phrase-data
+scale as the one remaining thing a connected-command model must fix here.
 Everything is open-source at the repository above.
 
 ## References

@@ -116,7 +116,6 @@ clips** (Licht, Kühlschrank, Heizung, Wasser, aus, auf, Außen[158]); 17 incl. 
   transition audio — remains, and compounds with phrase length. Flagged as a
   follow-up (multi-word transition augmentation), not further stream-param tuning.
 
-
 - **Transition-aware training (NEGATIVE RESULT)** — added inter-word boundary windows
   labeled `_unknown_` + in-context positives, retrained: full-intent catalog accuracy
   **0.362 → 0.197** (REGRESSION), zone slot → 0.000. Root cause (probe): the `_unknown_`
@@ -128,7 +127,6 @@ clips** (Licht, Kühlschrank, Heizung, Wasser, aus, auf, Außen[158]); 17 incl. 
   per-word positive volume) and/or class-weight; or move boundary handling entirely into the
   decoder. Best committed model remains the decoder-fix (0.362). — a genuinely publishable
   ablation: the obvious data fix makes it worse.
-
 
 - **Balanced transition fix + final command set (BEST so far)** — cut transition `_unknown_`
   negatives (n_pairs 2000->600) + inverse-frequency `class_weight` in training, on the trimmed
@@ -210,7 +208,6 @@ effect; that run is not the number reported above. The cycling fix
 per-call stochastic `noise_scale` to keep repeats non-identical) closed that
 volume gap before the real 0.689 -> 0.245 comparison was drawn.
 
-
 ### E6 — sim-to-real gap (planned, needs the physical CoreS3)
 
 Estimated vs MEASURED on-device performance (latency/arena/CPU/power) and clean-corpus vs
@@ -281,14 +278,22 @@ accuracy below synthetic eval; quantifying that gap is the contribution.
 eval reports.*
 
 ### E7 — architecture benchmark (DONE)
+
 Frozen dataset, 30ep/seed0, class-weighted, val-selected, test-reported. Catalog = 3-voice subset (147 trials/arch), clean dataset (no transition aug) so lower than the 0.689 tuned model — apples-to-apples ranking:
+
 | arch | isolated | catalog | params | MACs | INT8 | device |
 |---|---|---|---|---|---|---|
 | ds_cnn | 0.834 | 0.544 | 5879 | 2.07M | 20KB | yes |
 | bc_resnet | 0.773 | 0.102 | 4919 | 1.39M | 31KB | yes |
 | matchboxnet | 0.903 | 0.245 | 12957 | 0.47M | 43KB | yes |
 | kwt | - | - | 106k | - | 173KB | NO (non-TFLM ops) |
+
 Findings: metric-dependent ranking (matchboxnet best isolated+lowest MACs; ds_cnn best catalog); bc_resnet underperforms at tiny scale; KWT INT8-exports but non-device-runnable (op-set is the gate). Chose matchboxnet as CTC encoder for E8.
 
-### E8 — streaming CTC transducer (the new model, in progress)
-MatchboxNet encoder + per-frame CTC head, 392 phrases/60ep. NEGATIVE: loss 370->28 but greedy decode collapses to all-blank -> catalog 0.000 vs 0.689. Two blockers: (1) CTC data-hungry (392 phrases too few, all-blank collapse); (2) streaming encoder won't INT8-export (TensorListReserve, non-TFLM — same op-set gate as KWT). Frame-classifier+grammar (0.689, 20KB) stays the deployable system. Lesson: a principled arch still needs data scale + export-friendly form to win on-device.
+### E8 — streaming CTC transducer (the new model)
+
+MatchboxNet encoder + per-frame CTC head, 392 phrases/60ep. NEGATIVE (accuracy): loss 370->28 but greedy decode collapses to all-blank -> catalog 0.000 vs 0.689. Originally two blockers: (1) CTC data-hungry (392 phrases too few, all-blank collapse); (2) streaming encoder won't INT8-export (TensorListReserve, non-TFLM — same op-set gate as KWT). Frame-classifier+grammar (0.689, 20KB) stays the deployable system. Lesson: a principled arch still needs data scale + export-friendly form to win on-device.
+
+### E8b — export blocker RESOLVED (fix/ctc-export)
+
+Blocker (2) fixed. Root cause: `TimeDistributed(Dense)` head unrolled to a `tf.while` loop -> `TensorListReserve`, unlegalizable under INT8-builtins-only (no SELECT_TF_OPS). Fix, all in `build_ctc_encoder`: (a) head -> `1x1 Conv2D` (identical per-frame projection, one static CONV_2D, no loop); (b) `t_frames` param — None=variable-T training graph unchanged, concrete=fixed-T **batch-1** export clone (weights T/batch-independent -> `set_weights` transfers trained weights); (c) static reshapes (freq->channels, head squeeze) instead of tf.shape-reshape/Permute. Result: exports 42.9KB full-INT8, op set = {CONV_2D, DEPTHWISE_CONV_2D, ADD, RESHAPE, DELEGATE} — all TFLM builtins. Batch-1 was the last mile: a None batch made TFLite recompute Reshape shapes at runtime via SHAPE/STRIDED_SLICE/PACK; fixing batch folds them out. Fixed-T + batch-1 = the honest on-device shape (one chunk, ring buffer). TDD: `test_ctc_encoder_fixed_t_int8_exports_tflm_clean` asserts zero non-TFLM ops + full-int8 (reproduces E8's ConverterError as the red test). Accuracy still 0.000 (blocker (1), data — deliberately out of scope for this fix). Paper §6.8 now: cause 1 (data) open, cause 2 (export) resolved.
