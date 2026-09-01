@@ -31,6 +31,7 @@ kws-data = "kws_de.data:main"
 kws-train = "kws_de.train:main"
 kws-export = "kws_de.export:main"
 kws-eval = "kws_de.eval:main"
+kws-dataset = "kws_de.dataset:main"
 
 [tool.pytest.ini_options]
 # data/ is a gitignored local cache (raw MSWC/ESC-50 clips); ESC-50 ships its own
