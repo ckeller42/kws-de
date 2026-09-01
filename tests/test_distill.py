@@ -55,14 +55,16 @@ def _toy(n=64, seed=0):
     return X, y
 
 
+class Teacher:
+    """A fixed lookup "teacher" returning confident-but-soft probs, for both distill tests."""
+
+    def predict(self, Xc, verbose=0):
+        hot = (Xc.reshape(len(Xc), -1).mean(1) > 1.0).astype(np.float32)
+        return np.stack([1 - hot, hot], 1) * 0.8 + 0.1
+
+
 def test_distill_student_learns_separable_toy():
     X, y = _toy()
-
-    # A "teacher" that is just a fixed lookup: returns confident-but-soft probs.
-    class Teacher:
-        def predict(self, Xc, verbose=0):
-            hot = (Xc.reshape(len(Xc), -1).mean(1) > 1.0).astype(np.float32)
-            return np.stack([1 - hot, hot], 1) * 0.8 + 0.1
 
     # build_dscnn's BatchNorm moving stats (momentum 0.99) need well over 8
     # epochs x 2 batches to converge for this low-variance toy input; 8 epochs
@@ -81,11 +83,6 @@ def test_distill_student_learns_separable_toy():
 
 def test_distill_with_validation_data_reports_val_accuracy():
     X, y = _toy()
-
-    class Teacher:
-        def predict(self, Xc, verbose=0):
-            hot = (Xc.reshape(len(Xc), -1).mean(1) > 1.0).astype(np.float32)
-            return np.stack([1 - hot, hot], 1) * 0.8 + 0.1
 
     _, history = distill(
         X,

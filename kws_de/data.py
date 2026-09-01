@@ -548,8 +548,8 @@ def _origin_flags(clips_ws: dict, snrs, words=None, perturb_tts: bool = False) -
     flags = []
 
     def rows(spk):
-        tts = spk.startswith("tts:")
-        return [tts] * (per_clip * (2 if perturb_tts and tts else 1))
+        is_tts = spk.startswith("tts:")
+        return [is_tts] * (per_clip * (2 if perturb_tts and is_tts else 1))
 
     for cmd in words:
         for _clip, spk in clips_ws.get(cmd, []):

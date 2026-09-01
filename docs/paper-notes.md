@@ -56,7 +56,7 @@ Scanned ~2.5 M MSWC-de examples: of the 24 grounded v2 command words, only **7 h
 clips** (Licht, Kühlschrank, Heizung, Wasser, aus, auf, Außen[158]); 17 incl. all zone words,
 `an`, and every level/mode word have **zero**. → Synthetic fill is structural, not a hack.
 
-### E3 — v2 grounded catalog model (26 classes) + end-to-end catalog eval
+### E3 — v2 grounded catalog model (23 classes) + end-to-end catalog eval
 
 - Vocabulary grounded in the camper's real controllable functions (8 devices, 4 light
   zones, 12 actions, device-specific validity map) — invalid combinations are rejected by

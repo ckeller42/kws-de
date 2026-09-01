@@ -29,6 +29,8 @@ train/**/datasets/
 train/**/*.wav
 train/**/*.npy
 docs/_build/
+docs/distill-report.md
+docs/distill-benchmark.json
 
 # git worktrees (superpowers)
 .worktrees/

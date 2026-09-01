@@ -196,14 +196,25 @@ def main() -> None:  # pragma: no cover - training + TTS + tflite
     )
 
     calib = balanced_calibration(X_train, y_train, seed=args.seed)
-    common = dict(seed=args.seed)
     rows = [
         _evaluate_int8(
-            "ds_cnn (first-200 calib)", baseline, X_test, y_test, calib=X_train[:200], **common
+            "ds_cnn (first-200 calib)",
+            baseline,
+            X_test,
+            y_test,
+            calib=X_train[:200],
+            seed=args.seed,
         ),
-        _evaluate_int8("ds_cnn (balanced calib)", baseline, X_test, y_test, calib=calib, **common),
         _evaluate_int8(
-            "ds_cnn distilled (balanced calib)", student, X_test, y_test, calib=calib, **common
+            "ds_cnn (balanced calib)", baseline, X_test, y_test, calib=calib, seed=args.seed
+        ),
+        _evaluate_int8(
+            "ds_cnn distilled (balanced calib)",
+            student,
+            X_test,
+            y_test,
+            calib=calib,
+            seed=args.seed,
         ),
     ]
 

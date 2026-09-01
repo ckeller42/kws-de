@@ -80,8 +80,7 @@ def _evaluate_int8(
 
 def evaluate_architecture(
     name: str, epochs: int = EPOCHS, seed: int = SEED, features: str = "features"
-) -> dict:
-    # pragma: no cover - heavy I/O (training + TTS + tflite)
+) -> dict:  # pragma: no cover - heavy I/O (training + TTS + tflite)
     """Build `name`, train on `load_split("train", features)` (val-selected best
     epoch), then `_evaluate_int8` with a class-balanced calibration set."""
     import tensorflow as tf

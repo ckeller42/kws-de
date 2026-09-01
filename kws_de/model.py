@@ -5,7 +5,7 @@ from kws_de import config
 
 def build_dscnn(num_classes: int | None = None) -> tf.keras.Model:
     """Build the DS-CNN classifier. `num_classes` defaults to `config.NUM_CLASSES`
-    (v1, 7 classes); pass `len(config.COMMAND_LABELS)` for v2 (26 classes)."""
+    (v1, 7 classes); pass `len(config.COMMAND_LABELS)` for v2 (23 classes)."""
     num_classes = num_classes if num_classes is not None else config.NUM_CLASSES
     L = tf.keras.layers
     inp = L.Input((config.N_FRAMES, config.N_MFCC, 1))

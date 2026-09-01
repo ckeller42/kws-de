@@ -5,7 +5,7 @@
 ## 1. Problem
 
 The v2 command model (DS-CNN, 23 classes, 20 KB INT8) is trained on a
-dataset where **17 of 21 command words have zero real speech** — they are
+dataset where **15 of 21 command words have zero real speech** — they are
 100 % macOS-`say` TTS (`data/raw_clips_merged.pkl`, verified 2026-09-01):
 
 | real ≥ 300 | partial | **0 real (TTS only)** |

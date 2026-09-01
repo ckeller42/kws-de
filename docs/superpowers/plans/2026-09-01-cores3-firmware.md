@@ -21,7 +21,7 @@
 - Pre-commit hook runs ruff + markdownlint; pre-push runs pytest. Never bypass with `--no-verify`.
 - TFLM op set is exactly `CONV_2D, DEPTHWISE_CONV_2D, FULLY_CONNECTED, MEAN, SOFTMAX, RESHAPE, ADD` (gated in `tests/test_transducer.py`).
 - MFCC parameters are the single source `kws_de.config`: `SAMPLE_RATE=16000, WIN_SAMPLES=480, HOP_SAMPLES=320, N_MELS=40, N_MFCC=10, N_FRAMES=49`. C reads them from `features_config.h`, never literal.
-- Recogniser model = the v2 command model (`models/command.tflite`, labels `config.COMMAND_LABELS`, 26 classes, input int8 `[1,49,10,1]`).
+- Recogniser model = the v2 command model (`models/command.tflite`, labels `config.COMMAND_LABELS`, 23 classes, input int8 `[1,49,10,1]`).
 - Detector parameters (from `kws_de.eval.run_catalog_eval` defaults): `smooth_win=3, threshold=0.5, min_consecutive=2, gap_steps=2`.
 - Recording caps: pre-roll 300 ms, trailing silence 500 ms, word cap 4000 ms, sentence/negative cap 6000 ms, no-speech timeout 8000 ms, auto-advance hold 700 ms, flash-full threshold 200 KB free.
 - Commit messages: conventional prefix (`feat:`, `fix:`, `docs:`, `ci:`, `test:`), no AI co-author trailers beyond what the repo hooks add.
