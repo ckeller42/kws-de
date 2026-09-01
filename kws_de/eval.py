@@ -35,6 +35,23 @@ def snr_sweep(eval_fn, snrs) -> dict:
     return {float(s): float(eval_fn(s)) for s in snrs}
 
 
+def intent_accuracy(true_intents, pred_intents) -> float:
+    """Fraction of predictions where device+zone+action all match the true intent
+    (an `Intent`/`Rejection` mismatch, e.g. a wrong slot or a rejected parse,
+    counts as wrong)."""
+    pairs = list(zip(true_intents, pred_intents, strict=True))
+    if not pairs:
+        return 0.0
+    return sum(t == p for t, p in pairs) / len(pairs)
+
+
+def evaluate_streaming(predict_fn, clips_sequences) -> dict:  # pragma: no cover
+    """Run `KeywordStream` over held-out command-clip sequences, `grammar.parse`
+    the resulting events, and score against each sequence's true intent. Thin
+    I/O glue over `intent_accuracy` — not wired up yet (v2 Task 6 follow-on)."""
+    raise NotImplementedError("wire KeywordStream + grammar.parse; see plan Task 6")
+
+
 def render_report(results: dict) -> str:
     lines = [
         "## Evaluation summary",
