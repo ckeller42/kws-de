@@ -61,8 +61,33 @@ clips** (Licht, Kühlschrank, Heizung, Wasser, aus, auf, Außen[158]); 17 incl. 
 - Vocabulary grounded in the camper's real controllable functions (8 devices, 4 light
   zones, 12 actions, device-specific validity map) — invalid combinations are rejected by
   the grammar, not learned by the model.
-- *(results pending — training + catalog eval running; insert per-command intent-accuracy
-  table, overall full-intent accuracy, SNR sweep here when the run lands)*
+- **Before fix** (asymmetric train-set domains — see §5 war story): clip-level held-out
+  accuracy 88.5%, but full command-catalog end-to-end accuracy **0.000** (152 trials =
+  38 catalog entries x 4 voices). Model output `_unknown_` at ~1.00 on every streaming
+  window, including word-centered ones.
+- **After fix** (symmetric clean+noise domains for every class + +/-200ms random
+  time-shift augmentation, retrained 40 epochs, train accuracy 92.6%): full-intent
+  catalog accuracy **0.066** (device 0.066, action 0.066, zone 0.031). Real, but still
+  far from usable.
+- Root-caused the residual gap with a single-phrase probe (`Licht Küche an`, per-step
+  top-2 posteriors dumped through the actual `KeywordStream`): individual words ARE
+  recognized correctly and confidently in isolation (Licht 0.996, Küche 0.99, an
+  0.996) — this is NOT a data/training problem anymore. It's a stream-composition
+  problem: (1) posterior smoothing (`smooth_win=3`) makes a word's detection "linger"
+  into the next word's window, causing the SAME word to re-fire a step or two after the
+  audio has already moved on; (2) the resulting refractory cooldown then blocks the
+  actual next word's confidence peak from ever being sampled; (3) windows straddling a
+  word boundary (tail of one word + silence gap + head of the next) produce confident
+  but wrong predictions for words that aren't even in the audio (e.g. a ghost
+  "Heizung" between "Küche" and "an") — the model was never trained on inter-word
+  transition windows, only isolated single-word clips. Net effect: `grammar.parse`
+  sees duplicate-device / duplicate-action / missing-slot patterns and rejects.
+  Tried one extra round of stream-parameter tuning (`smooth_win`/`threshold`/
+  `refractory` combos) on the same phrase — none resolved both failure modes at once
+  (loosening refractory to stop under-firing just causes more duplicate over-firing).
+  This is an architecture-level fix (debounce that collapses consecutive identical
+  fires, and/or training on synthesized multi-word transition audio), out of scope for
+  this pass — flagged for a follow-up task rather than iterated on blindly.
 
 ### E4 — wake word, local training feasibility
 
@@ -99,6 +124,19 @@ per-voice fidelity. Setup: macOS `say` only (~9 voices) vs multi-engine
   an entire train→export→eval chain "succeeded" as a no-op. Verify artifacts, not exit codes.
 - **License landscape for German TTS** (HF survey): permissive core = Piper + Parler-TTS
   (Apache); XTTS-v2/MMS are non-commercial — matters for a public/commercial artifact.
+- **The model learned the noise floor, not the words:** `build_dataset` added command-word
+  clips ONLY noise-mixed (one row per SNR, no clean copy) but `_unknown_` clips ONLY
+  clean. The model didn't learn to recognize words at all — it learned "clean audio
+  implies `_unknown_`, noisy audio implies some command," a trivial shortcut orthogonal
+  to the actual task. Clip-level held-out accuracy was **88.5%** on this broken data,
+  because the held-out test set shared the same asymmetry — a perfectly consistent,
+  perfectly wrong signal. The giveaway was the SNR sweep improving as noise got *worse*
+  (0.000 clean, better at high noise) — backwards for a real word-recognition model. The
+  end-to-end command-catalog eval (full audio -> stream -> grammar -> intent, scored
+  0.000) caught what the clip-level split-eval metric could not, because clip-level eval
+  inherited the same broken assumption the training data did. Fix: every class sees the
+  same audio domains (one clean + one noise-mixed copy per SNR), plus random time-shift
+  augmentation so words are recognizable at any window offset, not just clip-start.
 
 ## 6. Slide-deck skeleton (draft)
 

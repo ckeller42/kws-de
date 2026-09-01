@@ -54,10 +54,42 @@ def split_by_speaker(clips_with_speakers: dict, rng, test_frac: float = 0.2, *, 
     return train_clips, test_clips
 
 
+def _random_shift(clip, rng, max_shift_ms: int = 200):
+    """Random time-shift by up to +/-max_shift_ms, zero-filled (not circular).
+    Pads/truncates to config.CLIP_SAMPLES first so the shift is well-defined.
+    Words must be recognisable at any window offset, not just clip-start."""
+    sig = np.asarray(clip, dtype=np.float32).ravel()
+    n = config.CLIP_SAMPLES
+    if sig.shape[0] < n:
+        sig = np.pad(sig, (0, n - sig.shape[0]))
+    sig = sig[:n]
+    max_shift = int(config.SAMPLE_RATE * max_shift_ms / 1000)
+    if max_shift <= 0:
+        return sig
+    shift = int(rng.integers(-max_shift, max_shift + 1))
+    out = np.zeros_like(sig)
+    if shift > 0:
+        out[shift:] = sig[: n - shift]
+    elif shift < 0:
+        out[: n + shift] = sig[-shift:]
+    else:
+        out[:] = sig
+    return out
+
+
 def build_dataset(clips, noises, rng, snrs=(20, 10, 0), labels=None, commands=None):
     """Build (X, y) from raw clips. `labels`/`commands` default to the v1 vocab
     (`config.LABELS`/`config.COMMANDS`) so existing v1 callers are unaffected;
-    pass `labels=config.COMMAND_LABELS, commands=command_words()` for v2."""
+    pass `labels=config.COMMAND_LABELS, commands=command_words()` for v2.
+
+    Every word class (commands AND `_unknown_`) sees the SAME audio domains: one
+    clean (time-shifted) copy plus a noise-mixed (time-shifted) copy at each snr
+    in `snrs` -- per-clip count = 1 + len(snrs). This matters: if commands were
+    noise-only and `_unknown_` clean-only, the model learns "clean audio implies
+    _unknown_" instead of the actual words. `_silence_` stays noise-only (that IS
+    its definition) plus a few pure-zero clean samples so clean input alone
+    doesn't uniquely signal any one class.
+    """
     labels = list(labels) if labels is not None else config.LABELS
     commands = list(commands) if commands is not None else config.COMMANDS
     X, y = [], []
@@ -66,18 +98,25 @@ def build_dataset(clips, noises, rng, snrs=(20, 10, 0), labels=None, commands=No
         X.append(mfcc(sig))
         y.append(labels.index(label))
 
+    def add_word_clip(clip, label):
+        add(_random_shift(clip, rng), label)
+        for snr in snrs:
+            noise = noises[int(rng.integers(0, len(noises)))]
+            add(mix_at_snr(_random_shift(clip, rng), noise, snr, rng), label)
+
     for cmd in commands:
         for clip in clips.get(cmd, []):
-            for snr in snrs:
-                noise = noises[int(rng.integers(0, len(noises)))]
-                add(mix_at_snr(clip, noise, snr, rng), cmd)
+            add_word_clip(clip, cmd)
     for clip in clips.get("_unknown_", []):
-        add(clip, "_unknown_")
+        add_word_clip(clip, "_unknown_")
     n_sil = max(1, len(clips.get("_unknown_", [])))
     for _ in range(n_sil):
         noise = noises[int(rng.integers(0, len(noises)))]
         sil = mix_at_snr(np.zeros(config.CLIP_SAMPLES, np.float32), noise, 0.0, rng)
         add(sil, "_silence_")
+    n_clean_sil = max(1, n_sil // 10)
+    for _ in range(n_clean_sil):
+        add(np.zeros(config.CLIP_SAMPLES, np.float32), "_silence_")
     return np.asarray(X, np.float32), np.asarray(y, np.int64)
 
 
@@ -305,17 +344,20 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
 def _origin_flags(clips_ws: dict, snrs, words=None) -> np.ndarray:
     """Boolean array flagging TTS-synthesized origin (speaker id prefix "tts:"),
     aligned row-for-row to build_dataset's output for the same clips/snrs — must
-    mirror build_dataset's iteration order (commands x snrs, then unknown, then
-    silence) exactly."""
+    mirror build_dataset's iteration order (commands then unknown, each clip's
+    clean copy + one row per snr, then silence, then clean silence) exactly."""
     words = list(words) if words is not None else config.COMMANDS
+    per_clip = 1 + len(snrs)
     flags = []
     for cmd in words:
         for _clip, spk in clips_ws.get(cmd, []):
-            flags.extend([spk.startswith("tts:")] * len(snrs))
-    for _clip, _spk in clips_ws.get("_unknown_", []):
-        flags.append(False)
+            flags.extend([spk.startswith("tts:")] * per_clip)
+    for _clip, spk in clips_ws.get("_unknown_", []):
+        flags.extend([spk.startswith("tts:")] * per_clip)
     n_sil = max(1, len(clips_ws.get("_unknown_", [])))
     flags.extend([False] * n_sil)
+    n_clean_sil = max(1, n_sil // 10)
+    flags.extend([False] * n_clean_sil)
     return np.asarray(flags, dtype=bool)
 
 

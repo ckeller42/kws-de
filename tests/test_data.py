@@ -22,6 +22,10 @@ def test_build_dataset_shapes_and_labels():
 
 
 def test_commands_are_augmented_per_snr():
+    # per-clip row count = 1 clean copy + len(snrs) noise-mixed copies, symmetric
+    # between commands and _unknown_ (see data.build_dataset docstring: asymmetric
+    # clean/noise domains between them is what made the model learn "clean audio
+    # implies _unknown_" instead of the actual words).
     rng = np.random.default_rng(1)
     clips = {c: [_clip(rng)] for c in config.COMMANDS}
     clips["_unknown_"] = [_clip(rng)]
@@ -29,7 +33,11 @@ def test_commands_are_augmented_per_snr():
     X2, y2 = build_dataset(clips, noises, rng, snrs=(20, 10))
     X1, y1 = build_dataset(clips, noises, rng, snrs=(20,))
     licht = config.label_index("Licht")
-    assert (y2 == licht).sum() == 2 * (y1 == licht).sum()
+    unknown = config.label_index("_unknown_")
+    assert (y2 == licht).sum() == 1 + 2
+    assert (y1 == licht).sum() == 1 + 1
+    assert (y2 == unknown).sum() == 1 + 2
+    assert (y1 == unknown).sum() == 1 + 1
 
 
 def test_split_by_speaker_is_disjoint_and_covers_all_clips():
@@ -88,7 +96,9 @@ def test_origin_flags_marks_tts_rows_and_mirrors_build_dataset_order():
     }
     snrs = (20, 10, 0)
     flags = _origin_flags(clips_ws, snrs)
-    # Licht: 1 TTS clip x 3 snrs (True) + 1 real clip x 3 snrs (False), then
-    # 1 unknown row (False), then n_sil = max(1, 1) = 1 silence row (False).
-    expected = [True, True, True, False, False, False, False, False]
+    # per_clip = 1 + len(snrs) = 4 rows/clip (clean + one per snr).
+    # Licht: 1 TTS clip x 4 (True) + 1 real clip x 4 (False), then
+    # 1 unknown clip x 4 (False), then n_sil = max(1, 1) = 1 silence row (False),
+    # then n_clean_sil = max(1, n_sil // 10) = 1 clean silence row (False).
+    expected = [True] * 4 + [False] * 4 + [False] * 4 + [False] * 1 + [False] * 1
     assert flags.tolist() == expected
