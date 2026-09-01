@@ -169,7 +169,8 @@ def run_catalog_eval(  # pragma: no cover - orchestration (real TTS + real model
     step_ms=100,
     smooth_win=3,
     threshold=0.5,
-    refractory=3,
+    min_consecutive=2,
+    gap_steps=2,
 ) -> dict:
     """Run the FULL command catalog end-to-end: synthesize each catalog intent
     (several voices), run audio -> mfcc -> KeywordStream -> grammar.parse, and
@@ -204,7 +205,8 @@ def run_catalog_eval(  # pragma: no cover - orchestration (real TTS + real model
                 step_samples,
                 smooth_win=smooth_win,
                 threshold=threshold,
-                refractory=refractory,
+                min_consecutive=min_consecutive,
+                gap_steps=gap_steps,
             )
             pred = parse(events)
             total += 1
@@ -237,7 +239,8 @@ def run_catalog_eval(  # pragma: no cover - orchestration (real TTS + real model
         "voices": list(voices),
         "smooth_win": smooth_win,
         "threshold": threshold,
-        "refractory": refractory,
+        "min_consecutive": min_consecutive,
+        "gap_steps": gap_steps,
         "step_ms": step_ms,
     }
 

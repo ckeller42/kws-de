@@ -85,9 +85,36 @@ clips** (Licht, Kühlschrank, Heizung, Wasser, aus, auf, Außen[158]); 17 incl. 
   Tried one extra round of stream-parameter tuning (`smooth_win`/`threshold`/
   `refractory` combos) on the same phrase — none resolved both failure modes at once
   (loosening refractory to stop under-firing just causes more duplicate over-firing).
-  This is an architecture-level fix (debounce that collapses consecutive identical
-  fires, and/or training on synthesized multi-word transition audio), out of scope for
-  this pass — flagged for a follow-up task rather than iterated on blindly.
+  Diagnosis: the level-triggered threshold + global refractory conflates two
+  different jobs (debounce a lingering same-word detection vs. gate the next
+  word) into one cooldown knob, so no single value can satisfy both.
+- **Decoder fix** (edge-triggered run-based decoding, `kws_de/stream.py::KeywordStream`
+  rewritten — see §4): full-intent catalog accuracy **0.066 -> 0.362** (152 trials,
+  same 38 catalog entries x 4 voices, default params `step_ms=100, smooth_win=3,
+  threshold=0.5, min_consecutive=2, gap_steps=2`; device 0.362, action 0.362, zone
+  0.156). One tuning pass over `(step_ms, smooth_win, threshold, min_consecutive,
+  gap_steps)` (6 combos, posteriors cached across combos to reuse the same TTS audio)
+  found no combo beating the defaults:
+
+  | step_ms | smooth_win | threshold | min_consecutive | gap_steps | accuracy |
+  |---|---|---|---|---|---|
+  | 100 | 3 | 0.5 | 2 | 2 | **0.362** (default) |
+  | 100 | 2 | 0.5 | 2 | 2 | 0.362 |
+  | 100 | 3 | 0.6 | 2 | 2 | 0.296 |
+  | 50 | 3 | 0.5 | 3 | 3 | 0.342 |
+  | 50 | 3 | 0.5 | 2 | 2 | 0.243 |
+  | 100 | 3 | 0.5 | 3 | 2 | 0.309 |
+
+  Per-entry pattern: bare `device action` (2-token) entries mostly score 0.25-1.0
+  (several perfect: Heizung, USB, Energie-Normal), while zoned `Licht` (3-token)
+  entries mostly score 0.0-0.25 (zone-slot accuracy only 0.156) — each additional
+  word adds another boundary-transition window where a 1-step ghost or a
+  same-word-linger can still slip through even with `min_consecutive=2`. Residual
+  gap is consistent with the run-based decoder having fixed the two *decoding*
+  failure modes (same-word re-fire, next-word swallowing) while the *upstream*
+  cause of boundary-transition ghosts — the model never trained on inter-word
+  transition audio — remains, and compounds with phrase length. Flagged as a
+  follow-up (multi-word transition augmentation), not further stream-param tuning.
 
 ### E4 — wake word, local training feasibility
 
@@ -110,8 +137,16 @@ per-voice fidelity. Setup: macOS `say` only (~9 voices) vs multi-engine
 - Budget gates as CI: "fits the MCU" as a unit test (≤500 KB / ≤3 M MACs / INT8-only ops).
 - Speaker-disjoint splits everywhere; TTS clips split by voice+rate combo (a synthetic
   "speaker") so voices never straddle train/test.
-- Streaming detector: posterior smoothing + threshold + refractory debounce
-  (found + fixed a real off-by-one: decrement-then-check let a sustained word re-fire).
+- Streaming detector: posterior smoothing (trailing mean) + threshold, decoded with
+  **edge-triggered run-based decoding**: a run of consecutive steps sharing the same
+  qualifying top-1 label fires its label once, as soon as the run reaches
+  `min_consecutive` steps, with no global cooldown — a different label's run may fire
+  immediately after its own run qualifies, and the same label may fire again only
+  after >= `gap_steps` non-matching steps since its run ended. Replaced an earlier
+  level-triggered threshold + global-refractory debounce (found + fixed a real
+  off-by-one there first: decrement-then-check let a sustained word re-fire) that
+  conflated same-word debounce and next-word gating into one cooldown knob and could
+  not satisfy both at once (see §3 E3).
 
 ## 5. War stories / lessons (talk material)
 
