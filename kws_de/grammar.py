@@ -41,4 +41,8 @@ def parse(events: list[str]) -> Intent | Rejection:
         return Rejection("missing device")
     if action is None:
         return Rejection("missing action")
+    if zone is not None and device not in config.ZONED_DEVICES:
+        return Rejection(f"{device} takes no zone")
+    if action not in config.DEVICE_ACTIONS[device]:
+        return Rejection(f"{action} invalid for {device}")
     return Intent(device, zone, action)

@@ -27,3 +27,23 @@ def test_out_of_order_rejected():
 
 def test_duplicate_slot_rejected():
     assert isinstance(parse(["Licht", "Heizung", "an"]), Rejection)
+
+
+def test_action_invalid_for_device_rejected():
+    assert isinstance(parse(["Aufstelldach", "an"]), Rejection)  # roof has no an/aus
+
+
+def test_roof_auf_valid():
+    assert parse(["Aufstelldach", "auf"]) == Intent("Aufstelldach", None, "auf")
+
+
+def test_zone_on_non_zoned_device_rejected():
+    assert isinstance(parse(["Heizung", "Küche", "an"]), Rejection)
+
+
+def test_light_zone_brightness_valid():
+    assert parse(["Licht", "Küche", "heller"]) == Intent("Licht", "Küche", "heller")
+
+
+def test_energy_mode_valid():
+    assert parse(["Energie", "Eco"]) == Intent("Energie", None, "Eco")

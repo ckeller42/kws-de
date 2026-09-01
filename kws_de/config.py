@@ -31,9 +31,43 @@ def label_index(label: str) -> int:
 # --- v2: wake word + slot commands (additive; v1 constants above untouched) ---
 WAKE_WORD = "Hey Bus"
 WAKE_LABELS = ["wake", "_not_"]
-DEVICES = ["Licht", "Heizung", "Kühlschrank", "Wasser"]
-ZONES = ["Küche", "Bad", "Decke", "Außen"]
-ACTIONS = ["an", "aus"]
+DEVICES = [
+    "Licht",
+    "Kühlschrank",
+    "Heizung",
+    "Aufstelldach",
+    "Campingmodus",
+    "USB",
+    "Wasser",
+    "Energie",
+]
+ZONES = ["Küche", "Dach", "Außen", "Lesen"]  # light zones — apply to Licht only
+ACTIONS = [
+    "an",
+    "aus",
+    "auf",
+    "zu",
+    "heller",
+    "dunkler",
+    "wärmer",
+    "kälter",
+    "leise",
+    "Eco",
+    "Max",
+    "Normal",
+]
+ZONED_DEVICES = ["Licht"]
+# Per-device allowed actions — grounded in the real controllable functions.
+DEVICE_ACTIONS = {
+    "Licht": ["an", "aus", "heller", "dunkler"],
+    "Kühlschrank": ["an", "aus", "leise"],
+    "Heizung": ["an", "aus", "wärmer", "kälter"],
+    "Aufstelldach": ["auf", "zu"],
+    "Campingmodus": ["an", "aus"],
+    "USB": ["an", "aus"],
+    "Wasser": ["an", "aus"],
+    "Energie": ["Eco", "Max", "Normal"],
+}
 COMMAND_LABELS = DEVICES + ZONES + ACTIONS + ["_unknown_", "_silence_"]
 
 
