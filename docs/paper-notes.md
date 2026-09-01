@@ -354,6 +354,18 @@ the local cache (multi-speaker voices expanded per speaker) alongside `say`, spe
 clip gets one pitch/tempo-perturbed copy at build time. v2 feature files are untouched (frozen); the
 effect is measured with v3.
 
+### Paper maintenance (2026-09-01)
+
+- §5 now states the deployed architecture layer by layer (stem 3×3/32 → 3 × DS block → global
+  mean → Dense 23; 5 879 params, 2.07 M MACs, five TFLM builtins) and the KWT teacher (d 64,
+  depth 3, 4 heads, MLP 128, 106 k params) plus the E9 loss with T = 4, α = 0.5.
+- §4.4 added: split sizes (20 116 / 4 101 / 4 042 rows), per-word real-vs-TTS provenance from the
+  frozen v2 features (4 real-only, 2 mixed, 15 TTS-only command words — the old "17 of 23" counted
+  the 24-word vocabulary), and worked examples for clip → class, events → intent, rejections.
+- Paper gate: `scripts/check-paper.sh` fails `git push` / `gh pr create` when a branch changes
+  `kws_de/`, `firmware/` or a results report without touching paper.md or paper-notes.md
+  (`PAPER_SKIP=1` for pure refactors).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

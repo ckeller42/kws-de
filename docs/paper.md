@@ -118,19 +118,91 @@ Splits are **speaker-disjoint**: real words split by `speaker_id`; TTS words by 
 id (`engine:voice:rate`) so a voice never straddles train and test. The reusable dataset (in
 progress) adds a **validation split** (so model selection never touches test), a **manifest**
 (per-word counts, config, content hashes — verifiable without shipping audio), a **deterministic
-rebuild** from one seed, and a **datasheet** (Gebru et al.) stating that 17/23 words are synthetic
-and that a real-microphone benchmark remains future work.
+rebuild** from one seed, and a **datasheet** (Gebru et al.) stating that 15 of the 21 command words
+are synthetic-only and that a real-microphone benchmark remains future work.
+
+### 4.4 Statistics and examples
+
+The frozen v2 feature set (seed 0) holds **28 259 one-second examples** over 23 classes: 21 command
+words plus `_unknown_` (other MSWC-German words, at most a few clips per word so no single
+distractor dominates) and `_silence_` (noise-only). Each source clip yields four rows — a randomly
+time-shifted clean copy and ESC-50 noise mixes at 20, 10 and 0 dB SNR — so 1 200 rows ≈ 300 source
+clips per word. Splits are speaker-disjoint (§4.3):
+
+| Split | Rows | Real | TTS |
+|---|---|---|---|
+| train | 20 116 | 6 544 | 13 572 |
+| val | 4 101 | 1 241 | 2 860 |
+| test | 4 042 | 1 186 | 2 856 |
+
+Provenance per word (rows, all splits):
+
+| Provenance | Words | Rows per word |
+|---|---|---|
+| real only (MSWC) | Licht, Kühlschrank, aus, auf | 1 200 real |
+| mixed | Heizung (480 real + 720 TTS), Außen (632 + 568) | 1 200 |
+| TTS only | Aufstelldach, Küche, Dach, Lesen, an, zu, heller, dunkler, wärmer, kälter, leise, fünfundzwanzig, fünfzig, fünfundsiebzig, hundert | 1 200 TTS |
+| non-command | `_unknown_` 2 400 real, `_silence_` 659 real | – |
+
+Real-speech numbers exclude every TTS row; in this set that leaves six words and the two
+non-command classes, while the fifteen TTS-only words shape the confusion structure but never the
+headline number. Synthetic speakers carry ids such as `tts:piper:de_DE-thorsten-medium`
+(v2 ids also carried the speaking rate) so the split holds out whole voices.
+
+Concise examples of what the system sees and decides:
+
+- **Word clip → class.** A 1 s clip of "Kühlschrank" → MFCC 49×10 → class `Kühlschrank`; an MSWC
+  clip of "Fenster" → `_unknown_`; 1 s of ESC-50 rain → `_silence_`.
+- **Event sequence → intent (grammar, §3).** `[Licht, Küche, an]` →
+  `Intent(device=Licht, zone=Küche, action=an)`; `[Heizung, wärmer]` →
+  `Intent(Heizung, –, wärmer)`; `[Licht, fünfzig]` → `Intent(Licht, –, fünfzig)` (50 %).
+- **Rejections (no model involved).** `[Kühlschrank, heller]` → `Rejection("heller invalid for
+  Kühlschrank")`; `[Küche, an]` → `Rejection("zone out of order")`.
+- **Catalog (E3).** The grammar's 49 valid intents — every (device, zone?, action) the van can
+  execute — synthesised as spoken phrases per voice, e.g. "Licht Außen aus", "Aufstelldach zu".
 
 ## 5. Method
 
-**Front-end.** 16 kHz, 1 s clips → MFCC (30 ms window / 20 ms hop, 40 mel, 10 cepstra → 49×10). The
-host (librosa) and device (esp-dsp) front-ends are pinned bit-for-bit by a fixed-input **golden-vector
-test** — the classic silent train/deploy mismatch becomes a unit test.
+**Front-end.** 16 kHz, 1 s clips → MFCC (30 ms periodic-Hann window / 20 ms hop, 480-point FFT
+(241 bins), 40 Slaney mel bands, log with an 80 dB floor, DCT-II, 10 cepstra → a 49×10 feature map).
+The host front-end is librosa; the device front-end is a table-driven C port (window, mel and DCT
+matrices generated from the same Python configuration) pinned to the host by a fixed-input
+**golden-vector test** — the classic silent train/deploy mismatch becomes a unit test.
 
-**Model and quantization.** A small DS-CNN (~5 k params), full-INT8 via representative-dataset
-calibration, exported to TFLite-Micro (ESP-NN kernels). **CI budget gates** assert model ≤ 500 KB,
-MACs ≤ 3 M, INT8-only I/O, and that every op is device-runnable — "fits the MCU" as a test, no
-hardware required. Batch size 32 through E8, 128 from E9 on (throughput; §notes).
+**Model architecture.** The deployed command recogniser is a depthwise-separable CNN in the
+"Hello Edge" family (Zhang et al., 2017), kept deliberately plain so every layer lowers to a
+TFLite-Micro builtin:
+
+| Stage | Layer | Output | Params |
+|---|---|---|---|
+| input | MFCC map (frames × cepstra × 1) | 49×10×1 | – |
+| stem | Conv2D 3×3, 32 filters, no bias → BatchNorm → ReLU | 49×10×32 | 288 + 128 |
+| block ×3 | DepthwiseConv2D 3×3 → BN → ReLU → Conv2D 1×1, 32 filters → BN → ReLU | 49×10×32 | 3 × (288 + 128 + 1 024 + 128) |
+| pool | global average over time and cepstra (`MEAN`) | 32 | – |
+| head | Dense 32 → 23, softmax | 23 | 759 |
+
+5 879 parameters, 2.07 M MACs per 1 s window (the 1×1 pointwise convolutions dominate:
+49·10·32·32 ≈ 0.5 M each). There is no striding, pooling or dropout inside the stack — the feature
+map stays at full 49×10 resolution and the receptive field grows only through the four 3×3 stages
+(9 frames ≈ 190 ms of context per output cell, with global pooling supplying the rest). BatchNorm is
+folded into the convolutions at export; the INT8 graph uses exactly `CONV_2D`, `DEPTHWISE_CONV_2D`,
+`MEAN`, `FULLY_CONNECTED` and `SOFTMAX` and is 20.2 KB. Output classes are the 21 command words plus
+`_unknown_` and `_silence_` (§3). Three alternative encoders (MatchboxNet, BC-ResNet, the Keyword
+Transformer) are benchmarked against it in §6.7.
+
+**Teacher and distillation (E9).** The teacher is a Keyword Transformer (Berg et al., 2021): each of
+the 49 MFCC frames is linearly projected to d = 64, a learned class token is prepended and learned
+positional embeddings added, then 3 pre-LayerNorm encoder blocks (4-head self-attention with key
+dimension 16, MLP 64 → 128 → 64 with ReLU, residuals) and a final LayerNorm; the class-token output
+feeds a Dense softmax (106 k parameters, float only — its attention/LayerNorm ops do not lower to
+INT8 TFLite-Micro, §6.7). The student is the unchanged DS-CNN above, trained on
+α · CE(y, p_s) + (1 − α) · T² · KL(p_t^T ‖ p_s^T) with T = 4, α = 0.5, where p^T denotes the
+softmax at temperature T (Hinton et al., 2015).
+
+**Quantization and budget gates.** Full-INT8 post-training quantization with a class-balanced
+representative set (E10), exported to TFLite-Micro (ESP-NN kernels). **CI budget gates** assert
+model ≤ 500 KB, MACs ≤ 3 M, INT8-only I/O, and that every op is device-runnable — "fits the MCU" as
+a test, no hardware required. Batch size 32 through E8, 128 from E9 on (throughput; §notes).
 
 **Two-stage runtime.** An always-on **wake detector** ("Hey Bus", microWakeWord) gates the heavier
 **command recogniser**, which runs streaming inside the post-wake window. The command model's
@@ -348,7 +420,7 @@ data to win *on-device*.
 
 ## 8. Limitations and future work
 
-- **Synthetic data.** 17 of 23 words are TTS-only; those per-word numbers are not real-speech
+- **Synthetic data.** 15 of 21 command words are TTS-only; those per-word numbers are not real-speech
   performance. A recorded real-speaker (and real-microphone) test set is planned.
 - **Per-device robustness.** The catalog result is lighting-dominated; long compound words
   (Kühlschrank) fail under the current frame-classification + hand-rolled decoder.

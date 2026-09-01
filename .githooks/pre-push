@@ -10,4 +10,6 @@ uv run pytest -q || {
   echo "[pre-push] tests FAILED -- fix, or 'git push --no-verify' to bypass." >&2
   exit 1
 }
+echo "[pre-push] paper gate (scripts/check-paper.sh)"
+scripts/check-paper.sh || exit 1
 echo "[pre-push] OK"
