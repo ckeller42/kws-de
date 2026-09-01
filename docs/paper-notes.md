@@ -163,12 +163,52 @@ laptop in minutes. (5 packaging/dependency blockers were fixed inside the traini
 mWW's pip package ships without its `layers/`+`audio/` subpackages, `datasets>=4` drops script
 loading, PyTorch 2.6 `weights_only` breaks Piper checkpoint loading, etc. — worth a footnote.)
 
-### E5 — TTS voice diversity (planned ablation)
+### E5 — TTS voice diversity (real ablation, DONE)
 
 Hypothesis: synthetic-data quality for KWS is dominated by **voice diversity**, not
-per-voice fidelity. Setup: macOS `say` only (~9 voices) vs multi-engine
-(say + Piper ~7 + Parler prompt-voices, round-robin) on the 17 zero-real words.
-*(numbers pending — compare catalog accuracy of both trainings)*
+per-voice fidelity. Setup: macOS `say`-only baseline (9 voices) vs multi-engine
+(say + Piper, 4 German neural voices: thorsten-medium, eva_k-x_low, ramona-low,
+karlsson-low), balanced round-robin via `kws_de.tts.voice_combos`, cycled back
+through the balanced pool to match the baseline's 300-clips/word target so
+training-set volume is (nearly) identical (29442/6017 rows vs baseline's
+29985/5474) — isolating diversity, not data quantity, as the variable.
+
+**Result: diversity did NOT help overall — full-intent catalog accuracy fell hard,
+0.689 -> 0.245** (device/action slot 0.714 -> 0.245, zone slot 0.789 -> 0.219;
+clip-level held-out accuracy 0.866 -> 0.779). But the effect is not uniform, and
+where it isn't uniform is informative:
+
+| Device (weight in 49-entry catalog) | say-only | say+piper | Delta |
+|---|---|---|---|
+| Licht (40/49, 82%) | 0.794 | 0.200 | **-0.594** |
+| Kühlschrank (3/49) | 0.000 | 0.000 | 0.000 |
+| Heizung (4/49) | 0.188 | **0.750** | **+0.563** |
+| Aufstelldach (2/49) | 0.625 | 0.500 | -0.125 |
+
+The hypothesis is confirmed exactly where it was expected to matter most: Heizung
+— one of the two weak non-Licht devices flagged in E3 — improved sharply (+0.56)
+with multi-engine training data. It does nothing for the other weak device:
+Kühlschrank stayed at a flat 0.000 in both configurations, so that failure was
+never a diversity problem (something else — grammar/decoder or Kühlschrank's own
+100%-real-clip vocabulary — is the actual blocker there, unexamined here). The
+net regression is entirely a Licht story: Licht carries 82% of catalog trials and
+its accuracy collapsed 0.794 -> 0.200, swamping Heizung's gain in the overall
+average. Likely mechanism (not verified further, out of scope for this ablation):
+the command model is a single shared 23-class classifier, not one head per
+device — Piper's more heavily-accented/varied renderings on the *other* classes
+plausibly shifted the shared decision boundary against Licht's real-speech
+distribution (Licht is 100% real MSWC clips, unaffected by the TTS-fill change
+itself). A per-device or curriculum-weighted engine mix (Piper only where it
+demonstrably helps, e.g. Heizung) is the natural follow-up; not attempted here.
+
+Honest caveat on ablation cleanliness: an earlier pass of this same experiment,
+run with the balanced-pool cap left at its natural size (32-72 clips/word instead
+of cycling back up to 300), collapsed to 0.066 — almost entirely a **data-volume**
+confound (train rows 17862 vs the matched-volume run's 29442), not a diversity
+effect; that run is not the number reported above. The cycling fix
+(`_tts_combo_plan` repeats the balanced engine-pool combos, relying on Piper's
+per-call stochastic `noise_scale` to keep repeats non-identical) closed that
+volume gap before the real 0.689 -> 0.245 comparison was drawn.
 
 
 ### E6 — sim-to-real gap (planned, needs the physical CoreS3)

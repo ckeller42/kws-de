@@ -219,12 +219,20 @@ data's flawed assumption cannot see the flaw.
 First-pass and untuned (39 % miss at the low-FA operating point; 100 % synthetic positives), but it
 establishes feasibility with numbers: a **custom German wake word trains on a laptop in minutes**.
 
-### 6.6 E5 — voice-diversity ablation *(in progress)*
+### 6.6 E5 — voice-diversity ablation (null in-domain; generalization untested)
 
-Hypothesis: for synthetic KWS data, **voice diversity** dominates per-voice fidelity. Setup:
-macOS `say` (~9 voices) vs `say` + Piper neural voices on the 17 TTS-only words, all else fixed.
-Baseline (say-only) catalog full-intent = **0.689**; the multi-engine comparison run is completing —
-the expected signal is on the weak non-Licht devices, where diversity should help most.
+Hypothesis: for synthetic KWS data, **voice diversity** dominates per-voice fidelity. We added
+Piper neural voices to the `say`-only training data (the 17 TTS-only words), all else fixed.
+Result: catalog full-intent accuracy was **unchanged at 0.689**, and the weak non-Licht devices
+were unmoved (Kühlschrank 0.00, Heizung ≈ 0.25). **Methodological catch:** the catalog test
+synthesises phrases with the same `say` voices present in *both* trainings, so this measures
+**in-domain** accuracy — not the **cross-voice generalization** the hypothesis targets. A fair test
+requires **voice-disjoint** train/test (whole voices held out) — precisely what the reusable
+dataset's speaker-disjoint splits (§4.3, Phase 0) are built to provide. Honest reading: *no
+in-domain gain from diversity here; the generalization claim is untested until a voice-held-out
+protocol runs.* The multi-engine TTS infrastructure is now in place for that test. This null result
+is itself a lesson — a diversity ablation with an in-domain test set cannot detect the effect it
+is designed to measure.
 
 ## 7. Discussion
 

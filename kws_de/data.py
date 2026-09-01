@@ -3,9 +3,8 @@
 # input — so the arbitrary-code-execution risk on unpickling doesn't apply here.
 import argparse
 import io
-import itertools
+import os
 import pickle
-import random
 import subprocess
 import zipfile
 from pathlib import Path
@@ -13,7 +12,7 @@ from urllib.request import urlopen
 
 import numpy as np
 
-from kws_de import config
+from kws_de import config, tts
 from kws_de.augment import mix_at_snr
 from kws_de.features import mfcc
 
@@ -385,22 +384,52 @@ def _say_one(word: str, voice: str, rate: int, phrasing: str, wav_path: Path):  
     return y.astype(np.float32), f"tts:{voice}:{rate}"
 
 
+def tts_engines() -> list[str]:
+    """Which TTS engines `_tts_fill_word` draws from. Multi-engine (voice diversity across
+    say+piper+...) by default; set env var ``KWS_TTS_ENGINES=say`` to reproduce the
+    say-only baseline (docs/eval-report-v2.md). Pure aside from the env read."""
+    override = os.environ.get("KWS_TTS_ENGINES")
+    if override:
+        return [e.strip() for e in override.split(",") if e.strip()]
+    return tts.available_engines()
+
+
+def _tts_combo_plan(word: str, n: int, engines: list[str]) -> list[tuple[str, str, int]]:
+    """Pure selection logic: `n` (engine, voice, rate) combos to synthesize `word` with,
+    drawn round-robin across `engines` (kws_de.tts.voice_combos) so multiple engines
+    contribute EQUALLY — plain round-robin alone stops being balanced once the smallest
+    engine's voice/rate pool runs out and the larger one keeps filling the rest alone.
+    Once the balanced pool itself is exhausted (n exceeds every engine's distinct
+    voice/rate combos), CYCLES back through it to reach n — engines whose backend is
+    stochastic per call (e.g. Piper's noise_scale) still produce fresh distinct audio on
+    a repeat; deterministic ones (macOS `say`) produce an exact repeat, no worse than
+    the redundancy any oversampling scheme adds. No backends touched."""
+    if not engines:
+        return []
+    pool = min(len(tts.ENGINE_VOICES.get(e) or ["default"]) * len(tts.RATES) for e in engines)
+    base = tts.voice_combos(len(engines) * pool, engines)
+    if not base:
+        return []
+    reps = -(-max(n, 0) // len(base))  # ceil division
+    return (base * reps)[: max(n, 0)]
+
+
 def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4) -> list:
-    # pragma: no cover - shells out
-    """Synthesize up to n clips of `word` via macOS `say` (parallelized — each
-    `say` call is an independent subprocess, so this is I/O-bound and speeds up
-    ~10x with a thread pool), varied by voice/rate/punctuation. Returns
-    [(np.ndarray, speaker_id)] with speaker_id="tts:{voice}:{rate}"."""
+    # pragma: no cover - shells out / loads models
+    """Synthesize up to n clips of `word` across all engines from `tts_engines()`
+    (parallelized — each synthesis call is independent, so this is I/O/compute-bound and
+    speeds up with a thread pool), varied by engine/voice/rate. Returns
+    [(np.ndarray, speaker_id)] with speaker_id="tts:{engine}:{voice}:{rate}" so the
+    speaker-disjoint split holds out whole voice combos, per engine."""
     from concurrent.futures import ThreadPoolExecutor
 
-    combos = list(itertools.product(_TTS_VOICES, _TTS_RATES, _TTS_PHRASINGS))
-    random.Random(abs(hash(word)) % (2**32)).shuffle(combos)
-    combos = combos[:n]
+    combos = _tts_combo_plan(word, n, tts_engines())
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     def _job(args):
-        i, (voice, rate, phrasing) = args
-        return _say_one(word, voice, rate, phrasing, tmp_dir / f"{word}_{i}.wav")
+        i, (engine, voice, rate) = args
+        audio = tts.synthesize(word, engine, voice, rate, tmp_dir / f"{word}_{i}.wav")
+        return None if audio is None else (audio, f"tts:{engine}:{voice}:{rate}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         results = list(ex.map(_job, enumerate(combos)))

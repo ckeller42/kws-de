@@ -41,7 +41,10 @@ ENGINE_VOICES: dict[str, list[str]] = {
     ],
     "xtts": [],  # filled at runtime from reference speaker clips (e.g. Common Voice DE)
 }
-RATES = [150, 180, 210, 240]  # words-per-minute style variation (engine maps as it can)
+RATES = [120, 140, 160, 180, 200, 220, 240, 260, 280]  # wpm; say maps directly, piper ignores it
+# but still benefits — Piper's default noise_scale makes every synthesis call stochastic
+# (verified: same voice+rate produces different audio each call), so more (voice, rate)
+# labels means more distinct clips even though rate itself isn't wired into Piper's config.
 
 
 def available_engines() -> list[str]:  # pragma: no cover - probes optional backends

@@ -1,7 +1,14 @@
 import numpy as np
 
-from kws_de import config
-from kws_de.data import _origin_flags, build_dataset, make_transition_windows, split_by_speaker
+from kws_de import config, tts
+from kws_de.data import (
+    _origin_flags,
+    _tts_combo_plan,
+    build_dataset,
+    make_transition_windows,
+    split_by_speaker,
+    tts_engines,
+)
 
 
 def _clip(rng):
@@ -156,6 +163,47 @@ def test_make_transition_windows_empty_when_no_clips():
     rng = np.random.default_rng(0)
     assert make_transition_windows({}, rng, n_pairs=3) == ([], [])
     assert make_transition_windows({"A": []}, rng, n_pairs=3) == ([], [])
+
+
+def test_tts_engines_reads_env_override(monkeypatch):
+    monkeypatch.setenv("KWS_TTS_ENGINES", "say, piper")
+    assert tts_engines() == ["say", "piper"]
+
+
+def test_tts_engines_defaults_to_available(monkeypatch):
+    monkeypatch.delenv("KWS_TTS_ENGINES", raising=False)
+    assert tts_engines() == tts.available_engines()
+
+
+def test_tts_combo_plan_single_engine_matches_voice_combos():
+    combos = _tts_combo_plan("Licht", 5, ["say"])
+    assert len(combos) == 5
+    assert all(e == "say" for e, _, _ in combos)
+
+
+def test_tts_combo_plan_balances_across_engines_of_unequal_pool_size():
+    # say has a bigger voice/rate pool than piper; requesting far more than either pool
+    # holds must still come back with EQUAL counts per engine, not say-heavy.
+    combos = _tts_combo_plan("Licht", 1000, ["say", "piper"])
+    from collections import Counter
+
+    counts = Counter(e for e, _, _ in combos)
+    assert set(counts) == {"say", "piper"}
+    assert counts["say"] == counts["piper"]
+
+
+def test_tts_combo_plan_empty_engines():
+    assert _tts_combo_plan("Licht", 10, []) == []
+
+
+def test_tts_combo_plan_cycles_past_pool_exhaustion_still_balanced():
+    # n bigger than the balanced pool must still return exactly n combos, evenly split.
+    combos = _tts_combo_plan("Licht", 2000, ["say", "piper"])
+    from collections import Counter
+
+    counts = Counter(e for e, _, _ in combos)
+    assert len(combos) == 2000
+    assert counts["say"] == counts["piper"] == 1000
 
 
 def test_build_dataset_includes_transition_windows():
