@@ -274,3 +274,52 @@ training per speaker (hundreds once Piper voices count), so:
   with every command present in each). Decision to build it is taken from
   the v3 datasheet, same as §3.3. Distillation per fold (teacher + student)
   is optional and doubles the cost; start with the plain student.
+
+## 10. Follow-up (not built now): probabilistic slot decoding
+
+Why: `stream.StreamDetector` thresholds each step to one event, then
+`grammar.parse` validates the event list. The decision is made before the
+constraint that could fix it — "an" 0.45 vs "aus" 0.50 emits "aus", the
+grammar accepts it, the intent is wrong. That is where the per-word³ catalog
+loss is paid. Grammar as language model (weighted paths, not tokens) recovers
+part of it without retraining.
+
+Rung 1 — n-best lattice parse (`kws_de/grammar.py`, `kws_de/stream.py`):
+
+- `StreamDetector.push` returns events as `(label, prob, runner_up_label,
+  runner_up_prob)` from the smoothed posterior it already has (`push` keeps
+  returning labels for existing callers via a small adapter, or callers move
+  to the tuple — decided in the plan).
+- `parse_lattice(events, *, tau, delta) -> Intent | Rejection`: enumerate
+  the ≤ 2 alternatives per event (≤ 8 sequences for a 3-word phrase), run
+  the existing `parse` on each, score = ∏ probs, take the best **valid**
+  parse; accept when `score ≥ tau` and margin to the runner-up ≥ `delta`,
+  else `Rejection("ambiguous")` carrying the top-2 intents so the device can
+  ask back. `parse` itself is unchanged.
+- Calibration: INT8 softmax is over-confident; fit one temperature on the
+  val split (`distill.soften(p, T)` is the function) and apply before
+  scoring. `tau`, `delta`, `T` live in `config`.
+- Evaluation E11, offline, no retraining: the catalog eval already
+  produces posteriors — re-decode them with `parse_lattice`, report catalog
+  accuracy before/after and the false-accept rate on the negative
+  (non-command) utterances at the same `tau`/`delta`. Report the ROC-style
+  sweep over `tau` in `paper-notes`.
+
+Rung 2 — catalog decoding, only if rung 1 leaves > 5 catalog points on the
+table: score every catalog phrase (`phrases.py` enumerates them, ~50)
+against the posterior sequence by monotonic DP alignment with filler states
+for `_unknown_`; skips the event stage entirely and yields one posterior
+over intents. Shares its thinking with the CTC lane (E8).
+
+Flexibility, orthogonal to scoring and each its own config knob:
+
+- Word order as prior, not rule: bag-of-slots with a log-penalty for
+  non-canonical order, so "hinten Licht an" parses.
+- `config.SYNONYMS = {"ausmachen": "aus", ...}` mapped before parse.
+- Missing zone → per-device default instead of `Rejection` (opt-in per
+  device in `config`).
+
+Risk: a best valid parse always exists, so garbage speech becomes an intent
+unless `tau`/`delta` bite — the false-accept rate on negatives is the gate,
+not catalog accuracy alone. Zone defaults and order relaxation widen the
+accept set; measure them separately.
