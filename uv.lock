@@ -1177,7 +1177,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "piper-tts", marker = "extra == 'tts'", specifier = ">=1.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.5" },
     { name = "soundfile", specifier = ">=0.12" },
     { name = "tensorflow", specifier = ">=2.16" },
     { name = "tensorflow-metal", marker = "extra == 'metal'", specifier = ">=1.1" },

@@ -1,7 +1,8 @@
 import numpy as np
 import tensorflow as tf
 
-from kws_de.distill import distill_targets, hard_accuracy, make_distill_loss, soften
+from kws_de import config
+from kws_de.distill import distill, distill_targets, hard_accuracy, make_distill_loss, soften
 
 
 def test_soften_identity_at_T1_and_flatter_at_higher_T():
@@ -44,3 +45,33 @@ def test_hard_accuracy_reads_one_hot_half():
     pred = tf.constant([[0.1, 0.9], [0.1, 0.9]], tf.float32)
     acc = hard_accuracy(2)(y_true, pred)
     assert np.isclose(float(tf.reduce_mean(acc)), 0.5)
+
+
+def _toy(n=64, seed=0):
+    rng = np.random.default_rng(seed)
+    X = rng.normal(0, 0.1, size=(n, config.N_FRAMES, config.N_MFCC)).astype(np.float32)
+    y = rng.integers(0, 2, size=n)
+    X[y == 1] += 2.0  # trivially separable
+    return X, y
+
+
+def test_distill_student_learns_separable_toy():
+    X, y = _toy()
+
+    # A "teacher" that is just a fixed lookup: returns confident-but-soft probs.
+    class Teacher:
+        def predict(self, Xc, verbose=0):
+            hot = (Xc.reshape(len(Xc), -1).mean(1) > 1.0).astype(np.float32)
+            return np.stack([1 - hot, hot], 1) * 0.8 + 0.1
+
+    # build_dscnn's BatchNorm moving stats (momentum 0.99) need well over 8
+    # epochs x 2 batches to converge for this low-variance toy input; 8 epochs
+    # (as the brief's draft used) leaves `student.predict` (inference-mode BN)
+    # collapsed to the majority class even though train-mode "accuracy" already
+    # reads 1.0 -- verified against the pre-existing kws_de.train.train too, so
+    # it's a BN-momentum/epoch-budget property of build_dscnn, not a distill()
+    # bug. 300 epochs is comfortably past the ~200-epoch point where it clears.
+    student, history = distill(X, y, Teacher(), epochs=300, seed=0, num_classes=2)
+    assert history["accuracy"][-1] > 0.9
+    preds = np.argmax(student.predict(X[..., None], verbose=0), 1)
+    assert (preds == y).mean() > 0.9
