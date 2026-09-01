@@ -59,7 +59,7 @@ Every TTS clip also gets one pitch/tempo-perturbed copy at build time
 ## Quick start
 
 ```bash
-uv sync                       # install deps (add --extra metal for Apple-GPU)
+uv sync                       # install deps (--extra metal loads Apple-GPU; slower for these models, see paper-notes)
 uv run kws-data   --fetch     # download MSWC-de keyword subset + noise, cache features
 uv run kws-train              # train the DS-CNN
 uv run kws-export             # -> models/model.tflite + firmware/main/model_data.h

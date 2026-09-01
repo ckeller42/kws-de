@@ -43,19 +43,26 @@ def _pad_batch(batches: list[tuple[np.ndarray, list]]) -> tuple:
     return X, logit_lengths, Y, label_lengths
 
 
+def _ctc_loss(logits, Y, label_lengths, logit_lengths):
+    # tensorflow-metal's CTC kernel returns NaN (TF 2.18 / metal 1.2.0); the
+    # op is cheap next to the encoder, so pin it to CPU on every backend.
+    with tf.device("/CPU:0"):
+        return tf.nn.ctc_loss(
+            labels=Y,
+            logits=logits,
+            label_length=label_lengths,
+            logit_length=logit_lengths,
+            logits_time_major=False,
+            blank_index=0,
+        )
+
+
 def ctc_loss_for(model: tf.keras.Model, batches: list[tuple[np.ndarray, list]]) -> float:
     """Mean CTC loss of `model` over `batches` -- no gradient step. Shared by
     `ctc_train`'s loop and callers wanting to score a held-out batch."""
     X, logit_lengths, Y, label_lengths = _pad_batch(batches)
     logits = model(tf.constant(X), training=False)
-    loss = tf.nn.ctc_loss(
-        labels=tf.constant(Y),
-        logits=logits,
-        label_length=tf.constant(label_lengths),
-        logit_length=tf.constant(logit_lengths),
-        logits_time_major=False,
-        blank_index=0,
-    )
+    loss = _ctc_loss(logits, tf.constant(Y), tf.constant(label_lengths), tf.constant(logit_lengths))
     return float(tf.reduce_mean(loss).numpy())
 
 
@@ -86,14 +93,7 @@ def ctc_train(
     for _ in range(epochs):
         with tf.GradientTape() as tape:
             logits = model(X_t, training=True)
-            loss = tf.nn.ctc_loss(
-                labels=Y_t,
-                logits=logits,
-                label_length=label_lengths_t,
-                logit_length=logit_lengths_t,
-                logits_time_major=False,
-                blank_index=0,
-            )
+            loss = _ctc_loss(logits, Y_t, label_lengths_t, logit_lengths_t)
             mean_loss = tf.reduce_mean(loss)
         grads = tape.gradient(mean_loss, model.trainable_variables)
         optimizer.apply_gradients(zip(grads, model.trainable_variables, strict=True))

@@ -306,7 +306,7 @@ Blocker (2) fixed. Root cause: `TimeDistributed(Dense)` head unrolled to a `tf.w
 |---|---|
 | CPU, batch 32 | 11.4 (22.8 s / 2 epochs) |
 | CPU, batch 128 | 9.8 (19.5 s / 2 epochs) |
-| Metal, batch 128 | not run — plugin failed to load |
+| Metal, batch 128 | not run — plugin failed to load (TF 2.21; resolved below) |
 
 Metal decision: **dropped** (`uv sync`, no `--extra metal`). `uv sync --extra dev --extra tts --extra metal` resolved and installed `tensorflow-metal==1.2.0` cleanly, but importing `tensorflow` then raised `NotFoundError` at plugin-load time: the Metal plugin dylib could not resolve TF's internal `_pywrap_tensorflow_internal` symbol library.
 
@@ -315,6 +315,18 @@ Metal decision: **dropped** (`uv sync`, no `--extra metal`). `uv sync --extra de
 CPU@128 vs CPU@32: ~1.17x faster — modest, as expected for models this tiny (per-step overhead, not compute, dominates at batch 32).
 
 batch 128 from E9 on; E7 numbers were batch 32 — not re-run.
+
+**Update 2026-09-02 (fix/tf-metal-pin).** Pinned `tensorflow>=2.16,<2.19` (resolves to 2.18.1; Keras stays 3.15) so `tensorflow-metal` 1.2.0 loads — `tests/test_metal.py` asserts a GPU device is listed whenever the metal extra is installed on Apple silicon (red on 2.21, green on 2.18). Two findings once it ran:
+
+1. Metal's CTC kernel returns NaN (`test_ctc_train_smoke_loss_decreases`); `transducer._ctc_loss` now pins `tf.nn.ctc_loss` to CPU on every backend — the op is negligible next to the encoder.
+2. It is slower. Per-epoch time on the frozen v2 train split (20,116 rows, batch 128, `train()` timed directly, fixed overhead subtracted via a 2-vs-4-epoch difference):
+
+| model | CPU | Metal | Metal/CPU |
+|---|---|---|---|
+| DS-CNN (5.9 k params) | 5.1 s | 5.6 s | 0.91× |
+| KWT teacher (106 k params) | 6.1 s | 10.6 s | 0.58× |
+
+Decision rule was "keep Metal only if ≥1.3× CPU@128" — fails on both models: kernel-launch overhead dominates at 49×10 inputs and the MFCC inputs are already precomputed, so there is no GPU-shaped work. `uv sync` without `--extra metal` stays the default; the extra now works for anyone who wants it, and the pin is what keeps it working.
 
 ### E9/E10 — distillation + balanced calibration (feat/real-speech-distill)
 
