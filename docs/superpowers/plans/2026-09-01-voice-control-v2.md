@@ -6,9 +6,9 @@
 
 **Architecture:** Two stages. A tiny always-on wake model gates a streaming command recogniser; a ring-buffer streaming detector turns posteriors into discrete keyword events; a pure grammar composes the events into a validated intent. Reuses v1's `config`/`features`/`augment`/`model`/`budgets`/`data` code.
 
-**Tech Stack:** Python 3.11, TensorFlow/Keras (tf.lite INT8), librosa, numpy, pytest, ruff — same as v1.
+**Tech Stack:** Python 3.11, TensorFlow/Keras (tf.lite INT8), librosa, numpy, pytest, ruff — same as v1. **Wake stage reuses [microWakeWord](https://github.com/kahrendt/microWakeWord)** (+ Piper TTS for its "Hey Bus" training samples) instead of a from-scratch model — see spec §12 (prior art & reuse decisions).
 
-**Spec:** `docs/superpowers/specs/2026-09-01-voice-control-v2-design.md`
+**Spec:** `docs/superpowers/specs/2026-09-01-voice-control-v2-design.md` — read §12 for why the wake stage is microWakeWord and the command→intent stage is ours.
 
 ## Global Constraints
 
@@ -18,6 +18,7 @@
 - v1 config constants (`COMMANDS`, `LABELS`, `NUM_CLASSES=7`) MUST stay intact and v1 tests stay green — v2 vocab is ADDITIVE (new constants), not a rewrite.
 - Grammar order: `device → zone? → action`. Bare `device action` (no zone) is valid. Missing device or action, out-of-order, duplicate slots → rejection.
 - Exports full-INT8; budgets (per v1): command model ≤ 500 000 B / ≤ 3 000 000 MACs; wake model held tighter (≤ 150 000 B, ≤ 1 000 000 MACs) as it is always-on.
+- The wake stage is **microWakeWord** — a proven S3-native streaming wake library (spec §12). We add it as a dependency and use its trainer (Piper TTS) for "Hey Bus"; we do NOT hand-roll a wake model. Its output is a TFLite-Micro streaming model we budget-check like any other. The command→intent stage stays ours (no open MCU equivalent exists).
 - No training data / model binaries committed (gitignored). No machine-specific paths. No third-party-app or decompile provenance anywhere in the repo (public repo).
 - Commit trailers: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` and `Claude-Session: https://claude.ai/code/session_016YVjMuh5AT7hGvYf4EtfUM`. Work on a branch → PR → CI + CodeRabbit → merge.
 
@@ -302,28 +303,95 @@ def test_build_dataset_over_command_labels():
 
 ---
 
-### Task 5: Wake-word model + dataset
+### Task 5: Wake word via microWakeWord + detector wrapper
+
+Adopt **microWakeWord** for the wake model (spec §12) — do NOT hand-roll one. microWakeWord is a
+training-time dependency that produces a streaming TFLite-Micro model for "Hey Bus"; at runtime we
+only load that model and wrap it with a cutoff + debounce. The unit-testable part is that wrapper.
 
 **Files:**
 - Create: `kws_de/wake.py`
 - Test: `tests/test_wake.py`
+- Modify: `pyproject.toml` (add microWakeWord as a `train` extra — training-time only)
 
 **Interfaces:**
-- Produces: `build_wake_model() -> tf.keras.Model` — input `(N_FRAMES, N_MFCC, 1)`, output 2 (`wake`/`_not_`) softmax, EXTRA small (≤ 12 000 params). `build_wake_dataset(wake_clips, neg_clips, noises, rng) -> (X, y)` (positives = "Hey Bus" clips, negatives = other speech + noise). `main()` CLI to fetch/TTS "Hey Bus" + train (I/O wrapper).
+- Produces:
+  - `WakeDetector(cutoff=0.8, refractory=20)` — `.push(prob: float) -> bool`: microWakeWord emits a per-step wake probability; the detector fires once when `prob >= cutoff`, then suppresses for `refractory` steps (debounce). Pure — unit-tested with scripted probabilities, no model needed.
+  - `load_wake_tflite(path) -> Callable[[np.ndarray], float]` — loads the microWakeWord streaming TFLite model and returns a `predict_fn(features) -> wake_prob`. (`# pragma: no cover` — needs the artifact.)
+  - `train_hey_bus(out_dir) -> Path` — `# pragma: no cover` wrapper invoking microWakeWord's trainer (Piper TTS "Hey Bus" positives + its negative/ambient sets) to produce `hey_bus.tflite`.
 
-- [ ] **Step 1: failing test**
+- [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wake.py
-from kws_de.wake import build_wake_model
+from kws_de.wake import WakeDetector
 
-def test_wake_model_is_tiny_two_class():
-    m = build_wake_model()
-    assert m.output_shape == (None, 2)
-    assert m.count_params() < 12_000
+def test_fires_once_on_sustained_wake():
+    d = WakeDetector(cutoff=0.8, refractory=5)
+    fired = [d.push(0.95) for _ in range(6)]
+    assert fired.count(True) == 1          # one wake despite sustained high prob
+
+def test_no_fire_below_cutoff():
+    d = WakeDetector(cutoff=0.8, refractory=5)
+    assert not any(d.push(0.5) for _ in range(6))
+
+def test_refractory_then_new_wake():
+    d = WakeDetector(cutoff=0.8, refractory=3)
+    seq = [0.95, 0.1, 0.1, 0.1, 0.95]      # wake, gap past refractory, wake
+    assert [d.push(p) for p in seq].count(True) == 2
 ```
 
-- [ ] **Step 2: fail**, **Step 3: implement** (a smaller DS-CNN than v1 — fewer channels/blocks; positives via macOS `say` "Hey Bus" many voices + optional recordings, negatives from MSWC random words + noise), **Step 4: pass**, **Step 5: commit** `feat(v2): tiny wake-word model + dataset builder`.
+- [ ] **Step 2: Run to verify it fails** — `uv run pytest tests/test_wake.py -v` → FAIL (`ModuleNotFoundError`).
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# kws_de/wake.py
+from pathlib import Path
+
+class WakeDetector:
+    def __init__(self, cutoff: float = 0.8, refractory: int = 20):
+        self.cutoff = cutoff
+        self.refractory = refractory
+        self._cooldown = 0
+
+    def push(self, prob: float) -> bool:
+        if self._cooldown > 0:
+            self._cooldown -= 1
+            return False
+        if prob >= self.cutoff:
+            self._cooldown = self.refractory
+            return True
+        return False
+
+def load_wake_tflite(path):  # pragma: no cover - needs the trained artifact
+    import numpy as np, tensorflow as tf
+    itp = tf.lite.Interpreter(model_path=str(path)); itp.allocate_tensors()
+    inp, out = itp.get_input_details()[0], itp.get_output_details()[0]
+    def predict_fn(features):
+        itp.set_tensor(inp["index"], np.asarray(features, inp["dtype"]).reshape(inp["shape"]))
+        itp.invoke()
+        return float(itp.get_tensor(out["index"]).ravel()[-1])
+    return predict_fn
+
+def train_hey_bus(out_dir) -> Path:  # pragma: no cover - invokes microWakeWord trainer
+    # Use microWakeWord's training framework: generate "Hey Bus" positives via Piper TTS,
+    # combine with its ambient/negative sets, train the streaming model, export TFLite-Micro.
+    # See https://github.com/kahrendt/microWakeWord (+ microwakeword-trainer). Produces
+    # hey_bus.tflite in out_dir.
+    raise NotImplementedError("wire microWakeWord trainer; see spec §12")
+```
+
+Add to `pyproject.toml`:
+
+```toml
+[project.optional-dependencies]
+train = ["microwakeword"]   # training-time only; runtime just loads the tflite
+```
+
+- [ ] **Step 4: Run to verify it passes** — `uv run pytest tests/test_wake.py -v` → PASS (3 tests).
+
+- [ ] **Step 5: Commit** — `git commit -m "feat(v2): wake stage via microWakeWord + cutoff/debounce detector"`
 
 ---
 
@@ -360,28 +428,28 @@ def test_intent_accuracy_all_slots_must_match():
 - Test: `tests/test_export_v2.py`
 
 **Interfaces:**
-- Produces: reuse `to_int8_tflite` for both models; `check_wake_budgets(tflite, model)` with the tighter always-on limits (≤ 150 000 B, ≤ 1 000 000 MACs, INT8).
+- Produces: reuse `to_int8_tflite` for the COMMAND model (ours). `check_wake_budgets(tflite: bytes) -> dict` — budget-checks the microWakeWord wake TFLite from its **bytes only** (size ≤ 150 000 B, full-INT8, TFLM-supported ops); MACs are not asserted here since the wake model is external (no Keras graph). The command model still uses v1's `check_budgets(tflite, keras_model)`.
 
-- [ ] **Step 1: failing test**
+- [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_export_v2.py
 import numpy as np
 from kws_de import config
-from kws_de.wake import build_wake_model
-from kws_de.export import to_int8_tflite
+from kws_de.model import build_dscnn          # stand-in small model; real wake tflite comes
+from kws_de.export import to_int8_tflite       # from microWakeWord (spec §12)
 from kws_de.budgets import check_wake_budgets
 
-def test_wake_model_within_always_on_budget():
-    m = build_wake_model()
+def test_wake_budget_checks_tflite_bytes_only():
+    m = build_dscnn()
     rng = np.random.default_rng(0)
     rep = rng.standard_normal((8, config.N_FRAMES, config.N_MFCC)).astype(np.float32)
-    blob = to_int8_tflite(m, rep)
-    r = check_wake_budgets(blob, m)
+    blob = to_int8_tflite(m, rep)              # a small INT8 tflite ~ wake-model size class
+    r = check_wake_budgets(blob)
     assert r["model_bytes"] <= 150_000 and r["int8"] is True
 ```
 
-- [ ] **Step 2: fail**, **Step 3: implement** `check_wake_budgets` (reuse `estimate_macs`/`is_full_int8`), **Step 4: pass**, **Step 5: commit** `feat(v2): INT8 export + tight wake budgets`.
+- [ ] **Step 2: fail**, **Step 3: implement** `check_wake_budgets(tflite)` (reuse `is_full_int8`/`tflite_op_types`; assert size ≤ 150 000 and int8), **Step 4: pass**, **Step 5: commit** `feat(v2): command INT8 export + byte-only wake budget check`.
 
 ---
 
@@ -393,9 +461,9 @@ def test_wake_model_within_always_on_budget():
 
 **Interfaces:** I/O wrappers (`# pragma: no cover`). This task RUNS the pipeline on real + TTS data and writes the report.
 
-- [ ] **Step 1:** Fetch/TTS the new words (`an, aus, Küche, Bad, Decke, Außen`) + "Hey Bus"; reuse v1 cached clips for `Licht/Heizung/Kühlschrank/Wasser`.
-- [ ] **Step 2:** Train command recogniser (COMMAND_LABELS) and wake model.
-- [ ] **Step 3:** Export INT8 both; run budget gates (command + wake).
+- [ ] **Step 1:** Fetch/TTS the new command words (`an, aus, Küche, Bad, Decke, Außen`); reuse v1 cached clips for `Licht/Heizung/Kühlschrank/Wasser`. ("Hey Bus" is handled by microWakeWord's own trainer, not this fetch.)
+- [ ] **Step 2:** Train the command recogniser (COMMAND_LABELS); produce the wake model via `wake.train_hey_bus` (microWakeWord + Piper "Hey Bus").
+- [ ] **Step 3:** Export the command model INT8 + `check_budgets`; `check_wake_budgets` on the microWakeWord `hey_bus.tflite`.
 - [ ] **Step 4:** Eval: wake **false-accepts/hour** over long noise + detection rate; command **full-intent accuracy** (stream → grammar) + per-slot accuracy; SNR sweep. Write `docs/eval-report-v2.md` with honest per-word real/TTS counts and the wake FA/hour headline.
 - [ ] **Step 5:** Keep suite green + ruff clean; commit code + `docs/eval-report-v2.md` (no data/models). `feat(v2): real training run + eval report (wake FA/hr, intent accuracy)`.
 

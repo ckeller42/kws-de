@@ -61,8 +61,9 @@ model runs **only** inside the post-wake window.
 
 ## 4. Components (all Mac + CI testable)
 
-- `kws_de/wake.py` — wake-word model (tiny DS-CNN, classes: `wake` / `_not_`) + a streaming
-  detector wrapper. Extra-small for always-on.
+- `kws_de/wake.py` — a thin wrapper around **microWakeWord** (see §12): trains/loads a
+  "Hey Bus" streaming wake model (TFLite-Micro) and exposes a detector interface. We do NOT
+  hand-roll the wake model — microWakeWord is a proven, S3-native streaming wake-word library.
 - command recogniser — the v1 DS-CNN (`kws_de.model`) retrained on the expanded slot vocab,
   run in streaming mode.
 - `kws_de/stream.py` — ring buffer over incoming frames; runs the model every hop; **posterior
@@ -158,3 +159,41 @@ in §8. (The docs build remains a separate workflow.)
 6. INT8 export + budget gates for both models.
 7. Eval report — wake FA/hour, full-intent accuracy, SNR sweep, budgets, honest data provenance.
 8. Sphinx + likec4 docs: two-stage pipeline + dynamic views, algorithms prose.
+
+## 12. Prior art & reuse decisions
+
+Before building, we surveyed existing on-device / microcontroller voice projects. The result
+shaped the two-stage split: **reuse a proven wake-word library, build the open command→intent
+stage ourselves (nothing open covers it for MCUs).**
+
+### Wake word — reuse microWakeWord (do not reinvent)
+
+- **microWakeWord** (Kevin Ahrendt, <https://github.com/kahrendt/microWakeWord>) — TensorFlow →
+  TFLite-Micro, **streaming** (inference every 30 ms; MixConv streaming architecture), proven on
+  the ESP32-S3 (it powers ESPHome's `micro_wake_word` and Home Assistant Voice). Its trainer
+  generates samples via **Piper TTS**, so a German custom phrase like "Hey Bus" is a first-class
+  use case with no manual recording. It is tuned for the always-on metric that matters —
+  **false-accepts/hour**. Related: <https://github.com/alfiedennen/microwakeword-trainer>,
+  <https://github.com/klumw/keyword_detection>, <https://github.com/klumw/wakeword>.
+- **Decision:** adopt microWakeWord for the wake stage rather than a from-scratch DS-CNN — it is
+  a solved, S3-native streaming detector; reimplementing it would be strictly worse on the
+  false-accept metric and on integration.
+- Espressif **ESP-SR / esp-skainet** provides wake (WakeNet) + commands (MultiNet), but MultiNet
+  is Chinese/English only, so its command side does not fit a German target (v1 established this).
+
+### Command → intent — build ours (no open MCU equivalent)
+
+- **Picovoice Rhino** (<https://github.com/Picovoice/rhino>) is the closest reference: on-device
+  **speech-to-intent with slot filling** ("device zone action" → intent), and it supports German
+  on Cortex-M/STM32. But it is **not open-source** (free tier ≤ 3 users; closed model), so it is a
+  benchmark to compare against, not something to build on.
+- The open-source alternatives (Rhasspy, Vosk, DeepSpeech) are speech-to-**text**, Pi-class, not
+  MCU slot-filling. No fully-open on-device slot-filler exists for microcontrollers.
+- **Decision:** our streaming-KWS (v1 DS-CNN, streamed) + pure grammar slot-filler IS the open
+  path for the command→intent stage; keep it. Rhino stands as the closed-source accuracy/UX
+  reference to benchmark our full-intent accuracy against, where feasible.
+
+### Net architecture consequence
+Wake stage = microWakeWord ("Hey Bus"). Command stage = our streaming KWS + grammar → intent.
+Both remain on-device, offline, German. The firmware plan later can also interoperate with the
+ESPHome `micro_wake_word` ecosystem since the wake model shares that lineage.
