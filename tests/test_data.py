@@ -7,6 +7,7 @@ from kws_de.data import (
     build_dataset,
     make_transition_windows,
     split_by_speaker,
+    split_three_way,
     tts_engines,
 )
 
@@ -204,6 +205,26 @@ def test_tts_combo_plan_cycles_past_pool_exhaustion_still_balanced():
     counts = Counter(e for e, _, _ in combos)
     assert len(combos) == 2000
     assert counts["say"] == counts["piper"] == 1000
+
+
+def test_split_three_way_is_speaker_disjoint_and_covers_all():
+    rng = np.random.default_rng(7)
+    # 20 speakers x 2 clips; tag each clip with its speaker's int so identity survives
+    clips = {
+        "Licht": [
+            (np.full(config.CLIP_SAMPLES, s, np.float32), f"spk{s}")
+            for s in range(20)
+            for _ in range(2)
+        ],
+    }
+    train, val, test = split_three_way(clips, rng, val_frac=0.2, test_frac=0.2)
+    tr = {float(c[0]) for c in train["Licht"]}
+    va = {float(c[0]) for c in val["Licht"]}
+    te = {float(c[0]) for c in test["Licht"]}
+    assert tr and va and te  # all three non-empty
+    assert tr.isdisjoint(va) and tr.isdisjoint(te) and va.isdisjoint(te)  # disjoint speakers
+    assert tr | va | te == set(float(s) for s in range(20))  # all speakers covered
+    assert len(train["Licht"]) + len(val["Licht"]) + len(test["Licht"]) == 40
 
 
 def test_build_dataset_includes_transition_windows():

@@ -53,6 +53,42 @@ def split_by_speaker(clips_with_speakers: dict, rng, test_frac: float = 0.2, *, 
     return train_clips, test_clips
 
 
+def split_three_way(
+    clips_with_speakers: dict,
+    rng,
+    val_frac: float = 0.15,
+    test_frac: float = 0.15,
+    *,
+    keep_speaker=False,
+):
+    """Speaker-disjoint train/val/test split. No speaker appears in more than one
+    split. Fractions are of the speaker set (val_frac, test_frac; the rest is
+    train). Val exists alongside `split_by_speaker`'s train/test so model
+    selection never touches test. See `split_by_speaker` for the two-way version
+    and the `keep_speaker` semantics this mirrors."""
+    train, val, test = {}, {}, {}
+    for label, items in clips_with_speakers.items():
+        speakers = sorted({spk for _, spk in items})
+        order = rng.permutation(len(speakers))
+        n = len(speakers)
+        n_val = round(n * val_frac) if n else 0
+        n_test = round(n * test_frac) if n else 0
+        # guarantee non-empty val/test when there are enough speakers
+        if n >= 3:
+            n_val = max(1, n_val)
+            n_test = max(1, n_test)
+        val_s = {speakers[i] for i in order[:n_val]}
+        test_s = {speakers[i] for i in order[n_val : n_val + n_test]}
+
+        def pick(keep, items=items):
+            return [(c, s) if keep_speaker else c for c, s in items if s in keep]
+
+        val[label] = pick(val_s)
+        test[label] = pick(test_s)
+        train[label] = pick(set(speakers) - val_s - test_s)
+    return train, val, test
+
+
 def _random_shift(clip, rng, max_shift_ms: int = 200):
     """Random time-shift by up to +/-max_shift_ms, zero-filled (not circular).
     Pads/truncates to config.CLIP_SAMPLES first so the shift is well-defined.
