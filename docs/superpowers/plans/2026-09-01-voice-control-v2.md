@@ -14,9 +14,10 @@
 
 - Python `>=3.11`; `uv`; `ruff` (line-length 100, lint `E,F,I,UP,B`). Keep the full suite green.
 - Reuse v1 audio/MFCC constants (16 kHz, 1000 ms, 30/20 ms MFCC → `(49, 10)`); the streaming path uses the SAME `kws_de.features.mfcc` (host↔device golden-vector contract).
-- v2 vocab: wake `Hey Bus`; devices `Licht, Heizung, Kühlschrank, Wasser`; zones `Küche, Bad, Decke, Außen`; actions `an, aus`. Command label set = devices + zones + actions + `_unknown_` + `_silence_`. Wake label set = `wake` + `_not_`.
+- v2 vocab (GROUNDED in the real controllable functions): wake `Hey Bus`; devices `Licht, Kühlschrank, Heizung, Aufstelldach, Campingmodus, USB, Wasser, Energie`; light zones `Küche, Dach, Außen, Lesen` (apply to `Licht` only); actions `an, aus, auf, zu, heller, dunkler, wärmer, kälter, leise, Eco, Max, Normal`. Command label set = devices + zones + actions + `_unknown_` + `_silence_` (26 classes). Wake label set = `wake` + `_not_`. `Kühlschrank` is the spoken word for the fridge/cooler function (better real MSWC coverage than the app's compound term).
+- Per-device allowed actions are FIXED by `DEVICE_ACTIONS` (Task 1); only `ZONED_DEVICES = ["Licht"]` take a zone. The grammar (Task 2) is device-specific: it rejects actions not valid for the device (e.g. "Aufstelldach an") and zones on non-zoned devices (e.g. "Heizung Küche").
 - v1 config constants (`COMMANDS`, `LABELS`, `NUM_CLASSES=7`) MUST stay intact and v1 tests stay green — v2 vocab is ADDITIVE (new constants), not a rewrite.
-- Grammar order: `device → zone? → action`. Bare `device action` (no zone) is valid. Missing device or action, out-of-order, duplicate slots → rejection.
+- Grammar order: `device → zone? → action`. Bare `device action` (no zone) is valid. Missing device or action, out-of-order, duplicate slots, action-invalid-for-device, or zone-on-non-zoned-device → rejection.
 - Exports full-INT8; budgets (per v1): command model ≤ 500 000 B / ≤ 3 000 000 MACs; wake model held tighter (≤ 150 000 B, ≤ 1 000 000 MACs) as it is always-on.
 - The wake stage is **microWakeWord** — a proven S3-native streaming wake library (spec §12). We add it as a dependency and use its trainer (Piper TTS) for "Hey Bus"; we do NOT hand-roll a wake model. Its output is a TFLite-Micro streaming model we budget-check like any other. The command→intent stage stays ours (no open MCU equivalent exists).
 - No training data / model binaries committed (gitignored). No machine-specific paths. No third-party-app or decompile provenance anywhere in the repo (public repo).
@@ -42,12 +43,19 @@ from kws_de import config
 def test_v2_vocab():
     assert config.WAKE_WORD == "Hey Bus"
     assert config.WAKE_LABELS == ["wake", "_not_"]
-    assert config.DEVICES == ["Licht", "Heizung", "Kühlschrank", "Wasser"]
-    assert config.ZONES == ["Küche", "Bad", "Decke", "Außen"]
-    assert config.ACTIONS == ["an", "aus"]
+    assert config.DEVICES == ["Licht", "Kühlschrank", "Heizung", "Aufstelldach",
+                              "Campingmodus", "USB", "Wasser", "Energie"]
+    assert config.ZONES == ["Küche", "Dach", "Außen", "Lesen"]
+    assert "auf" in config.ACTIONS and "heller" in config.ACTIONS and "Eco" in config.ACTIONS
+    assert config.ZONED_DEVICES == ["Licht"]
     assert config.COMMAND_LABELS == (
         config.DEVICES + config.ZONES + config.ACTIONS + ["_unknown_", "_silence_"]
     )
+
+def test_device_actions_cover_all_devices_and_use_valid_actions():
+    assert set(config.DEVICE_ACTIONS) == set(config.DEVICES)
+    for dev, acts in config.DEVICE_ACTIONS.items():
+        assert acts and all(a in config.ACTIONS for a in acts)
 
 def test_command_index_roundtrip():
     for i, lbl in enumerate(config.COMMAND_LABELS):
@@ -66,9 +74,23 @@ def test_v1_constants_unchanged():
 # --- v2: wake word + slot commands (additive; v1 constants above untouched) ---
 WAKE_WORD = "Hey Bus"
 WAKE_LABELS = ["wake", "_not_"]
-DEVICES = ["Licht", "Heizung", "Kühlschrank", "Wasser"]
-ZONES = ["Küche", "Bad", "Decke", "Außen"]
-ACTIONS = ["an", "aus"]
+DEVICES = ["Licht", "Kühlschrank", "Heizung", "Aufstelldach",
+           "Campingmodus", "USB", "Wasser", "Energie"]
+ZONES = ["Küche", "Dach", "Außen", "Lesen"]   # light zones — apply to Licht only
+ACTIONS = ["an", "aus", "auf", "zu", "heller", "dunkler",
+           "wärmer", "kälter", "leise", "Eco", "Max", "Normal"]
+ZONED_DEVICES = ["Licht"]
+# Per-device allowed actions — grounded in the real controllable functions.
+DEVICE_ACTIONS = {
+    "Licht": ["an", "aus", "heller", "dunkler"],
+    "Kühlschrank": ["an", "aus", "leise"],
+    "Heizung": ["an", "aus", "wärmer", "kälter"],
+    "Aufstelldach": ["auf", "zu"],
+    "Campingmodus": ["an", "aus"],
+    "USB": ["an", "aus"],
+    "Wasser": ["an", "aus"],
+    "Energie": ["Eco", "Max", "Normal"],
+}
 COMMAND_LABELS = DEVICES + ZONES + ACTIONS + ["_unknown_", "_silence_"]
 
 def command_index(label: str) -> int:
@@ -117,6 +139,21 @@ def test_out_of_order_rejected():
 
 def test_duplicate_slot_rejected():
     assert isinstance(parse(["Licht", "Heizung", "an"]), Rejection)
+
+def test_action_invalid_for_device_rejected():
+    assert isinstance(parse(["Aufstelldach", "an"]), Rejection)   # roof has no an/aus
+
+def test_roof_auf_valid():
+    assert parse(["Aufstelldach", "auf"]) == Intent("Aufstelldach", None, "auf")
+
+def test_zone_on_non_zoned_device_rejected():
+    assert isinstance(parse(["Heizung", "Küche", "an"]), Rejection)
+
+def test_light_zone_brightness_valid():
+    assert parse(["Licht", "Küche", "heller"]) == Intent("Licht", "Küche", "heller")
+
+def test_energy_mode_valid():
+    assert parse(["Energie", "Eco"]) == Intent("Energie", None, "Eco")
 ```
 
 - [ ] **Step 2: Run test to verify it fails** — `uv run pytest tests/test_grammar.py -v` → FAIL (`ModuleNotFoundError`).
@@ -164,6 +201,10 @@ def parse(events: list[str]) -> Intent | Rejection:
         return Rejection("missing device")
     if action is None:
         return Rejection("missing action")
+    if zone is not None and device not in config.ZONED_DEVICES:
+        return Rejection(f"{device} takes no zone")
+    if action not in config.DEVICE_ACTIONS[device]:
+        return Rejection(f"{action} invalid for {device}")
     return Intent(device, zone, action)
 ```
 
@@ -461,11 +502,12 @@ def test_wake_budget_checks_tflite_bytes_only():
 
 **Interfaces:** I/O wrappers (`# pragma: no cover`). This task RUNS the pipeline on real + TTS data and writes the report.
 
-- [ ] **Step 1:** Fetch/TTS the new command words (`an, aus, Küche, Bad, Decke, Außen`); reuse v1 cached clips for `Licht/Heizung/Kühlschrank/Wasser`. ("Hey Bus" is handled by microWakeWord's own trainer, not this fetch.)
-- [ ] **Step 2:** Train the command recogniser (COMMAND_LABELS); produce the wake model via `wake.train_hey_bus` (microWakeWord + Piper "Hey Bus").
-- [ ] **Step 3:** Export the command model INT8 + `check_budgets`; `check_wake_budgets` on the microWakeWord `hey_bus.tflite`.
-- [ ] **Step 4:** Eval: wake **false-accepts/hour** over long noise + detection rate; command **full-intent accuracy** (stream → grammar) + per-slot accuracy; SNR sweep. Write `docs/eval-report-v2.md` with honest per-word real/TTS counts and the wake FA/hour headline.
-- [ ] **Step 5:** Keep suite green + ruff clean; commit code + `docs/eval-report-v2.md` (no data/models). `feat(v2): real training run + eval report (wake FA/hr, intent accuracy)`.
+- [ ] **Step 1:** Fetch/TTS the full grounded vocab: reuse v1 cached clips for `Licht/Kühlschrank/Heizung/Wasser`; fetch MSWC where available for the new words (`an, aus, auf, zu, heller, dunkler, wärmer, kälter, leise, Eco, Max, Normal, Küche, Dach, Außen, Lesen` + devices `Aufstelldach, Campingmodus, USB, Energie`) and TTS-fill the rest (macOS `say`, German voices). Report per-word real/TTS counts honestly.
+- [ ] **Step 2:** Train the command recogniser on `config.COMMAND_LABELS` (26 classes).
+- [ ] **Step 3 (local wake training):** produce `hey_bus.tflite` via `wake.train_hey_bus`, which drives **microWakeWord in the local 3.10 venv** (proven working at `/Volumes/External/Users/ext_ckeller/mww-train/.venv`): Piper generates "Hey Bus" positives, microWakeWord trains on CPU/Metal. Formalise the env into a committed `train/mww/` setup (README + a `uv`-managed 3.10 requirements + an invocation script); gitignore the venv + datasets. If training is too slow to finish in-run, train a reduced-sample model and note it.
+- [ ] **Step 4 (export + budgets):** command model → INT8 + `check_budgets`; `check_wake_budgets` on `hey_bus.tflite`.
+- [ ] **Step 5 (THE CATALOG — end-to-end):** build the **command catalog** = every valid intent, enumerated via `config.DEVICE_ACTIONS` (and zones for `Licht` only) — e.g. "Licht Küche an", "Licht heller", "Heizung wärmer", "Aufstelldach auf", "Energie Eco", "Kühlschrank leise", … For each catalog entry, synthesize utterances (macOS `say`, several voices), run the **full pipeline** (audio → MFCC → `KeywordStream` → `grammar.parse` → `Intent`), and compute **full-intent accuracy per catalog entry + overall**. Also: wake false-accepts/hour + detection rate; per-slot accuracy; SNR sweep. Write `docs/eval-report-v2.md` with the catalog table (per-command intent accuracy), the wake FA/hour headline, honest real/TTS provenance, and budgets.
+- [ ] **Step 6:** Keep suite green + ruff clean; commit code + `train/mww/` setup + `docs/eval-report-v2.md` (no data/models/venvs). `feat(v2): real run + full command-catalog eval + local microWakeWord training`.
 
 ---
 
