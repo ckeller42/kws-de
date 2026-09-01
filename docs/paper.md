@@ -115,10 +115,12 @@ speaker. This is the paper's central honesty discipline.
 ### 4.3 Splits and reproducibility
 
 Splits are **speaker-disjoint**: real words split by `speaker_id`; TTS words by a synthetic speaker
-id (`engine:voice:rate`) so a voice never straddles train and test. The reusable dataset (in
+id (`engine:voice`) so a voice never straddles train and test. The reusable dataset (in
 progress) adds a **validation split** (so model selection never touches test), a **manifest**
 (per-word counts, config, content hashes — verifiable without shipping audio), a **deterministic
-rebuild** from one seed, and a **datasheet** (Gebru et al.) stating that 15 of the 21 command words
+rebuild** from one seed given the cached clips (Piper synthesis itself is stochastic per call, so
+the clip cache — pinned by the manifest's content hashes — is the actual reproducibility anchor),
+and a **datasheet** (Gebru et al.) stating that 15 of the 21 command words
 are synthetic-only and that a real-microphone benchmark remains future work.
 
 ### 4.4 Statistics and examples
@@ -202,7 +204,8 @@ softmax at temperature T (Hinton et al., 2015).
 **Quantization and budget gates.** Full-INT8 post-training quantization with a class-balanced
 representative set (E10), exported to TFLite-Micro (ESP-NN kernels). **CI budget gates** assert
 model ≤ 500 KB, MACs ≤ 3 M, INT8-only I/O, and that every op is device-runnable — "fits the MCU" as
-a test, no hardware required. Batch size 32 through E8, 128 from E9 on (throughput; §notes).
+a test, no hardware required. Batch size 32 through E8, 128 from E9 on (throughput; see
+`docs/paper-notes.md`).
 
 **Two-stage runtime.** An always-on **wake detector** ("Hey Bus", microWakeWord) gates the heavier
 **command recogniser**, which runs streaming inside the post-wake window. The command model's

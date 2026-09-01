@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 
 from kws_de import config, dataset
@@ -41,6 +43,34 @@ def test_load_split_roundtrip(tmp_path, monkeypatch):
     np.savez(tmp_path / "features_val.npz", X=X, y=y, is_tts=is_tts)
     Xl, yl, tl = load_split("val")
     assert Xl.shape == X.shape and list(yl) == [0, 1, 2] and list(tl) == [True, False, True]
+
+
+def test_build_persists_tts_filled_clips_to_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DEVICES", ["Licht"])
+    monkeypatch.setattr(config, "ZONES", [])
+    monkeypatch.setattr(config, "ACTIONS", [])
+    monkeypatch.setattr(config, "COMMAND_LABELS", ["Licht", "_unknown_", "_silence_"])
+
+    rng = np.random.default_rng(0)
+    cached = {"clips": {"Licht": [(_clip(rng), "real1")]}}
+    with open(tmp_path / "raw_clips_merged.pkl", "wb") as fh:
+        pickle.dump(cached, fh)
+    with open(tmp_path / "noise.pkl", "wb") as fh:
+        pickle.dump([rng.standard_normal(8000).astype(np.float32)], fh)
+
+    def fake_fill_with_tts(clips, words):
+        clips["Licht"].append((_clip(rng), "tts:say:Anna"))
+        return {"Licht": 1}
+
+    monkeypatch.setattr(dataset, "_fill_with_tts", fake_fill_with_tts)
+
+    dataset.build(seed=0)
+
+    with open(tmp_path / "raw_clips_merged.pkl", "rb") as fh:  # noqa: S301
+        saved = pickle.load(fh)
+    speakers = [spk for _, spk in saved["clips"]["Licht"]]
+    assert "tts:say:Anna" in speakers
 
 
 def test_load_split_prefix_selects_file(tmp_path, monkeypatch):

@@ -42,8 +42,11 @@ def load_split(name: str, prefix: str = "features"):
 def build(  # pragma: no cover - I/O
     seed: int = 0, cache_name: str = "raw_clips_merged.pkl", out_prefix: str = "features"
 ):
-    """Deterministic dataset build: cached raw clips -> speaker-disjoint train/val/test
-    features + manifest, written under config.DATA_DIR. Clean per-word features only
+    """Dataset build, deterministic from one seed given the cached raw clips (Piper TTS
+    synthesis itself is stochastic per call, so newly-filled clips are persisted back to
+    the cache — see `_fill_with_tts` call below — making the cache the reproducibility
+    anchor): cached raw clips -> speaker-disjoint train/val/test features + manifest,
+    written under config.DATA_DIR. Clean per-word features only
     (no transition-window augmentation — that is a training-time choice, kept out of the
     reusable dataset). Writes `data/manifest<suffix>.json` (suffix `_v3` for prefix
     `features_v3`). Returns the manifest dict."""
@@ -51,11 +54,18 @@ def build(  # pragma: no cover - I/O
     labels = config.COMMAND_LABELS
     # pickle: our own gitignored local cache written by kws_de.data, never untrusted input.
     with open(config.DATA_DIR / cache_name, "rb") as fh:
-        clips_ws = pickle.load(fh)["clips"]  # noqa: S301
+        cached = pickle.load(fh)  # noqa: S301
+    clips_ws = cached["clips"]
     with open(config.DATA_DIR / "noise.pkl", "rb") as fh:
-        noises = pickle.load(fh)
+        noises = pickle.load(fh)  # noqa: S301
 
-    _fill_with_tts(clips_ws, words=words)  # ensure every command word has clips
+    # ensure every command word has clips; persist any TTS fill back to the cache so a
+    # rebuild reuses these exact clips instead of resynthesizing (Piper is stochastic).
+    tts_added = _fill_with_tts(clips_ws, words=words)
+    if tts_added:
+        with open(config.DATA_DIR / cache_name, "wb") as fh:
+            pickle.dump(cached, fh)
+        print(f"[tts] added: {tts_added}")
     # Split assignment is deterministic in `seed`; augmentation uses a derived stream
     # so the split (the reproducibility contract) is independent of augmentation draws.
     tr_ws, va_ws, te_ws = split_three_way(clips_ws, np.random.default_rng(seed), keep_speaker=True)

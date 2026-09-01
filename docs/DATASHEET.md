@@ -76,7 +76,9 @@ features_v3`) has actually run.
 
 All fetch/synthesis code lives in `kws_de/data.py` and is versioned; no
 audio bytes are committed (`data/` is gitignored). The dataset is
-reproduced from code + a seed, not from checked-in files.
+reproduced from code + a seed given the cached raw clips (Piper synthesis itself is
+stochastic per call, so the gitignored clip cache, not the TTS step, is what pins a
+rebuild), not from checked-in files.
 
 ## Provenance
 
