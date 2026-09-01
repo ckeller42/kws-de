@@ -29,3 +29,6 @@ train/**/datasets/
 train/**/*.wav
 train/**/*.npy
 docs/_build/
+
+# git worktrees (superpowers)
+.worktrees/
