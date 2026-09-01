@@ -218,24 +218,26 @@ def main() -> None:  # pragma: no cover - I/O wrapper (real training + real audi
     )
     predict_fn = make_ctc_predict_fn(model)
 
-    # Streaming INT8 export attempt: the encoder's Input is (None, N_MFCC, 1)
-    # (variable T) -- export.to_int8_tflite is model-agnostic, so try it
-    # directly on the fixed-T representative windows it already knows how to
-    # build. If TFLiteConverter can't handle the dynamic time axis (or the
-    # resulting graph needs ops outside the INT8 builtin set), record the
-    # honest reason instead of forcing a broken export (see kws_de/architectures/kwt.py
-    # for the precedent).
+    # Streaming INT8 export: the model trains at variable T, but full-INT8
+    # quantisation needs static shapes, so export a fixed-T (+ batch-1) clone --
+    # the honest on-device shape (one chunk at a time, fixed chunk + ring
+    # buffer). The clone's weights are T/batch-independent, so set_weights
+    # transfers the trained weights directly. The 1x1-Conv2D per-frame head
+    # keeps the graph inside the TFLM INT8 builtin set (the old TimeDistributed
+    # head unrolled to a tf.while loop -> TensorListReserve, which blocked E8).
     int8_report: dict = {"ok": False, "error": None, "bytes": None, "ops": None, "tflm_ok": None}
-    rep = np.stack([f for f, _ in batches[:8]], axis=0) if batches else None
-    # rep samples must share one T for to_int8_tflite's np.asarray stack; use
-    # the shortest of the first 8 batch entries, trimmed to a common length.
-    if rep is None or not all(f.shape == batches[0][0].shape for f, _ in batches[:8]):
-        t_common = min(f.shape[0] for f, _ in batches[:8]) if batches else 0
-        rep = np.stack([f[:t_common] for f, _ in batches[:8]], axis=0) if t_common else None
+    # rep samples must share one T for to_int8_tflite's np.asarray stack --
+    # phrase feature sequences are variable-length, so trim the first 8 batch
+    # entries to their shortest common length; that length is the export window.
+    rep_sample = [f for f, _ in batches[:8]]
+    t_common = min((f.shape[0] for f in rep_sample), default=0)
+    rep = np.stack([f[:t_common] for f in rep_sample], axis=0) if t_common else None
     try:
         if rep is None:
             raise ValueError("no representative phrase batch available for int8 export")
-        tflite_bytes = to_int8_tflite(model, rep)
+        export_model = build_ctc_encoder(n_tokens, encoder="matchboxnet", t_frames=t_common)
+        export_model.set_weights(model.get_weights())
+        tflite_bytes = to_int8_tflite(export_model, rep)
         ops = budgets.tflite_op_types(tflite_bytes)
         tflm_ops = {
             "CONV_2D",
@@ -278,7 +280,7 @@ def main() -> None:  # pragma: no cover - I/O wrapper (real training + real audi
         "# kws-de Phase 2 -- Streaming CTC Command Recogniser Report\n",
         "\n## Method\n\n",
         "Encoder: matchboxnet conv body (stride-1 in time, no global pool) + "
-        "time-distributed Dense(n_tokens) per-frame logits "
+        "a 1x1 Conv2D per-frame head emitting `(T, n_tokens)` logits "
         "(`kws_de.architectures.ctc_encoder.build_ctc_encoder`). Trained with "
         "`tf.nn.ctc_loss` (blank index 0, length-masked) on phrase audio "
         "(`device [zone] action`) synthesized from TRAIN-split word clips "
@@ -308,11 +310,21 @@ def main() -> None:  # pragma: no cover - I/O wrapper (real training + real audi
     report_lines.append("\n## Streaming INT8 export\n\n")
     if int8_report["ok"]:
         report_lines.append(
-            f"- Exported: {int8_report['bytes']} bytes, int8 I/O: {int8_report['int8']}\n"
+            f"- Exported a fixed-T (window = {t_common} frames), batch-1 clone: "
+            f"{int8_report['bytes']} bytes, int8 I/O: {int8_report['int8']}\n"
         )
         report_lines.append(f"- Ops: {', '.join(int8_report['ops'])}\n")
         report_lines.append(f"- All ops within the TFLM builtin set: {int8_report['tflm_ok']}\n")
-        if not int8_report["tflm_ok"]:
+        if int8_report["tflm_ok"]:
+            report_lines.append(
+                "- Device-runnable: the 1x1-Conv2D per-frame head keeps the graph "
+                "inside the TFLM INT8 builtin set. The earlier TimeDistributed(Dense) "
+                "head unrolled to a `tf.while` loop -> `TensorListReserve`, which the "
+                "INT8-builtins-only converter could not legalize; a fixed-T + batch-1 "
+                "export (the honest on-device shape: one chunk at a time, ring buffer) "
+                "removes every dynamic-shape op too.\n"
+            )
+        else:
             report_lines.append(
                 "- NOT device-runnable as exported: some ops fall outside the TFLM "
                 "set (same situation as `kwt`, see kws_de/architectures/kwt.py) -- "
@@ -320,15 +332,11 @@ def main() -> None:  # pragma: no cover - I/O wrapper (real training + real audi
                 "frame-classifier baseline currently ships on-device.\n"
             )
     else:
-        report_lines.append(
-            "- **Could not INT8-export the streaming (variable-length) encoder.**\n"
-        )
+        report_lines.append("- **INT8 export failed.**\n")
         report_lines.append(f"- Reason: `{int8_report['error']}`\n")
         report_lines.append(
-            "- Reporting the float number honestly instead of forcing an export "
-            "(same policy as `kwt`, see kws_de/architectures/kwt.py). A fixed-window "
-            "re-export (like the frame-classifier baseline) was out of scope here -- "
-            "it would give up the streaming/variable-T property this model exists for.\n"
+            "- Reporting the float number honestly instead of forcing a broken "
+            "export (same policy as `kwt`, see kws_de/architectures/kwt.py).\n"
         )
 
     report_lines.append("\n## Probe: one decoded phrase\n\n")
