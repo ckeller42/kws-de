@@ -209,9 +209,11 @@ def test_tts_combo_plan_single_engine_matches_voice_combos():
     assert all(e == "say" for e, _, _ in combos)
 
 
-def test_tts_combo_plan_balances_across_engines_of_unequal_pool_size():
-    # say has a bigger voice/rate pool than piper; requesting far more than either pool
-    # holds must still come back with EQUAL counts per engine, not say-heavy.
+def test_tts_combo_plan_balances_across_engines_of_unequal_pool_size(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)  # empty piper cache -> static fallback
+    # With an empty piper cache, say (9 voices) has a bigger voice/rate pool than piper's
+    # static fallback (4 voices); requesting far more than either pool holds must still
+    # come back with EQUAL counts per engine, not say-heavy.
     combos = _tts_combo_plan("Licht", 1000, ["say", "piper"])
     from collections import Counter
 
@@ -224,7 +226,8 @@ def test_tts_combo_plan_empty_engines():
     assert _tts_combo_plan("Licht", 10, []) == []
 
 
-def test_tts_combo_plan_cycles_past_pool_exhaustion_still_balanced():
+def test_tts_combo_plan_cycles_past_pool_exhaustion_still_balanced(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)  # empty piper cache -> static fallback
     # n bigger than the balanced pool must still return exactly n combos, evenly split.
     combos = _tts_combo_plan("Licht", 2000, ["say", "piper"])
     from collections import Counter

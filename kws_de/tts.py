@@ -87,8 +87,10 @@ def available_engines() -> list[str]:  # pragma: no cover - probes optional back
 
 def voice_combos(n: int, engines: list[str]) -> list[tuple[str, str, int]]:
     """Build up to ``n`` diverse ``(engine, voice, rate)`` combos, ROUND-ROBIN across the
-    given engines so the set spans as many engines/voices as possible before repeating.
-    Pure — no backends touched."""
+    given engines so the set spans as many engines/voices as possible before repeating. No
+    synthesis backend is touched, but for ``"piper"`` this reads the Piper voice cache under
+    ``config.DATA_DIR`` (via ``engine_voices``), so its result depends on what is cached
+    locally."""
     per_engine = []
     for e in engines:
         voices = engine_voices(e)
