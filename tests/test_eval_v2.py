@@ -12,9 +12,7 @@ def test_intent_accuracy_all_slots_must_match():
 def test_catalog_covers_every_device_action_and_all_are_valid():
     catalog = build_catalog()
     # bare "device action" present for every (device, action) pair
-    expected_bare = {
-        (dev, act) for dev in config.DEVICES for act in config.DEVICE_ACTIONS[dev]
-    }
+    expected_bare = {(dev, act) for dev in config.DEVICES for act in config.DEVICE_ACTIONS[dev]}
     bare_in_catalog = {(i.device, i.action) for i in catalog if i.zone is None}
     assert bare_in_catalog == expected_bare
     # every catalog entry parses back to itself via the real grammar (no bogus entries)

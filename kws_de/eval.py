@@ -425,7 +425,7 @@ def _write_catalog_report(out: str) -> None:  # pragma: no cover - I/O wrapper (
     report += f"- Full INT8: {is_int8}\n"
     report += f"- Ops: {', '.join(ops)}\n"
 
-    report += "\n## Wake model (\"Hey Bus\") budget\n\n"
+    report += '\n## Wake model ("Hey Bus") budget\n\n'
     if wake_report is not None:
         report += f"- Model size: {wake_report['model_bytes']} bytes (budget 150 000)\n"
         report += f"- Full INT8: {wake_report['int8']}\n"

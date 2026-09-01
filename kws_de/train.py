@@ -19,9 +19,7 @@ def train(X, y, epochs=30, seed=0, num_classes=None):
 def main() -> None:  # pragma: no cover - I/O wrapper
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=40)
-    ap.add_argument(
-        "--v2", action="store_true", help="train on config.COMMAND_LABELS (26 classes)"
-    )
+    ap.add_argument("--v2", action="store_true", help="train on config.COMMAND_LABELS (26 classes)")
     args = ap.parse_args()
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     prefix = "features_v2" if args.v2 else "features"

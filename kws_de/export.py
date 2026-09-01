@@ -56,9 +56,7 @@ def write_metadata(path, labels=None) -> None:
 def main() -> None:  # pragma: no cover - I/O wrapper
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(config.MODELS_DIR))
-    ap.add_argument(
-        "--v2", action="store_true", help="export the v2 command model (26 classes)"
-    )
+    ap.add_argument("--v2", action="store_true", help="export the v2 command model (26 classes)")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
