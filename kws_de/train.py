@@ -18,9 +18,10 @@ def train(X, y, epochs=30, seed=0):
 
 def main() -> None:  # pragma: no cover - I/O wrapper
     ap = argparse.ArgumentParser()
-    ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--epochs", type=int, default=40)
     args = ap.parse_args()
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    X = np.load(config.DATA_DIR / "features.npz")
-    model, _ = train(X["X"], X["y"], epochs=args.epochs)
+    data = np.load(config.DATA_DIR / "features_train.npz")
+    model, history = train(data["X"], data["y"], epochs=args.epochs)
     model.save(config.MODELS_DIR / "kws.keras")
+    print(f"final train accuracy: {history['accuracy'][-1]:.4f}")

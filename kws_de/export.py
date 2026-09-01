@@ -60,7 +60,7 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     model = tf.keras.models.load_model(config.MODELS_DIR / "kws.keras")
-    feats = np.load(config.DATA_DIR / "features.npz")["X"][:100]
+    feats = np.load(config.DATA_DIR / "features_train.npz")["X"][:200]
     blob = to_int8_tflite(model, feats)
     (out / "model.tflite").write_bytes(blob)
     write_c_array(blob, out / "model_data.h")

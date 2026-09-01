@@ -9,7 +9,9 @@ dependencies = [
   "numpy>=1.26",
   "librosa>=0.10",
   "soundfile>=0.12",
-  "datasets>=2.19",
+  # MSWC (MLCommons/ml_spoken_words) is still a loading-script dataset on the Hub;
+  # `datasets>=4` dropped script support entirely, so pin below that.
+  "datasets>=2.19,<4",
   "tqdm>=4.66",
 ]
 
@@ -23,6 +25,11 @@ kws-data = "kws_de.data:main"
 kws-train = "kws_de.train:main"
 kws-export = "kws_de.export:main"
 kws-eval = "kws_de.eval:main"
+
+[tool.pytest.ini_options]
+# data/ is a gitignored local cache (raw MSWC/ESC-50 clips); ESC-50 ships its own
+# tests/ dir that pytest would otherwise try to collect too.
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
