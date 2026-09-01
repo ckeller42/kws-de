@@ -8,11 +8,13 @@ sequences into validated intents.
 ```{toctree}
 :maxdepth: 2
 
+paper
 architecture
 eval-report
 eval-report-v2
 ```
 
+- **Paper (draft):** {doc}`paper` — the full write-up (motivation, method, results, lessons)
 - Source & specs: <https://github.com/ckeller42/kws-de>
 - v1 measured results: {doc}`eval-report` — 91.1 % real-speech INT8 accuracy
 - v2 (wake + slot commands): {doc}`eval-report-v2`
