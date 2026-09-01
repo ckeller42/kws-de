@@ -191,9 +191,12 @@ scripts/
 
 ## 6. CI
 
-`.github/workflows/firmware.yml`, triggered on push/PR touching
-`firmware/**`, `scripts/flash.sh`, `scripts/pull-recordings.sh`,
-`kws_de/export.py`, or the workflow itself:
+`.github/workflows/firmware.yml`, triggered on every push and PR (no
+path filter — a `config`/`phrases` change regenerates headers, so any
+commit can break the firmware build). It lands in plan Task 1 together
+with the IDF-version spike, so the firmware is under CI from its first
+commit. All three jobs below are to be added to the `main` branch
+protection as required checks (user action, one-time):
 
 | Job | What | Gate |
 |---|---|---|
