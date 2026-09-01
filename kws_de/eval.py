@@ -37,7 +37,7 @@ def snr_sweep(eval_fn, snrs) -> dict:
 
 def render_report(results: dict) -> str:
     lines = [
-        "# kws-de Evaluation Report",
+        "## Evaluation summary",
         "",
         f"**Accuracy:** {results.get('accuracy', 0):.3f}",
         "",
@@ -139,16 +139,21 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
     m_float = metrics(y_test, y_pred_float)
     m_int8 = metrics(y_test, y_pred_int8)
 
-    # Headline, MultiNet-comparable number: REAL-SPEECH-ONLY accuracy on the
-    # MSWC-validated subset {Licht, Kühlschrank, Heizung} + _unknown_ + _silence_.
-    # Camping (22 real clips) and Wasser (0 real clips) are excluded here — their
-    # command classes exist only via TTS synthesis, see the full-model table below.
-    headline_labels = ["Licht", "Kühlschrank", "Heizung", "_unknown_", "_silence_"]
-    headline_idx = {config.label_index(label) for label in headline_labels}
-    headline_mask = np.isin(y_test, list(headline_idx)) & ~is_tts_test
+    # Headline, MultiNet-comparable number: REAL-SPEECH-ONLY accuracy, across ALL
+    # classes, filtered row-by-row on is_tts (not a hardcoded per-word whitelist) —
+    # so each command contributes exactly the real MSWC evidence it actually has
+    # (Licht/Kühlschrank/Wasser/`_unknown_` are ~fully real; Heizung is a real
+    # majority-of-training/minority-of-real mix; Camping's real contribution is
+    # thin, ~22 clips total before the speaker split). See per-class real-row
+    # counts below for exactly how much each class contributes here.
+    headline_mask = ~is_tts_test
     n_headline = int(headline_mask.sum())
     headline_acc_float = float((y_pred_float[headline_mask] == y_test[headline_mask]).mean())
     headline_acc_int8 = float((y_pred_int8[headline_mask] == y_test[headline_mask]).mean())
+    headline_real_rows_per_class = {
+        config.LABELS[i]: int(((y_test == i) & headline_mask).sum())
+        for i in range(config.NUM_CLASSES)
+    }
 
     # SNR sweep on the held-out RAW clips (speaker-disjoint from train), re-augmented
     # fresh at each SNR. "clean" is approximated as 40 dB (noise ~1% amplitude).
@@ -186,11 +191,20 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
 
     report += "## Headline: real-speech accuracy (MultiNet-comparable)\n\n"
     report += (
-        "Evaluated on the MSWC-validated subset only — **Licht, Kühlschrank, Heizung** + "
-        "`_unknown_` + `_silence_` — restricted to test rows built from REAL MSWC speech "
-        "(TTS-synthesized rows excluded, including Heizung's TTS top-up). "
-        "**Camping and Wasser are excluded from this number** — see the full-model table "
-        f"below. n={n_headline} held-out real-speech examples (mixed 20/10/0 dB SNR).\n\n"
+        "Restricted to test rows built from REAL MSWC speech (TTS-synthesized rows "
+        "excluded), filtered per-row rather than by a fixed per-word whitelist — so "
+        "each command contributes exactly the real MSWC evidence it actually has. "
+        f"n={n_headline} held-out real-speech examples (mixed 20/10/0 dB SNR). Real-row "
+        "breakdown by class:\n\n"
+    )
+    report += "| Label | Real rows in headline set |\n|---|---|\n"
+    for label in config.LABELS:
+        report += f"| {label} | {headline_real_rows_per_class[label]} |\n"
+    report += (
+        "\n(Camping contributes very few real rows — only 22 real MSWC clips exist "
+        "before the speaker split — so its headline contribution is thin; treat the "
+        "headline number as strongest for Licht/Kühlschrank/Wasser/`_unknown_`, which "
+        "are ~fully real.)\n\n"
     )
     report += "| Model | Accuracy |\n|---|---|\n"
     report += f"| Float (keras) | {headline_acc_float:.3f} |\n"
@@ -199,17 +213,19 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
     report += "\n## Full-model snapshot (`kws_de.eval.render_report`)\n\n"
     report += render_report({"accuracy": m_int8["accuracy"], "snr_sweep": sweep_int8})
     report += (
-        "(All 7 classes, INT8, command-only SNR sweep — see the full breakdown below "
+        "\n(All 7 classes, INT8, command-only SNR sweep — see the full breakdown below "
         "for why this overall number mixes real and synthetic speech.)\n"
     )
 
     report += (
         "\n## Full 5-word model — overall + per-command accuracy "
         "(held-out test set, mixed SNRs)\n\n"
-        "**Camping and Wasser are TTS-augmented (synthetic speech)** — Camping had only "
-        "22 real MSWC clips, Wasser had 0, so their rows below reflect synthetic-voice "
-        "performance and must NOT be read as real-speech accuracy. Heizung is a "
-        "real+TTS mix (120 real + 180 TTS, topped up to 300).\n\n"
+        "**Camping and Heizung are real+TTS mixes** — Camping had only 22 real MSWC "
+        "clips (278 TTS-added to reach 300), Heizung had 120 real (180 TTS-added), so "
+        "their rows below blend real and synthetic-voice performance. **Licht, "
+        "Kühlschrank, Wasser, and `_unknown_` are ~fully real MSWC speech** (Wasser "
+        "reached 300 real clips on a deeper corpus scan — no TTS was needed for it "
+        "after all).\n\n"
     )
     report += f"**Overall accuracy — float:** {m_float['accuracy']:.3f}\n\n"
     report += f"**Overall accuracy — INT8 (shipped):** {m_int8['accuracy']:.3f}\n\n"
@@ -259,8 +275,10 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         "\nNoise source: ESC-50 (2000 environmental-sound clips, resampled to 16 kHz). "
         "TTS source: macOS `say`, German voices "
         f"({', '.join(_TTS_VOICES)}) at rates {_TTS_RATES[0]}-{_TTS_RATES[-1]} wpm, "
-        "varied punctuation, used only to top up Camping/Heizung/Wasser to 300 clips "
-        "since MSWC German had far fewer (or zero) real recordings of those words.\n"
+        "varied punctuation, used only to top up Camping/Heizung to 300 clips since "
+        "MSWC German had far fewer real recordings of those two words (a deeper "
+        "corpus scan later found 300 real Wasser clips too, so no TTS was needed "
+        "for Wasser in this run).\n"
     )
 
     report += (
@@ -268,11 +286,13 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         "MultiNet's English command-recognition accuracy is reported at roughly "
         "85-95% on clean speech. The comparable number here is the **headline "
         f"real-speech INT8 accuracy: {headline_acc_int8:.3f} ({headline_acc_int8 * 100:.1f}%)** "
-        "on Licht/Kühlschrank/Heizung + _unknown_/_silence_, real MSWC speech only, mixed "
-        "20/10/0 dB SNR (harder than MultiNet's clean-speech condition). The full 5-word "
-        f"model's INT8 accuracy is {m_int8['accuracy']:.3f}, but that number is inflated/"
-        "deflated by two TTS-only or TTS-heavy classes (Camping, Wasser) and should not be "
-        "quoted as a real-speech comparison to MultiNet.\n"
+        "across all 7 classes filtered to real MSWC speech only (Licht/Kühlschrank/"
+        "Wasser/`_unknown_` ~fully real, Heizung/Camping partially — see the real-row "
+        "breakdown above), mixed 20/10/0 dB SNR (harder than MultiNet's clean-speech "
+        f"condition). The full 5-word model's INT8 accuracy is {m_int8['accuracy']:.3f}, "
+        "but that number includes TTS-augmented Camping/Heizung rows and should not be "
+        "quoted as a pure real-speech comparison to MultiNet — use the headline number "
+        "for that.\n"
     )
 
     out_path = config.DATA_DIR.parent / args.out

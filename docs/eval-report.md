@@ -11,7 +11,7 @@ Evaluated on the MSWC-validated subset only — **Licht, Kühlschrank, Heizung**
 
 ## Full-model snapshot (`kws_de.eval.render_report`)
 
-# kws-de Evaluation Report
+## Evaluation summary
 
 **Accuracy:** 0.919
 
@@ -23,6 +23,7 @@ Evaluated on the MSWC-validated subset only — **Licht, Kühlschrank, Heizung**
 | 20 | 0.952 |
 | 10 | 0.935 |
 | 0 | 0.846 |
+
 (All 7 classes, INT8, command-only SNR sweep — see the full breakdown below for why this overall number mixes real and synthetic speech.)
 
 ## Full 5-word model — overall + per-command accuracy (held-out test set, mixed SNRs)
