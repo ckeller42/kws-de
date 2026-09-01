@@ -17,3 +17,10 @@ def test_bc_resnet_builds_and_is_small():
     assert m.input_shape == (None, config.N_FRAMES, config.N_MFCC, 1)
     assert m.output_shape == (None, config.NUM_CLASSES)
     assert m.count_params() < 60_000
+
+
+def test_matchboxnet_builds():
+    m = get("matchboxnet")((config.N_FRAMES, config.N_MFCC, 1), n_classes=config.NUM_CLASSES)
+    assert m.input_shape == (None, config.N_FRAMES, config.N_MFCC, 1)
+    assert m.output_shape == (None, config.NUM_CLASSES)
+    assert m.count_params() < 150_000
