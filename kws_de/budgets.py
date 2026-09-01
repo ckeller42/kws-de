@@ -45,10 +45,7 @@ def is_8bit_quantized(tflite: bytes) -> bool:
     exports uint8 I/O, so the wake model is device-runnable but not strictly int8."""
     itp = _interp(tflite)
     ok = {np.int8, np.uint8}
-    return (
-        itp.get_input_details()[0]["dtype"] in ok
-        and itp.get_output_details()[0]["dtype"] in ok
-    )
+    return itp.get_input_details()[0]["dtype"] in ok and itp.get_output_details()[0]["dtype"] in ok
 
 
 def check_budgets(tflite: bytes, model) -> dict:

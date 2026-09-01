@@ -42,9 +42,15 @@ Model is embedded as a C array (no SD card — the CoreS3 BSP cannot use SD and 
 ## Development
 
 ```bash
+./scripts/setup-hooks.sh   # once per clone: activate the git hooks (.githooks/)
 uv run ruff check . && uv run ruff format --check .
 uv run pytest -q
 ```
+
+`setup-hooks.sh` points `core.hooksPath` at `.githooks/`: **pre-commit** runs ruff +
+markdownlint (+ gitleaks if installed), **pre-push** runs the tests — the same gates as CI,
+so a break is caught locally. Bypass a hook with `--no-verify`. Claude Code sessions also lint
+each edited file via a `.claude/` PostToolUse hook.
 
 CI (`.github/workflows/ci.yml`): ruff + pytest/coverage, markdownlint, gitleaks. Work on a
 branch, open a PR, wait for CI + CodeRabbit, then merge — never commit straight to `main`.

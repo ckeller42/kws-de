@@ -16,7 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+# ruff pinned exactly: `ruff format` output drifts across releases, so an
+# unpinned floor makes CI's format-check flake whenever a new ruff ships.
+dev = ["pytest>=8", "ruff==0.16.5"]
 # Apple-Silicon GPU (MPS) acceleration — optional, CPU training works without it.
 metal = ["tensorflow-metal>=1.1"]
 # Piper neural TTS engine (offline, permissive-licensed German voices).
