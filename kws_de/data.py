@@ -97,24 +97,40 @@ def main() -> None:  # pragma: no cover - thin I/O wrapper (manual/integration)
         "'a'/'b' words alone can exceed 300k, so a real run may need to raise this)",
     )
     ap.add_argument("--build", action="store_true", help="speaker-split + augment cached clips")
+    ap.add_argument(
+        "--v2", action="store_true", help="use the v2 slot-command vocab instead of v1 COMMANDS"
+    )
     args = ap.parse_args()
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    words = command_words() if args.v2 else None
+    cache_name = "raw_clips_v2.pkl" if args.v2 else "raw_clips.pkl"
+    labels = config.COMMAND_LABELS if args.v2 else None
+    out_prefix = "features_v2" if args.v2 else "features"
     if args.fetch:
-        _fetch_and_cache(safety_cap=args.safety_cap)
+        _fetch_and_cache(safety_cap=args.safety_cap, words=words, cache_name=cache_name)
     if args.build:
-        _build_and_split()
+        _build_and_split(cache_name=cache_name, words=words, labels=labels, out_prefix=out_prefix)
 
 
-def _fetch_and_cache(n_per_word=300, n_unknown=600, safety_cap=300_000) -> None:  # pragma: no cover
+def _fetch_and_cache(
+    n_per_word=300,
+    n_unknown=600,
+    safety_cap=300_000,
+    words=None,
+    cache_name="raw_clips.pkl",
+) -> None:  # pragma: no cover
     """Stream MSWC-de (MLCommons/ml_spoken_words, config 'de_wav') + download ESC-50
     noise, caching raw clips under config.DATA_DIR so re-runs don't re-download.
+    `words` defaults to `config.COMMANDS` (v1); pass `command_words()` for v2 (cache
+    under a different `cache_name` so the v1 cache is untouched).
     """
-    clips_path = config.DATA_DIR / "raw_clips.pkl"
+    words = list(words) if words is not None else config.COMMANDS
+    clips_path = config.DATA_DIR / cache_name
     if clips_path.exists():
         print(f"[mswc] cache hit: {clips_path}")
     else:
-        clips, scanned = _fetch_mswc(n_per_word, n_unknown, safety_cap)
-        counts = {c: len(clips[c]) for c in config.COMMANDS}
+        clips, scanned = _fetch_mswc(words, n_per_word, n_unknown, safety_cap)
+        counts = {c: len(clips[c]) for c in words}
         print(f"[mswc] done: scanned={scanned} counts={counts} unknown={len(clips['_unknown_'])}")
         with open(clips_path, "wb") as fh:
             pickle.dump({"clips": clips, "scanned": scanned}, fh)
@@ -131,16 +147,20 @@ def _fetch_and_cache(n_per_word=300, n_unknown=600, safety_cap=300_000) -> None:
 
 
 def _fetch_mswc(  # pragma: no cover - network I/O (manual/integration)
-    n_per_word: int, n_unknown: int, safety_cap: int, unknown_per_word_cap: int = 5
+    words: list[str],
+    n_per_word: int,
+    n_unknown: int,
+    safety_cap: int,
+    unknown_per_word_cap: int = 5,
 ):
-    """Stream MSWC-de, early-stopping each command word at n_per_word valid clips
+    """Stream MSWC-de, early-stopping each target word at n_per_word valid clips
     and collecting a diverse ~n_unknown pool of other words for `_unknown_`.
     Returns (clips: dict[label] -> list[(np.ndarray, speaker_id)], scanned: int).
     """
     from datasets import load_dataset
 
-    target_words = {c.lower(): c for c in config.COMMANDS}
-    clips: dict = {c: [] for c in config.COMMANDS}
+    target_words = {w.lower(): w for w in words}
+    clips: dict = {w: [] for w in words}
     clips["_unknown_"] = []
     unknown_word_counts: dict = {}
 
@@ -169,14 +189,14 @@ def _fetch_mswc(  # pragma: no cover - network I/O (manual/integration)
                     unknown_word_counts[kw] = seen + 1
 
         if scanned % 20_000 == 0:
-            counts = {c: len(clips[c]) for c in config.COMMANDS}
+            counts = {c: len(clips[c]) for c in words}
             print(
                 f"[mswc] scanned={scanned} unknown={len(clips['_unknown_'])} "
                 f"last_keyword={ex['keyword']!r} counts={counts}",
                 flush=True,
             )
 
-        done_targets = all(len(clips[c]) >= n_per_word for c in config.COMMANDS)
+        done_targets = all(len(clips[c]) >= n_per_word for c in words)
         done_unknown = len(clips["_unknown_"]) >= n_unknown
         if (done_targets and done_unknown) or scanned >= safety_cap:
             break
@@ -246,12 +266,13 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path) -> list:  # pragma: no cove
     return out
 
 
-def _fill_with_tts(clips: dict, target: int = 300) -> dict:  # pragma: no cover - shells out
-    """Top up any command word under `target` real clips with macOS-`say` TTS clips.
-    Returns {word: n_tts_added} for words that needed filling."""
+def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragma: no cover
+    """Top up any word (from `words`, default `config.COMMANDS`) under `target`
+    real clips with macOS-`say` TTS clips. Returns {word: n_tts_added}."""
+    words = list(words) if words is not None else config.COMMANDS
     tmp_dir = config.DATA_DIR / "tts_tmp"
     added = {}
-    for cmd in config.COMMANDS:
+    for cmd in words:
         have = len(clips.get(cmd, []))
         if have >= target:
             continue
@@ -264,13 +285,14 @@ def _fill_with_tts(clips: dict, target: int = 300) -> dict:  # pragma: no cover 
     return added
 
 
-def _origin_flags(clips_ws: dict, snrs) -> np.ndarray:
+def _origin_flags(clips_ws: dict, snrs, words=None) -> np.ndarray:
     """Boolean array flagging TTS-synthesized origin (speaker id prefix "tts:"),
     aligned row-for-row to build_dataset's output for the same clips/snrs — must
     mirror build_dataset's iteration order (commands x snrs, then unknown, then
     silence) exactly."""
+    words = list(words) if words is not None else config.COMMANDS
     flags = []
-    for cmd in config.COMMANDS:
+    for cmd in words:
         for _clip, spk in clips_ws.get(cmd, []):
             flags.extend([spk.startswith("tts:")] * len(snrs))
     for _clip, _spk in clips_ws.get("_unknown_", []):
@@ -280,22 +302,31 @@ def _origin_flags(clips_ws: dict, snrs) -> np.ndarray:
     return np.asarray(flags, dtype=bool)
 
 
-def _build_and_split(test_frac: float = 0.2, seed: int = 0) -> None:  # pragma: no cover
-    """TTS-fill thin command words, speaker-disjoint split the cached raw clips,
-    then augment + extract features, saving data/features_train.npz and
-    data/features_test.npz (the latter also carries an ``is_tts`` row flag so
-    eval can isolate real-speech-only accuracy).
+def _build_and_split(
+    test_frac: float = 0.2,
+    seed: int = 0,
+    cache_name: str = "raw_clips.pkl",
+    words=None,
+    labels=None,
+    out_prefix: str = "features",
+) -> None:  # pragma: no cover
+    """TTS-fill thin words, speaker-disjoint split the cached raw clips, then
+    augment + extract features, saving data/{out_prefix}_train.npz and
+    data/{out_prefix}_test.npz (the latter also carries an ``is_tts`` row flag
+    so eval can isolate real-speech-only accuracy). `words`/`labels` default to
+    the v1 vocab; pass `command_words()`/`config.COMMAND_LABELS` for v2.
     """
+    words = list(words) if words is not None else config.COMMANDS
     rng = np.random.default_rng(seed)
-    with open(config.DATA_DIR / "raw_clips.pkl", "rb") as fh:
+    with open(config.DATA_DIR / cache_name, "rb") as fh:
         cached = pickle.load(fh)
     with open(config.DATA_DIR / "noise.pkl", "rb") as fh:
         noises = pickle.load(fh)
 
     clips_with_speakers = cached["clips"]
-    tts_added = _fill_with_tts(clips_with_speakers)
+    tts_added = _fill_with_tts(clips_with_speakers, words=words)
     if tts_added:
-        with open(config.DATA_DIR / "raw_clips.pkl", "wb") as fh:
+        with open(config.DATA_DIR / cache_name, "wb") as fh:
             pickle.dump(cached, fh)
         print(f"[tts] added: {tts_added}")
 
@@ -304,9 +335,13 @@ def _build_and_split(test_frac: float = 0.2, seed: int = 0) -> None:  # pragma: 
     train_clips = {k: [c for c, _ in v] for k, v in train_ws.items()}
     test_clips = {k: [c for c, _ in v] for k, v in test_ws.items()}
 
-    X_train, y_train = build_dataset(train_clips, noises, rng, snrs=snrs)
-    X_test, y_test = build_dataset(test_clips, noises, rng, snrs=snrs)
-    is_tts_test = _origin_flags(test_ws, snrs)
-    np.savez(config.DATA_DIR / "features_train.npz", X=X_train, y=y_train)
-    np.savez(config.DATA_DIR / "features_test.npz", X=X_test, y=y_test, is_tts=is_tts_test)
+    X_train, y_train = build_dataset(
+        train_clips, noises, rng, snrs=snrs, labels=labels, commands=words
+    )
+    X_test, y_test = build_dataset(
+        test_clips, noises, rng, snrs=snrs, labels=labels, commands=words
+    )
+    is_tts_test = _origin_flags(test_ws, snrs, words=words)
+    np.savez(config.DATA_DIR / f"{out_prefix}_train.npz", X=X_train, y=y_train)
+    np.savez(config.DATA_DIR / f"{out_prefix}_test.npz", X=X_test, y=y_test, is_tts=is_tts_test)
     print(f"[build] train X={X_train.shape} test X={X_test.shape}")
