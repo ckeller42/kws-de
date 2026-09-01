@@ -291,4 +291,4 @@ Frozen dataset, 30ep/seed0, class-weighted, val-selected, test-reported. Catalog
 Findings: metric-dependent ranking (matchboxnet best isolated+lowest MACs; ds_cnn best catalog); bc_resnet underperforms at tiny scale; KWT INT8-exports but non-device-runnable (op-set is the gate). Chose matchboxnet as CTC encoder for E8.
 
 ### E8 — streaming CTC transducer (the new model, in progress)
-MatchboxNet encoder + per-frame CTC head (blank + keyword tokens) -> greedy decode -> grammar -> intent. Target: connected-command failures (long-word Kühlschrank, boundary ghosts). vs frame-classifier baseline. *(number pending)*
+MatchboxNet encoder + per-frame CTC head, 392 phrases/60ep. NEGATIVE: loss 370->28 but greedy decode collapses to all-blank -> catalog 0.000 vs 0.689. Two blockers: (1) CTC data-hungry (392 phrases too few, all-blank collapse); (2) streaming encoder won't INT8-export (TensorListReserve, non-TFLM — same op-set gate as KWT). Frame-classifier+grammar (0.689, 20KB) stays the deployable system. Lesson: a principled arch still needs data scale + export-friendly form to win on-device.

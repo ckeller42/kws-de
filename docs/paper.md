@@ -260,15 +260,30 @@ which is exactly why our budget test asserts it. All CNN encoders fit the budget
 **MatchboxNet** as the streaming-CTC encoder for §6.8 (best isolated accuracy, lowest MACs, and a
 time-native 1-D structure).
 
-### 6.8 E8 — streaming CTC transducer (the new model) *(in progress)*
+### 6.8 E8 — streaming CTC transducer (negative/preliminary result)
 
 The literature's fix for connected commands is a streaming sequence model that transcribes the
 keyword sequence and learns alignment natively, rather than a frame classifier + a hand-rolled
-decoder. We build a small **streaming CTC** recogniser (MatchboxNet encoder + a per-frame CTC head
-over `blank + the keyword tokens`), decode greedily into the same pure grammar, and evaluate on the
-same catalog against the frame-classifier baseline. *(Result pending the training run; reported here
-when it lands — the target is the connected-command failures, especially the long-word and
-boundary-ghost cases §6.2 left open.)*
+decoder. We built a **streaming CTC** recogniser: the MatchboxNet encoder (stride-1 in time, no
+global pool) + a per-frame CTC head over `blank + the 21 keyword tokens`, trained with
+`tf.nn.ctc_loss` on **392 synthesised `device [zone] action` phrases** (8× the catalog, from
+train-split clips only), 60 epochs, decoded greedily into the same pure grammar.
+
+The result is a negative one, and instructive. Training loss fell (370 → 28), yet greedy decoding
+**collapsed to empty sequences** — the model emits near-all-blank — so catalog full-intent was
+**0.000** vs the frame-classifier's 0.689. Two concrete causes, each a signpost for the follow-up:
+
+1. **CTC is data-hungry.** 392 phrases is far too few to learn alignment for 21 tokens; all-blank
+   collapse is the classic small-data CTC failure. Generating orders-of-magnitude more phrase data
+   — a strength of the synthetic pipeline — is the first fix.
+2. **The streaming variable-length encoder does not INT8-export.** Its time-distributed loop emits
+   a `TensorListReserve` op outside the TFLM builtin set (it needs `SELECT_TF_OPS` or a fixed-window
+   reformulation). So even a well-trained transducer would not be device-runnable as built — the same
+   op-set gate that ruled out the Keyword Transformer (§6.7).
+
+The **frame-classifier + grammar (0.689, 20 KB INT8) therefore remains the working, deployable
+system**; the streaming transducer is a promising but unfinished direction whose two blockers this
+experiment names precisely (phrase-data scale, and an export-friendly streaming formulation).
 
 ## 7. Discussion
 
@@ -278,22 +293,27 @@ model made the system testable and portable. The results argue two methodologica
 specific numbers: **honest provenance** (real-speech-only headlines with per-word TTS labelling)
 prevents synthetic-data self-deception, and **end-to-end evaluation** catches construction bugs that
 per-clip metrics structurally cannot. The ablation arc (§6.2) is itself a contribution: a reproducible
-sequence in which each fix isolates one failure mode, including a negative result.
+sequence in which each fix isolates one failure mode, including a negative result. The
+architecture benchmark (§6.7) sharpens the deployability point — the Keyword Transformer is small
+and accurate yet not device-runnable, so the **op-set, not the parameter count, is the true MCU
+gate** — and the streaming transducer (§6.8), the literature's connected-command fix, neither beat
+the frame-classifier at our data scale nor exported, a reminder that a principled architecture still
+needs enough data and an export-friendly form to win *on-device*.
 
 ## 8. Limitations and future work
 
 - **Synthetic data.** 17 of 23 words are TTS-only; those per-word numbers are not real-speech
   performance. A recorded real-speaker (and real-microphone) test set is planned.
-- **Sim-to-real (E6).** All performance figures are *estimated* (MAC→cycle) or *proxied* (budget
-  gates). Measured on-device latency/RAM/power and clean-corpus-vs-real-mic accuracy on the CoreS3
-  (dual-MEMS + ES7210 + ESP-SR 2-mic AFE) are specified as a follow-up; we expect real accuracy below
-  the synthetic eval and see quantifying that gap as a result.
 - **Per-device robustness.** The catalog result is lighting-dominated; long compound words
   (Kühlschrank) fail under the current frame-classification + hand-rolled decoder.
-- **Architecture (planned).** A benchmark (DS-CNN / BC-ResNet / MatchboxNet / Keyword-Transformer)
-  on the reusable dataset, and a **streaming CTC/RNN-T transducer** — the literature-backed fix for
-  connected commands — are specified as the next phases; the transducer would replace the hand-rolled
-  decoder with a learned aligner that handles boundaries and long words natively.
+- **The streaming transducer (E8) has two named blockers.** The naive CTC model collapsed to
+  all-blank at 392 phrases and does not INT8-export. The follow-up is concrete: (a) generate
+  orders-of-magnitude more phrase data (the synthetic pipeline scales), possibly with a label-prior
+  or entropy regulariser to avoid blank collapse, and (b) a fixed-window or `SELECT_TF_OPS`-free
+  streaming reformulation so the encoder is device-runnable. RNN-T (implicit LM) is the further step.
+- **Sim-to-real (E6) is the biggest open item.** Measured on-device latency/RAM/power and
+  real-microphone accuracy on the CoreS3 (dual-MEMS + ES7210 + ESP-SR 2-mic AFE) are specified as a
+  follow-up; we expect real accuracy below the synthetic eval and see quantifying that gap as a result.
 
 ## 9. Conclusion
 
@@ -302,8 +322,12 @@ tooling: a 19–20 KB INT8 model, a tiny locally-trained wake word, and a pure s
 91.1 % real-speech single-word accuracy and a lighting-dominated 0.689 end-to-end command-catalog
 accuracy. The contributions we most want to travel are methodological — honest synthetic-data
 provenance, end-to-end evaluation that catches what per-clip metrics miss, budget gates that make
-"fits the MCU" a test, and a reproducible ablation (with a negative result) — plus a documented,
-reusable German MCU-KWS dataset. Everything is open-source at the repository above.
+"fits the MCU" a test, and reproducible ablations (with negative results that name their own next
+steps) — plus a documented, reusable German MCU-KWS dataset. We also benchmarked four encoders on
+that dataset (MatchboxNet the most MAC-efficient; the Keyword Transformer accurate but not
+device-runnable) and built a streaming CTC transducer whose negative result maps precisely the two
+things a connected-command model must fix — phrase-data scale and an export-friendly streaming form.
+Everything is open-source at the repository above.
 
 ## References
 
