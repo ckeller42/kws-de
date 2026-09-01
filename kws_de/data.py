@@ -234,27 +234,34 @@ def _load_noises(audio_dir: Path) -> list:  # pragma: no cover - file I/O (manua
 def _say_one(word: str, voice: str, rate: int, phrasing: str, wav_path: Path):  # pragma: no cover
     import soundfile as sf
 
-    subprocess.run(
-        [
-            "say",
-            "-v",
-            voice,
-            "-r",
-            str(rate),
-            "--data-format=LEI16@16000",
-            "-o",
-            str(wav_path),
-            phrasing.format(w=word),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    # `say` can deadlock under heavy parallelism — bound each call and skip on failure
+    # (returns None) rather than hanging the whole thread pool.
+    try:
+        subprocess.run(
+            [
+                "say",
+                "-v",
+                voice,
+                "-r",
+                str(rate),
+                "--data-format=LEI16@16000",
+                "-o",
+                str(wav_path),
+                phrasing.format(w=word),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=20,
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        wav_path.unlink(missing_ok=True)
+        return None
     y, _sr = sf.read(str(wav_path))
     wav_path.unlink()
     return y.astype(np.float32), f"tts:{voice}:{rate}"
 
 
-def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 12) -> list:
+def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4) -> list:
     # pragma: no cover - shells out
     """Synthesize up to n clips of `word` via macOS `say` (parallelized — each
     `say` call is an independent subprocess, so this is I/O-bound and speeds up
@@ -272,7 +279,8 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 12) -> l
         return _say_one(word, voice, rate, phrasing, tmp_dir / f"{word}_{i}.wav")
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        return list(ex.map(_job, enumerate(combos)))
+        results = list(ex.map(_job, enumerate(combos)))
+    return [r for r in results if r is not None]
 
 
 def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragma: no cover
