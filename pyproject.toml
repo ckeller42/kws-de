@@ -19,6 +19,8 @@ dependencies = [
 dev = ["pytest>=8", "ruff>=0.6"]
 # Apple-Silicon GPU (MPS) acceleration — optional, CPU training works without it.
 metal = ["tensorflow-metal>=1.1"]
+# Piper neural TTS engine (offline, permissive-licensed German voices).
+tts = ["piper-tts>=1.2"]
 # Wake-stage training only (Piper TTS "Hey Bus" positives + microWakeWord's
 # trainer); runtime just loads the resulting tflite, no extra deps needed.
 # Not on PyPI — installed straight from its GitHub repo.

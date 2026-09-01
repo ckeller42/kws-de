@@ -17,18 +17,20 @@ and unit-tested. Generated audio is 16 kHz mono float32, gitignored training dat
 from __future__ import annotations
 
 import itertools
+from pathlib import Path
 
 # Per-engine voice pools (extend as more are installed). Kept as data so voice_combos is pure.
 ENGINE_VOICES: dict[str, list[str]] = {
     "say": ["Anna", "Eddy", "Flo", "Grandma", "Grandpa", "Reed", "Rocko", "Sandy", "Shelley"],
+    # Voices actually cached under data/piper-voices/ (see _piper_voice_path) — full
+    # rhasspy/piper-voices ids "<locale>-<name>-<quality>". To add more, download the
+    # matching .onnx + .onnx.json pair from huggingface.co/rhasspy/piper-voices into
+    # data/piper-voices/<name>/<quality>/ and list the id here.
     "piper": [
-        "de_DE-thorsten",
-        "de_DE-kerstin",
-        "de_DE-eva_k",
-        "de_DE-ramona",
-        "de_DE-karlsson",
-        "de_DE-pavoque",
-        "de_DE-mls",
+        "de_DE-thorsten-medium",
+        "de_DE-eva_k-x_low",
+        "de_DE-ramona-low",
+        "de_DE-karlsson-low",
     ],
     "parler": [
         "a calm woman",
@@ -95,8 +97,60 @@ def synthesize(word: str, engine: str, voice: str, rate: int, out_wav):  # pragm
     return None
 
 
-def _piper_say(word, voice, out_wav):  # pragma: no cover
-    raise NotImplementedError("wire Piper (piper-tts): load de_DE voice, synth 'word' @16kHz")
+def _piper_voice_path(voice: str) -> Path:
+    """Resolve a Piper voice id (e.g. ``de_DE-thorsten-medium``) to its ``.onnx`` model
+    path in the local voice cache, mirroring the rhasspy/piper-voices HuggingFace layout:
+    ``data/piper-voices/<name>/<quality>/<locale>-<name>-<quality>.onnx``. Pure string/path
+    logic — no filesystem access, so it's unit-testable without the voice files present."""
+    from kws_de import config
+
+    _locale, rest = voice.split("-", 1)
+    name, quality = rest.rsplit("-", 1)
+    return config.DATA_DIR / "piper-voices" / name / quality / f"{voice}.onnx"
+
+
+_PIPER_VOICE_CACHE: dict[str, object] = {}  # voice id -> loaded piper.PiperVoice (memoized)
+
+
+def _piper_load_voice(voice: str):  # pragma: no cover - loads an onnx model
+    """Load (and memoize) a Piper voice model. Raises FileNotFoundError if it hasn't been
+    downloaded into data/piper-voices/ yet."""
+    if voice not in _PIPER_VOICE_CACHE:
+        from piper import PiperVoice
+
+        model_path = _piper_voice_path(voice)
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Piper voice {voice!r} not cached at {model_path} — download the "
+                "matching .onnx + .onnx.json from huggingface.co/rhasspy/piper-voices"
+            )
+        _PIPER_VOICE_CACHE[voice] = PiperVoice.load(model_path)
+    return _PIPER_VOICE_CACHE[voice]
+
+
+def _piper_say(word, voice, out_wav):  # pragma: no cover - loads model, shells out to onnxruntime
+    import numpy as np
+    import soundfile as sf
+
+    from kws_de import config
+
+    try:
+        pv = _piper_load_voice(voice)
+        chunks = list(pv.synthesize(word))
+        if not chunks:
+            return None
+        sr = chunks[0].sample_rate
+        audio = np.concatenate([c.audio_float_array for c in chunks]).astype(np.float32)
+        if sr != config.SAMPLE_RATE:
+            import librosa
+
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=config.SAMPLE_RATE)
+        audio = audio.astype(np.float32)
+        sf.write(str(out_wav), audio, config.SAMPLE_RATE)
+        out_wav.unlink()
+    except Exception:
+        return None
+    return audio
 
 
 def _parler_say(word, description, out_wav):  # pragma: no cover
