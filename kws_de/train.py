@@ -7,12 +7,21 @@ from kws_de import config
 from kws_de.model import build_dscnn
 
 
-def train(X, y, epochs=30, seed=0, num_classes=None):
+def train(X, y, epochs=30, seed=0, num_classes=None, class_weight=True):
     tf.keras.utils.set_random_seed(seed)
     X = np.asarray(X, np.float32)[..., None]
+    y = np.asarray(y)
     model = build_dscnn(num_classes=num_classes)
     model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
-    h = model.fit(X, np.asarray(y), epochs=epochs, batch_size=32, verbose=0)
+    cw = None
+    if class_weight:
+        # inverse-frequency weights so an over-represented class (e.g. _unknown_ swollen by
+        # transition-window negatives) can't dominate the loss and suppress word recall.
+        n = len(y)
+        counts = np.bincount(y)
+        k = len(counts)
+        cw = {i: (n / (k * c) if c else 0.0) for i, c in enumerate(counts)}
+    h = model.fit(X, y, epochs=epochs, batch_size=32, verbose=0, class_weight=cw)
     return model, h.history
 
 

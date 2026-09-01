@@ -486,7 +486,7 @@ def _build_and_split(
     # inter-word transition audio looks like, which isolated-word clips never
     # show it.
     command_train_clips = {w: train_clips[w] for w in words if train_clips.get(w)}
-    trans_unknown, trans_positive = make_transition_windows(command_train_clips, rng, n_pairs=2000)
+    trans_unknown, trans_positive = make_transition_windows(command_train_clips, rng, n_pairs=600)
 
     X_train, y_train = build_dataset(
         train_clips,
