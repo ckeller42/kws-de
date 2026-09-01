@@ -7,11 +7,26 @@ from kws_de import config
 from kws_de.model import build_dscnn
 
 
-def train(X, y, epochs=30, seed=0, num_classes=None, class_weight=True):
+def train(
+    X,
+    y,
+    epochs=30,
+    seed=0,
+    num_classes=None,
+    class_weight=True,
+    model=None,
+    validation_data=None,
+    callbacks=None,
+):
+    """Fit `model` (default: a fresh `build_dscnn`) on (X, y). `validation_data`/
+    `callbacks` are passed straight through to `model.fit` (e.g. a `ModelCheckpoint`
+    to select the best-val-accuracy epoch) -- kws_de.benchmark reuses this for the
+    architecture zoo instead of duplicating the class-weight/fit logic."""
     tf.keras.utils.set_random_seed(seed)
     X = np.asarray(X, np.float32)[..., None]
     y = np.asarray(y)
-    model = build_dscnn(num_classes=num_classes)
+    if model is None:
+        model = build_dscnn(num_classes=num_classes)
     model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
     cw = None
     if class_weight:
@@ -21,7 +36,19 @@ def train(X, y, epochs=30, seed=0, num_classes=None, class_weight=True):
         counts = np.bincount(y)
         k = len(counts)
         cw = {i: (n / (k * c) if c else 0.0) for i, c in enumerate(counts)}
-    h = model.fit(X, y, epochs=epochs, batch_size=32, verbose=0, class_weight=cw)
+    if validation_data is not None:
+        Xv, yv = validation_data
+        validation_data = (np.asarray(Xv, np.float32)[..., None], np.asarray(yv))
+    h = model.fit(
+        X,
+        y,
+        epochs=epochs,
+        batch_size=32,
+        verbose=0,
+        class_weight=cw,
+        validation_data=validation_data,
+        callbacks=callbacks,
+    )
     return model, h.history
 
 
