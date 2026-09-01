@@ -16,6 +16,7 @@ jobs:
         run: |
           pip install pytest-cov
           pytest -q --cov=kws_de.features --cov=kws_de.budgets --cov=kws_de.data \
+            --cov=kws_de.grammar --cov=kws_de.stream \
             --cov-fail-under=85
   markdownlint:
     runs-on: ubuntu-latest
