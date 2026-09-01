@@ -54,14 +54,19 @@ def split_by_speaker(clips_with_speakers: dict, rng, test_frac: float = 0.2, *, 
     return train_clips, test_clips
 
 
-def build_dataset(clips, noises, rng, snrs=(20, 10, 0)):
+def build_dataset(clips, noises, rng, snrs=(20, 10, 0), labels=None, commands=None):
+    """Build (X, y) from raw clips. `labels`/`commands` default to the v1 vocab
+    (`config.LABELS`/`config.COMMANDS`) so existing v1 callers are unaffected;
+    pass `labels=config.COMMAND_LABELS, commands=command_words()` for v2."""
+    labels = list(labels) if labels is not None else config.LABELS
+    commands = list(commands) if commands is not None else config.COMMANDS
     X, y = [], []
 
     def add(sig, label):
         X.append(mfcc(sig))
-        y.append(config.label_index(label))
+        y.append(labels.index(label))
 
-    for cmd in config.COMMANDS:
+    for cmd in commands:
         for clip in clips.get(cmd, []):
             for snr in snrs:
                 noise = noises[int(rng.integers(0, len(noises)))]
@@ -74,6 +79,11 @@ def build_dataset(clips, noises, rng, snrs=(20, 10, 0)):
         sil = mix_at_snr(np.zeros(config.CLIP_SAMPLES, np.float32), noise, 0.0, rng)
         add(sil, "_silence_")
     return np.asarray(X, np.float32), np.asarray(y, np.int64)
+
+
+def command_words() -> list[str]:
+    """Slot-command words that need clips (devices + zones + actions)."""
+    return config.DEVICES + config.ZONES + config.ACTIONS
 
 
 def main() -> None:  # pragma: no cover - thin I/O wrapper (manual/integration)
