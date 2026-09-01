@@ -4,18 +4,11 @@ from kws_de import config
 def test_v2_vocab():
     assert config.WAKE_WORD == "Hey Bus"
     assert config.WAKE_LABELS == ["wake", "_not_"]
-    assert config.DEVICES == [
-        "Licht",
-        "Kühlschrank",
-        "Heizung",
-        "Aufstelldach",
-        "Campingmodus",
-        "USB",
-        "Wasser",
-        "Energie",
-    ]
+    assert config.DEVICES == ["Licht", "Kühlschrank", "Heizung", "Aufstelldach"]
     assert config.ZONES == ["Küche", "Dach", "Außen", "Lesen"]
-    assert "auf" in config.ACTIONS and "heller" in config.ACTIONS and "Eco" in config.ACTIONS
+    assert "auf" in config.ACTIONS and "heller" in config.ACTIONS
+    assert config.LIGHT_LEVELS == ["fünfundzwanzig", "fünfzig", "fünfundsiebzig", "hundert"]
+    assert all(lvl in config.DEVICE_ACTIONS["Licht"] for lvl in config.LIGHT_LEVELS)
     assert config.ZONED_DEVICES == ["Licht"]
     assert config.COMMAND_LABELS == (
         config.DEVICES + config.ZONES + config.ACTIONS + ["_unknown_", "_silence_"]

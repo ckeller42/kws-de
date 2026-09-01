@@ -45,5 +45,15 @@ def test_light_zone_brightness_valid():
     assert parse(["Licht", "Küche", "heller"]) == Intent("Licht", "Küche", "heller")
 
 
-def test_energy_mode_valid():
-    assert parse(["Energie", "Eco"]) == Intent("Energie", None, "Eco")
+def test_light_level_valid():
+    assert parse(["Licht", "Küche", "fünfzig"]) == Intent("Licht", "Küche", "fünfzig")
+
+
+def test_light_level_without_zone_valid():
+    assert parse(["Licht", "hundert"]) == Intent("Licht", None, "hundert")
+
+
+def test_level_invalid_for_non_light_rejected():
+    from kws_de.grammar import Rejection
+
+    assert isinstance(parse(["Heizung", "fünfzig"]), Rejection)
