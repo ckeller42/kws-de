@@ -27,6 +27,9 @@ tts = ["piper-tts>=1.2"]
 # trainer); runtime just loads the resulting tflite, no extra deps needed.
 # Not on PyPI — installed straight from its GitHub repo.
 train = ["microwakeword @ git+https://github.com/kahrendt/microWakeWord"]
+# Firmware requirements-traceability docs (docs/sphinx): sphinx-needs for
+# req/test traceability, breathe for the Doxygen C API reference.
+docs = ["sphinx>=7", "breathe>=4.35", "sphinx-needs>=2"]
 
 [project.scripts]
 kws-data = "kws_de.data:main"

@@ -74,6 +74,18 @@ def build_catalog() -> list:
     return catalog
 
 
+def intent_text(intent) -> str:
+    """The spoken sentence for an intent, as a person would say it: `Licht Küche
+    fünfzig Prozent`, `Heizung wärmer`. Light levels get the natural "Prozent";
+    it is not a command keyword (the level word alone is unambiguous, so the
+    grammar drops it as an unknown token) — it just makes the prompt read like
+    real speech. Single source for the recorder's sentence prompts."""
+    words = [t for t in (intent.device, intent.zone, intent.action) if t]
+    if intent.action in config.LIGHT_LEVELS:
+        words.append("Prozent")
+    return " ".join(words)
+
+
 def _tts_word_clip(word: str, voice: str, rate: int = 170):  # pragma: no cover - shells out
     """Synthesize one word via macOS `say` -> 16 kHz mono float32 array."""
     import subprocess

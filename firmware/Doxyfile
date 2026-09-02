@@ -1,0 +1,19 @@
+PROJECT_NAME           = "KWS-DE CoreS3 Firmware"
+
+INPUT                  = main
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h *.c *.cc
+EXCLUDE_PATTERNS       = */build/* */managed_components/* */gen/*
+
+OPTIMIZE_OUTPUT_FOR_C   = YES
+EXTRACT_ALL             = YES
+EXTRACT_STATIC          = YES
+
+GENERATE_HTML           = YES
+GENERATE_LATEX          = NO
+GENERATE_XML            = YES
+
+OUTPUT_DIRECTORY        = docs/doxygen
+
+QUIET                   = YES
+WARN_IF_UNDOCUMENTED    = NO

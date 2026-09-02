@@ -1,6 +1,11 @@
+/**
+ * @file usb_drive.h
+ * @brief Expose the /rec storage partition to a host PC as a USB mass-storage drive.
+ */
 #pragma once
-/* usb_drive.h */
 #include "esp_err.h"
 
-esp_err_t usb_drive_enter(void);   /* unmount /rec from the app, expose partition as MSC "KWSREC" */
-esp_err_t usb_drive_exit(void);    /* stop USB, remount /rec */
+/** @brief Unmount /rec from the app and expose the partition as a USB MSC drive ("KWSREC"). */
+esp_err_t usb_drive_enter(void);
+/** @brief Stop the USB MSC device and remount /rec for the app. */
+esp_err_t usb_drive_exit(void);

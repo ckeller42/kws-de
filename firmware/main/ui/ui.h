@@ -1,5 +1,8 @@
+/**
+ * @file ui.h
+ * @brief LVGL-based UI: record / USB-drive / recognise screens.
+ */
 #pragma once
-/* ui/ui.h */
 #include "record.h"
 #include "recognise.h"
 
@@ -7,15 +10,23 @@
 extern "C" {
 #endif
 
-void ui_init(void);                                       /* after bsp_display_start */
+/** @brief Build the UI. Call after bsp_display_start(). */
+void ui_init(void);
+/** @brief Switch the display to the record screen. */
 void ui_show_record(void);
-void ui_record_refresh(const record_status_t *st);        /* called from record task, takes bsp_display_lock */
-void ui_show_usb(void);                                   /* Task 6 */
-void ui_show_recognise(void);                              /* Task 7 */
-void ui_recognise_refresh(const recognise_status_t *st);   /* called from recognise task, takes bsp_display_lock */
+/** @brief Refresh the record screen from a status snapshot. Called from the record task; takes bsp_display_lock. */
+void ui_record_refresh(const record_status_t *st);
+/** @brief Switch the display to the USB-drive screen. */
+void ui_show_usb(void);
+/** @brief Switch the display to the recognise screen. */
+void ui_show_recognise(void);
+/** @brief Refresh the recognise screen from a status snapshot. Called from the recognise task; takes bsp_display_lock. */
+void ui_recognise_refresh(const recognise_status_t *st);
 
+/** @brief Top-level app mode, one screen/consumer task active at a time. */
 typedef enum { UI_MODE_RECORD, UI_MODE_USB, UI_MODE_RECOGNISE } ui_mode_t;
-void app_set_mode(ui_mode_t m);                           /* in main.c; the only place that suspends/resumes consumers */
+/** @brief Switch app mode. Defined in main.c; the only place that suspends/resumes consumer tasks. */
+void app_set_mode(ui_mode_t m);
 
 #ifdef __cplusplus
 }
