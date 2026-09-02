@@ -1,6 +1,6 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -I../main
-TESTS := test_mfcc test_stream test_wav test_prompts
+TESTS := test_mfcc test_stream test_wav test_prompts test_vad
 
 all: $(TESTS)
 	@for t in $(TESTS); do ./$$t || exit 1; done
@@ -14,6 +14,8 @@ test_wav: test_wav.c ../main/wav.c
 	$(CC) $(CFLAGS) -o $@ $^
 test_prompts: test_prompts.c ../main/prompts.c
 	$(CC) $(CFLAGS) -o $@ $^
+test_vad: test_vad.c ../main/vad.c
+	$(CC) $(CFLAGS) -o $@ $^ -lm
 
 clean:
 	rm -f $(TESTS)

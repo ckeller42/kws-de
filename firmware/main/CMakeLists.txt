@@ -1,1 +1,4 @@
-idf_component_register(SRCS "main.c" "mfcc.c" "stream.c" "wav.c" "prompts.c" INCLUDE_DIRS ".")
+idf_component_register(
+  SRCS "main.c" "audio.c" "storage.c" "vad.c" "record.c" "mfcc.c" "stream.c" "wav.c" "prompts.c" "ui/ui_record.c"
+  INCLUDE_DIRS "."
+  REQUIRES fatfs wear_levelling nvs_flash esp_timer)
