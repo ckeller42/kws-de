@@ -137,8 +137,11 @@ def content_gate(set_name: str, prompt: str, transcript_text: str) -> tuple[floa
 
 
 def audio_gate(path: Path, set_name: str) -> tuple[dict, str | None]:
-    sig, sr = sf.read(path, dtype="float32", always_2d=True)
-    info = sf.info(path)
+    try:
+        sig, sr = sf.read(path, dtype="float32", always_2d=True)
+        info = sf.info(path)
+    except Exception as e:  # corrupt/missing wav -> reject, don't abort the batch
+        return {}, f"unreadable: {type(e).__name__}"
     ch = sig.shape[1]
     mono = sig[:, 0]
     dur_ms = int(1000 * len(mono) / sr)
@@ -181,9 +184,9 @@ def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
         reason=reason or "",
         transcript=tr.get("text", ""),
         match_score=round(score, 3),
-        rms_dbfs=round(m["rms_dbfs"], 1),
-        peak_dbfs=round(m["peak_dbfs"], 1),
-        dur_ms=m["dur_ms"],
+        rms_dbfs=round(m.get("rms_dbfs", 0.0), 1),
+        peak_dbfs=round(m.get("peak_dbfs", 0.0), 1),
+        dur_ms=m.get("dur_ms", 0),
     )
     return row, tr
 

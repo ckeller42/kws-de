@@ -62,6 +62,14 @@ def test_audio_gate_ok_clipped_quiet_short(tmp_path):
     assert qc.audio_gate(_wav(tmp_path / "long6.wav", _tone(ms=4500)), "sentences")[1] is None
 
 
+def test_audio_gate_unreadable_file_is_rejection_not_crash(tmp_path):
+    bad = tmp_path / "bad.wav"
+    bad.write_bytes(b"not a wav\x00")  # 10 bytes garbage, not a real RIFF/WAV
+    m, reason = qc.audio_gate(bad, "words")
+    assert m == {}
+    assert reason.startswith("unreadable")
+
+
 def test_judge_and_sessions_roundtrip(tmp_path):
     inc = tmp_path / "incoming" / "2026-09-02-1500"
     _wav(inc / "spk02" / "licht" / "001.wav", _tone())
