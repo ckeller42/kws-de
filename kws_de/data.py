@@ -63,9 +63,12 @@ def merge_recordings(clips_ws: dict, root: Path | None = None) -> dict[str, int]
 def negative_windows(root: Path) -> list[tuple[np.ndarray, str]]:
     """1 s windows at 1 s hops from every approved negative phrase -> `_unknown_` material,
     speaker id `rec:<spk>` so speaker-disjoint splitting treats them like other real clips.
-    A file at the wrong sample rate, or shorter than one window, is skipped with a warning
-    (QC already rejects both before a take reaches `approved/`, so this only fires on a
-    file dropped into `approved/negatives` by hand)."""
+    A file at the wrong sample rate, or shorter than one window, is skipped with a warning.
+    Short files are NOT rare: QC's floor is 300 ms, so a negative take the recorder's VAD
+    cut short (~0.85 s — 5 of the 10 approved negatives in the first real session) passes
+    QC and is dropped here for want of a full 1 s window. Emitting a zero-padded window
+    instead would teach the model silence, so the drop is deliberate; the fix is on the
+    recording side."""
     import soundfile as sf
 
     out = []
