@@ -25,3 +25,16 @@ jobs:
           name: kws-de-fw-${{ github.sha }}
           path: firmware/build/kws-de-fw-*.bin
           retention-days: 30
+  gen-fresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5
+        with: {python-version: "3.11"}
+      - run: pip install -e ".[dev]"
+      - name: committed config-derived headers match kws-fwgen
+        run: |
+          kws-fwgen --out /tmp/gen
+          for f in labels.h prompts.h features_config.h test_vectors.h; do
+            diff -q "/tmp/gen/$f" "firmware/main/gen/$f"
+          done

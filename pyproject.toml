@@ -35,6 +35,7 @@ kws-export = "kws_de.export:main"
 kws-eval = "kws_de.eval:main"
 kws-dataset = "kws_de.dataset:main"
 kws-benchmark = "kws_de.benchmark:main"
+kws-fwgen = "kws_de.firmware_gen:main"
 kws-transducer = "kws_de.transducer:main"
 
 [tool.pytest.ini_options]
