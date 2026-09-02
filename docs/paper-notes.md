@@ -503,6 +503,19 @@ give the wake retrain its first in-domain positives and, held out, the first hon
 on real speech — the synthetic held-out metric (71.65 % recall) said nothing about the real-voice
 failure.
 
+**Sentence takes cut after the first word (2026-09-02).** QC of the first real recording session
+with Whisper found sentence takes (prompts like "Licht Küche fünfundsiebzig Prozent", median
+840 ms) rejected 75/102 for missing words, against word takes (median 1020 ms) mostly fine.
+Energy envelopes (RMS per 100 ms) of failing sentence takes showed one ~200 ms burst — the first
+word — followed by ≥ 500 ms below threshold, then the take closing; a good take of "Licht Dach
+heller" showed three bursts with 200–300 ms gaps between them. Cause: the recorder's VAD closed a
+take after a fixed 500 ms of trailing silence, but a natural reading pause between the words of a
+longer on-screen prompt exceeds that. Fix: the trailing hangover is now per prompt set — 500 ms
+for words, 1200 ms for sentences/negatives/wake (`prompt_hangover_ms` in
+`firmware/main/prompts.c`, fed into `vad_reset` in `firmware/main/record.c`) — plus a false-start
+filter (`vad_t.speech_total`, `MIN_SPEECH_MS` = 200 ms) that discards a take opened by a breath or
+click and keeps listening instead of saving a near-empty clip.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

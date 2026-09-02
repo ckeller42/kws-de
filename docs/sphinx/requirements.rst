@@ -50,9 +50,11 @@ Detector
 
    ``vad_push`` (``firmware/main/vad.c``) opens speech when RMS exceeds
    ``max(noise_floor * 4, 300)`` for 2 consecutive 20 ms frames, and closes
-   it after ``VAD_TRAILING_FRAMES`` = 25 consecutive frames below threshold
-   (500 ms). The noise floor tracks RMS exponentially (alpha 0.05) only
-   while not in speech.
+   it after ``v->trailing_frames`` consecutive frames below threshold, set
+   per call by ``vad_reset()`` (``VAD_TRAILING_FRAMES`` = 25 frames / 500 ms
+   is the default). The noise floor tracks RMS exponentially (alpha 0.05)
+   only while not in speech. See :need:`REQ_FW_RECORD_HANGOVER` for the
+   per-prompt-set hangover the recorder feeds in.
 
 Recorder
 --------
@@ -72,10 +74,35 @@ Recorder
    :status: implemented
 
    Fixed caps on the record state machine: 300 ms pre-roll pulled from the
-   always-on ring buffer, 500 ms of trailing silence closes a take, 4000 ms
-   maximum word-prompt length, 6000 ms maximum sentence/negative-prompt
-   length, 8000 ms no-speech timeout forces an auto-redo, and a 700 ms hold
-   after a successful save before auto-advancing to the next prompt.
+   always-on ring buffer, trailing silence closes a take per
+   :need:`REQ_FW_RECORD_HANGOVER`, 4000 ms maximum word-prompt length,
+   6000 ms maximum sentence/negative-prompt length, 8000 ms no-speech
+   timeout forces an auto-redo, and a 700 ms hold after a successful save
+   before auto-advancing to the next prompt.
+
+.. req:: Trailing-silence hangover is per prompt set; false starts are discarded
+   :id: REQ_FW_RECORD_HANGOVER
+   :status: implemented
+
+   First real recording session, QC'd with Whisper: sentence takes (median
+   840 ms) were rejected 75/102 for missing words, vs. word takes (median
+   1020 ms) mostly fine. Cause: a natural reading pause between the words
+   of a longer on-screen prompt exceeds the fixed 500 ms trailing-silence
+   hangover, so ``capture_one`` (``firmware/main/record.c``) closed the
+   take after the first word. Fix, two parts:
+
+   1. ``prompt_hangover_ms`` (``firmware/main/prompts.c``) returns 500 ms
+      for ``PROMPT_WORDS`` and 1200 ms for sentences/negatives/wake;
+      ``capture_one`` passes ``prompt_hangover_ms(set) / 20`` as the
+      trailing-frame count to ``vad_reset`` (see :need:`REQ_FW_VAD_ENDPOINT`)
+      instead of the fixed ``VAD_TRAILING_FRAMES``.
+   2. False-start filter: ``vad_t.speech_total`` counts every frame above
+      threshold since the last ``vad_reset``. If a take closes with less
+      than ``MIN_SPEECH_MS`` (200 ms) of total speech frames — a breath or
+      click before the speaker starts — ``capture_one`` discards it and
+      keeps listening in the same call, so the 8 s ``NO_SPEECH_MS`` timeout
+      (:need:`REQ_FW_RECORD_CAPS`) keeps running from the original start
+      instead of restarting.
 
 .. req:: Clipped takes are discarded and redone
    :id: REQ_FW_RECORD_CLIP_REJECT
