@@ -56,7 +56,7 @@ Scanned ~2.5 M MSWC-de examples: of the 24 grounded v2 command words, only **7 h
 clips** (Licht, Kühlschrank, Heizung, Wasser, aus, auf, Außen[158]); 17 incl. all zone words,
 `an`, and every level/mode word have **zero**. → Synthetic fill is structural, not a hack.
 
-### E3 — v2 grounded catalog model (26 classes) + end-to-end catalog eval
+### E3 — v2 grounded catalog model (23 classes) + end-to-end catalog eval
 
 - Vocabulary grounded in the camper's real controllable functions (8 devices, 4 light
   zones, 12 actions, device-specific validity map) — invalid combinations are rejected by
@@ -297,3 +297,94 @@ MatchboxNet encoder + per-frame CTC head, 392 phrases/60ep. NEGATIVE (accuracy):
 ### E8b — export blocker RESOLVED (fix/ctc-export)
 
 Blocker (2) fixed. Root cause: `TimeDistributed(Dense)` head unrolled to a `tf.while` loop -> `TensorListReserve`, unlegalizable under INT8-builtins-only (no SELECT_TF_OPS). Fix, all in `build_ctc_encoder`: (a) head -> `1x1 Conv2D` (identical per-frame projection, one static CONV_2D, no loop); (b) `t_frames` param — None=variable-T training graph unchanged, concrete=fixed-T **batch-1** export clone (weights T/batch-independent -> `set_weights` transfers trained weights); (c) static reshapes (freq->channels, head squeeze) instead of tf.shape-reshape/Permute. Result: exports 42.9KB full-INT8, op set = {CONV_2D, DEPTHWISE_CONV_2D, ADD, RESHAPE, DELEGATE} — all TFLM builtins. Batch-1 was the last mile: a None batch made TFLite recompute Reshape shapes at runtime via SHAPE/STRIDED_SLICE/PACK; fixing batch folds them out. Fixed-T + batch-1 = the honest on-device shape (one chunk, ring buffer). TDD: `test_ctc_encoder_fixed_t_int8_exports_tflm_clean` asserts zero non-TFLM ops + full-int8 (reproduces E8's ConverterError as the red test). Accuracy still 0.000 (blocker (1), data — deliberately out of scope for this fix). Paper §6.8 now: cause 1 (data) open, cause 2 (export) resolved.
+
+### Training throughput (feat/real-speech-distill)
+
+2026-09-01. Machine: Apple M4, 10 cores, 16 GB. `uv run kws-train --epochs 2` on the frozen v2 features (`data/features_{train,val,test}.npz`), wall-clock total for the 2-epoch run (includes fixed npz-load/model-build/save overhead, not isolated per-step time):
+
+| config | s/epoch |
+|---|---|
+| CPU, batch 32 | 11.4 (22.8 s / 2 epochs) |
+| CPU, batch 128 | 9.8 (19.5 s / 2 epochs) |
+| Metal, batch 128 | not run — plugin failed to load (TF 2.21; resolved below) |
+
+Metal decision: **dropped** (`uv sync`, no `--extra metal`). `uv sync --extra dev --extra tts --extra metal` resolved and installed `tensorflow-metal==1.2.0` cleanly, but importing `tensorflow` then raised `NotFoundError` at plugin-load time: the Metal plugin dylib could not resolve TF's internal `_pywrap_tensorflow_internal` symbol library.
+
+`tensorflow-metal` (last published for TF ≤2.16-era ABI) doesn't load against TF 2.21 — an ABI break in the plugin loader, not a config issue on this machine. No GPU device was ever listed, so the decision rule's bar (device present AND ≥1.3x CPU@128) can't even be evaluated; restored with `uv sync --extra dev --extra tts` (no `--extra metal`). `uv.lock` unchanged by any of the sync calls (extras already resolved in the lock).
+
+CPU@128 vs CPU@32: ~1.17x faster — modest, as expected for models this tiny (per-step overhead, not compute, dominates at batch 32).
+
+batch 128 from E9 on; E7 numbers were batch 32 — not re-run.
+
+**Update 2026-09-02 (fix/tf-metal-pin).** Pinned `tensorflow>=2.16,<2.19` (resolves to 2.18.1; Keras stays 3.15) so `tensorflow-metal` 1.2.0 loads — `tests/test_metal.py` asserts a GPU device is listed whenever the metal extra is installed on Apple silicon (red on 2.21, green on 2.18). Two findings once it ran:
+
+1. Metal's CTC kernel returns NaN (`test_ctc_train_smoke_loss_decreases`); `transducer._ctc_loss` now pins `tf.nn.ctc_loss` to CPU on every backend — the op is negligible next to the encoder.
+2. It is slower. Per-epoch time on the frozen v2 train split (20,116 rows, batch 128, `train()` timed directly, fixed overhead subtracted via a 2-vs-4-epoch difference):
+
+| model | CPU | Metal | Metal/CPU |
+|---|---|---|---|
+| DS-CNN (5.9 k params) | 5.1 s | 5.6 s | 0.91× |
+| KWT teacher (106 k params) | 6.1 s | 10.6 s | 0.58× |
+
+Decision rule was "keep Metal only if ≥1.3× CPU@128" — fails on both models: kernel-launch overhead dominates at 49×10 inputs and the MFCC inputs are already precomputed, so there is no GPU-shaped work. `uv sync` without `--extra metal` stays the default; the extra now works for anyone who wants it, and the pin is what keeps it working.
+
+### E9/E10 — distillation + balanced calibration (feat/real-speech-distill)
+
+2026-09-01. Frozen v2 features (`data/features_{train,val,test}.npz`, 23 classes). Command:
+`uv run kws-distill --features features --epochs 40 --seed 0` (~15 min wall-clock on Apple M4 CPU,
+batch 128: KWT teacher + DS-CNN baseline + DS-CNN distilled student, each 40 epochs, plus INT8
+export/eval ×3 and a 3-voice catalog TTS pass per row). Report: `docs/distill-report.md` /
+`docs/distill-benchmark.json` (untracked, like the transducer report). Teacher (KWT) float test
+accuracy: **0.894**.
+
+| Architecture | Float | Isolated | Catalog | Params | MACs | INT8 | Budget |
+|---|---|---|---|---|---|---|---|
+| ds_cnn (first-200 calib) | 0.862 | 0.842 | 0.218 | 5,879 | 2,070,496 | 20,224 | yes |
+| ds_cnn (balanced calib) | 0.862 | 0.853 | 0.259 | 5,879 | 2,070,496 | 20,224 | yes |
+| ds_cnn distilled (balanced calib) | 0.842 | 0.833 | 0.667 | 5,879 | 2,070,496 | 20,272 | yes |
+
+E9 (distillation): isolated accuracy fell (float 0.862->0.842, INT8 0.853->0.833, both -2.0 pts) but
+catalog jumped 0.259->0.667 (+40.8 pts, 2.6x) — a system-level win despite a slightly worse per-clip
+number; consistent with §6.2's "isolated accuracy is not the task."
+
+E10 (calibration): float->INT8 gap 2.0 pts with `X_train[:200]` calib, 0.9 pts with balanced calib —
+recovers 1.1 of 2.0 pts (55%) on this run. (E7's originally-quoted 1.63-pt gap was a different run,
+30ep/batch32; this run's own first-200 row, 40ep/batch128, is the baseline the recovery is measured
+against.)
+
+QAT decision (spec §5 gate: >1% absolute balanced-calib gap -> QAT next spec, else closed): measured
+balanced gap **0.9% < 1%** -> **QAT closed as unnecessary**.
+
+### TTS breadth + perturbation (feat/real-speech-distill)
+
+Audit of `raw_clips_merged.pkl` (the v2 build) found the TTS backstop was macOS `say` only: 9 voices
+x 9 rates, 6 622 clips — and TTS speaker ids were `tts:{engine}:{voice}:{rate}`, so the same voice at
+two rates could land in both train and test (a rate-in-speaker-id split leak, TTS rows in the
+speaker-disjoint split were not actually disjoint). Fix (Tasks 10-11): Piper voices discovered from
+the local cache (multi-speaker voices expanded per speaker) alongside `say`, speaker id dropped to
+`tts:{engine}:{voice}` (rate becomes augmentation, not identity, closing the leak), and every TTS
+clip gets one pitch/tempo-perturbed copy at build time. v2 feature files are untouched (frozen); the
+effect is measured with v3.
+
+### Paper maintenance (2026-09-01)
+
+- §5 now states the deployed architecture layer by layer (stem 3×3/32 → 3 × DS block → global
+  mean → Dense 23; 5 879 params, 2.07 M MACs, five TFLM builtins) and the KWT teacher (d 64,
+  depth 3, 4 heads, MLP 128, 106 k params) plus the E9 loss with T = 4, α = 0.5.
+- §4.4 added: split sizes (20 116 / 4 101 / 4 042 rows), per-word real-vs-TTS provenance from the
+  frozen v2 features (4 real-only, 2 mixed, 15 TTS-only command words — the old "17 of 23" counted
+  the 24-word vocabulary), and worked examples for clip → class, events → intent, rejections.
+- Paper gate: `scripts/check-paper.sh` fails `git push` / `gh pr create` when a branch changes
+  `kws_de/`, `firmware/` or a results report without touching paper.md or paper-notes.md
+  (`PAPER_SKIP=1` for pure refactors).
+
+## Open questions
+
+- Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
+  effective n ≈ (speaker, word) pairs; `kws-benchmark --folds 5` over real speakers only, TTS always
+  train-side, mean ± std + per-speaker table. Build after v3 once ≥ 5 speaker groups cover every
+  command.
+- Probabilistic slot decoding (spec §10): detector thresholds before the grammar can weigh in;
+  n-best lattice parse over the existing posteriors (≤ 8 sequences per phrase, score = ∏ probs,
+  accept on tau/delta, temperature-calibrated), E11 offline re-decode of the catalog eval with
+  false-accept rate on negatives as the gate; catalog DP decoding only if > 5 points remain.

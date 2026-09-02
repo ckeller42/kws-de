@@ -13,7 +13,7 @@ from urllib.request import urlopen
 import numpy as np
 
 from kws_de import config, tts
-from kws_de.augment import mix_at_snr
+from kws_de.augment import mix_at_snr, perturb
 from kws_de.features import mfcc
 
 _ESC50_URL = "https://github.com/karolpiczak/ESC-50/archive/refs/heads/master.zip"
@@ -182,10 +182,17 @@ def build_dataset(
     commands=None,
     transition_unknown=None,
     transition_positives=None,
+    synthetic=None,
 ):
     """Build (X, y) from raw clips. `labels`/`commands` default to the v1 vocab
     (`config.LABELS`/`config.COMMANDS`) so existing v1 callers are unaffected;
     pass `labels=config.COMMAND_LABELS, commands=command_words()` for v2.
+
+    `synthetic` (optional `{label: [bool]}` aligned to `clips`) marks TTS clips; each one
+    also contributes a pitch/tempo-perturbed copy (±2 semitones, 0.85–1.15× tempo, drawn
+    from `rng`) through the same clean + per-snr pipeline, so rows per TTS clip double.
+    A handful of synthetic voices need the acoustic variety real speakers bring for free;
+    real clips are left alone so the real:TTS row ratio does not get worse.
 
     Every word class (commands AND `_unknown_`) sees the SAME audio domains: one
     clean (time-shifted) copy plus a noise-mixed (time-shifted) copy at each snr
@@ -208,11 +215,18 @@ def build_dataset(
         X.append(mfcc(sig))
         y.append(labels.index(label))
 
-    def add_word_clip(clip, label):
+    def add_word_clip(clip, label, perturbed=False):
         add(_random_shift(clip, rng), label)
         for snr in snrs:
             noise = noises[int(rng.integers(0, len(noises)))]
             add(mix_at_snr(_random_shift(clip, rng), noise, snr, rng), label)
+        if perturbed:
+            n_steps = float(rng.uniform(-2.0, 2.0))
+            rate = float(rng.uniform(0.85, 1.15))
+            add_word_clip(perturb(clip, n_steps, rate, config.SAMPLE_RATE), label)
+
+    def flags_for(label):
+        return (synthetic or {}).get(label) or []
 
     def add_fixed_window(sig, label):
         add(sig, label)
@@ -221,10 +235,12 @@ def build_dataset(
             add(mix_at_snr(sig, noise, snr, rng), label)
 
     for cmd in commands:
-        for clip in clips.get(cmd, []):
-            add_word_clip(clip, cmd)
-    for clip in clips.get("_unknown_", []):
-        add_word_clip(clip, "_unknown_")
+        flags = flags_for(cmd)
+        for i, clip in enumerate(clips.get(cmd, [])):
+            add_word_clip(clip, cmd, perturbed=bool(flags[i]) if i < len(flags) else False)
+    flags = flags_for("_unknown_")
+    for i, clip in enumerate(clips.get("_unknown_", [])):
+        add_word_clip(clip, "_unknown_", perturbed=bool(flags[i]) if i < len(flags) else False)
     for win in transition_unknown or []:
         add_fixed_window(win, "_unknown_")
     for win, label in transition_positives or []:
@@ -259,14 +275,32 @@ def main() -> None:  # pragma: no cover - thin I/O wrapper (manual/integration)
     ap.add_argument(
         "--v2", action="store_true", help="use the v2 slot-command vocab instead of v1 COMMANDS"
     )
+    ap.add_argument(
+        "--v3",
+        action="store_true",
+        help="v2 vocab, real speech mined from an extracted MSWC-de tarball "
+        "(--mswc-root) plus data/recordings/, TTS only as backstop",
+    )
+    ap.add_argument(
+        "--mswc-root",
+        default=str(config.DATA_DIR / "mswc" / "de"),
+        help="extracted MSWC-de tarball root (contains clips/ and de_splits.csv)",
+    )
     args = ap.parse_args()
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    words = command_words() if args.v2 else None
-    cache_name = "raw_clips_v2.pkl" if args.v2 else "raw_clips.pkl"
-    labels = config.COMMAND_LABELS if args.v2 else None
-    out_prefix = "features_v2" if args.v2 else "features"
+    v2 = args.v2 or args.v3
+    words = command_words() if v2 else None
+    cache_name = "raw_clips_v3.pkl" if args.v3 else ("raw_clips_v2.pkl" if v2 else "raw_clips.pkl")
+    labels = config.COMMAND_LABELS if v2 else None
+    out_prefix = "features_v3" if args.v3 else ("features_v2" if v2 else "features")
     if args.fetch:
-        _fetch_and_cache(safety_cap=args.safety_cap, words=words, cache_name=cache_name)
+        _fetch_and_cache(
+            safety_cap=args.safety_cap,
+            words=words,
+            cache_name=cache_name,
+            mswc_root=Path(args.mswc_root) if args.v3 else None,
+            n_unknown=2000 if args.v3 else 600,
+        )
     if args.build:
         _build_and_split(cache_name=cache_name, words=words, labels=labels, out_prefix=out_prefix)
 
@@ -277,18 +311,30 @@ def _fetch_and_cache(
     safety_cap=300_000,
     words=None,
     cache_name="raw_clips.pkl",
+    mswc_root: Path | None = None,
 ) -> None:  # pragma: no cover
     """Stream MSWC-de (MLCommons/ml_spoken_words, config 'de_wav') + download ESC-50
     noise, caching raw clips under config.DATA_DIR so re-runs don't re-download.
     `words` defaults to `config.COMMANDS` (v1); pass `command_words()` for v2 (cache
-    under a different `cache_name` so the v1 cache is untouched).
+    under a different `cache_name` so the v1 cache is untouched). With `mswc_root`,
+    mine the extracted tarball (`kws_de.mswc.mine`) and merge `data/recordings/`
+    instead of streaming; `_unknown_` gets `n_unknown` clips either way.
     """
     words = list(words) if words is not None else config.COMMANDS
     clips_path = config.DATA_DIR / cache_name
     if clips_path.exists():
         print(f"[mswc] cache hit: {clips_path}")
     else:
-        clips, scanned = _fetch_mswc(words, n_per_word, n_unknown, safety_cap)
+        if mswc_root is not None:
+            from kws_de.mswc import mine
+            from kws_de.recordings import load_recordings
+
+            clips = mine(mswc_root, words, n_per_word=n_per_word, n_unknown=n_unknown)
+            for w, items in load_recordings(config.DATA_DIR / "recordings", words).items():
+                clips[w].extend(items)
+            scanned = "mswc-tarball"
+        else:
+            clips, scanned = _fetch_mswc(words, n_per_word, n_unknown, safety_cap)
         counts = {c: len(clips[c]) for c in words}
         print(f"[mswc] done: scanned={scanned} counts={counts} unknown={len(clips['_unknown_'])}")
         with open(clips_path, "wb") as fh:
@@ -442,7 +488,7 @@ def _tts_combo_plan(word: str, n: int, engines: list[str]) -> list[tuple[str, st
     the redundancy any oversampling scheme adds. No backends touched."""
     if not engines:
         return []
-    pool = min(len(tts.ENGINE_VOICES.get(e) or ["default"]) * len(tts.RATES) for e in engines)
+    pool = min(len(tts.engine_voices(e)) * len(tts.RATES) for e in engines)
     base = tts.voice_combos(len(engines) * pool, engines)
     if not base:
         return []
@@ -455,8 +501,8 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4) -> li
     """Synthesize up to n clips of `word` across all engines from `tts_engines()`
     (parallelized — each synthesis call is independent, so this is I/O/compute-bound and
     speeds up with a thread pool), varied by engine/voice/rate. Returns
-    [(np.ndarray, speaker_id)] with speaker_id="tts:{engine}:{voice}:{rate}" so the
-    speaker-disjoint split holds out whole voice combos, per engine."""
+    [(np.ndarray, speaker_id)] with speaker_id="tts:{engine}:{voice}" — rate is augmentation,
+    not identity, so the speaker-disjoint split holds out whole voices."""
     from concurrent.futures import ThreadPoolExecutor
 
     combos = _tts_combo_plan(word, n, tts_engines())
@@ -465,7 +511,7 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4) -> li
     def _job(args):
         i, (engine, voice, rate) = args
         audio = tts.synthesize(word, engine, voice, rate, tmp_dir / f"{word}_{i}.wav")
-        return None if audio is None else (audio, f"tts:{engine}:{voice}:{rate}")
+        return None if audio is None else (audio, f"tts:{engine}:{voice}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         results = list(ex.map(_job, enumerate(combos)))
@@ -491,19 +537,25 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
     return added
 
 
-def _origin_flags(clips_ws: dict, snrs, words=None) -> np.ndarray:
+def _origin_flags(clips_ws: dict, snrs, words=None, perturb_tts: bool = False) -> np.ndarray:
     """Boolean array flagging TTS-synthesized origin (speaker id prefix "tts:"),
     aligned row-for-row to build_dataset's output for the same clips/snrs — must
     mirror build_dataset's iteration order (commands then unknown, each clip's
-    clean copy + one row per snr, then silence, then clean silence) exactly."""
+    clean copy + one row per snr, then silence, then clean silence) exactly.
+    With `perturb_tts`, TTS clips count twice (build_dataset's perturbed copy)."""
     words = list(words) if words is not None else config.COMMANDS
     per_clip = 1 + len(snrs)
     flags = []
+
+    def rows(spk):
+        is_tts = spk.startswith("tts:")
+        return [is_tts] * (per_clip * (2 if perturb_tts and is_tts else 1))
+
     for cmd in words:
         for _clip, spk in clips_ws.get(cmd, []):
-            flags.extend([spk.startswith("tts:")] * per_clip)
+            flags.extend(rows(spk))
     for _clip, spk in clips_ws.get("_unknown_", []):
-        flags.extend([spk.startswith("tts:")] * per_clip)
+        flags.extend(rows(spk))
     n_sil = max(1, len(clips_ws.get("_unknown_", [])))
     flags.extend([False] * n_sil)
     n_clean_sil = max(1, n_sil // 10)

@@ -5,7 +5,7 @@ description = "German keyword-spotting model for ESP32-S3 (buspi camper voice co
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-  "tensorflow>=2.16",
+  "tensorflow>=2.16,<2.19",  # tensorflow-metal 1.2.0 plugin ABI; newer TF fails to load it
   "numpy>=1.26",
   "librosa>=0.10",
   "soundfile>=0.12",
@@ -37,6 +37,7 @@ kws-dataset = "kws_de.dataset:main"
 kws-benchmark = "kws_de.benchmark:main"
 kws-fwgen = "kws_de.firmware_gen:main"
 kws-transducer = "kws_de.transducer:main"
+kws-distill = "kws_de.distill:main"
 
 [tool.pytest.ini_options]
 # data/ is a gitignored local cache (raw MSWC/ESC-50 clips); ESC-50 ships its own

@@ -23,10 +23,43 @@ Training corpora and model binaries are **never committed** (`.gitignore`): `dat
 `models/`, `*.npy`, `*.tflite`. The **scripts that fetch and build the data are
 versioned** — reproduce the dataset from code, not from checked-in bytes.
 
+**v3 (real speech):** download the MSWC German audio + splits tarballs
+(<https://mlcommons.org/datasets/multilingual-spoken-words/>, CC-BY 4.0,
+~18 GB) and extract to `data/mswc/de/` so it contains `clips/` and
+`de_splits.csv`. Words no public corpus has (e.g. `Aufstelldach`, a rare
+camper-hardware compound) are self-recorded: one word per file,
+`data/recordings/<word>/<speaker>_<n>.wav` (phone voice memo is fine, any
+sample rate; 5–10 speakers × ~10 takes, quiet and in-vehicle). Then:
+
+```bash
+uv run kws-data --fetch --v3 --mswc-root data/mswc/de
+uv run kws-dataset build --seed 0 --cache raw_clips_v3.pkl --prefix features_v3
+uv run kws-benchmark --features features_v3
+uv run kws-distill --features features_v3
+```
+
+**TTS backstop voices.** Words still short of 300 real clips are topped up
+with TTS across every engine that imports (`say` on macOS, Piper when
+`uv sync --extra tts`). Piper voices are whatever is cached under
+`data/piper-voices/<name>/<quality>/` (the rhasspy/piper-voices layout);
+multi-speaker voices such as `de_DE-mls-medium` (236 speakers) count once
+per speaker. To add a voice:
+
+```bash
+v=mls; q=medium; id=de_DE-$v-$q; d=data/piper-voices/$v/$q; mkdir -p $d
+for ext in onnx onnx.json; do
+  curl -fL -o $d/$id.$ext \
+    https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/$v/$q/$id.$ext
+done
+```
+
+Every TTS clip also gets one pitch/tempo-perturbed copy at build time
+(±2 semitones, 0.85–1.15× tempo); real clips do not.
+
 ## Quick start
 
 ```bash
-uv sync                       # install deps (add --extra metal for Apple-GPU)
+uv sync                       # install deps (--extra metal loads Apple-GPU; slower for these models, see paper-notes)
 uv run kws-data   --fetch     # download MSWC-de keyword subset + noise, cache features
 uv run kws-train              # train the DS-CNN
 uv run kws-export             # -> models/model.tflite + firmware/main/model_data.h

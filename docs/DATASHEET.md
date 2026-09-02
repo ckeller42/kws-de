@@ -60,9 +60,25 @@ and the `_silence_` class.
   synthetic speaker for split purposes, not just a distinct utterance.
 - **Noise**: ESC-50, downloaded once and cached (`kws_de.data._download_esc50`).
 
+**v3 path (real speech, not yet built):** real clips are mined directly from the
+MSWC tarball by keyword folder (`kws_de.mswc.mine`), filtered to `VALID == "TRUE"`
+rows in the splits CSV, with the CSV's own speaker id kept; words with no MSWC
+coverage are filled from self-recordings (`kws_de.recordings.load_recordings`),
+one word per file, tagged with `rec:<speaker>` ids. TTS drops back to its intended
+role as a **backstop only** for whatever real clips + recordings don't cover:
+`say` plus Piper voices discovered from the local voice cache (multi-speaker Piper
+voices expand to one voice id per speaker), with the synthetic-speaker id trimmed
+to `tts:<engine>:<voice>` (rate is no longer part of the id) so the speaker-disjoint
+split holds out whole voices, not voice/rate pairs. Every TTS clip also gets one
+pitch/tempo-perturbed copy at build time. The v3 real/TTS-per-word table and voice
+count will be written here once the v3 build (`kws-dataset build --prefix
+features_v3`) has actually run.
+
 All fetch/synthesis code lives in `kws_de/data.py` and is versioned; no
 audio bytes are committed (`data/` is gitignored). The dataset is
-reproduced from code + a seed, not from checked-in files.
+reproduced from code + a seed given the cached raw clips (Piper synthesis itself is
+stochastic per call, so the gitignored clip cache, not the TTS step, is what pins a
+rebuild), not from checked-in files.
 
 ## Provenance
 
