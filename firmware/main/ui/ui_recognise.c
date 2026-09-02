@@ -4,6 +4,10 @@
 #include "lvgl.h"
 #include "recognise.h"
 
+/* Recognised words carry umlauts (Küche, Wärmer, …); the built-in Montserrat-28
+   is ASCII-only, so use the same umlaut subset font as the recorder prompt. */
+LV_FONT_DECLARE(font_prompt_28);
+
 static lv_obj_t *l_word, *l_stats;
 static void on_back(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_RECORD); }
 
@@ -12,7 +16,7 @@ void ui_show_recognise(void)
     bsp_display_lock(0);
     lv_obj_t *scr = lv_obj_create(NULL);
     l_word = lv_label_create(scr);
-    lv_obj_set_style_text_font(l_word, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(l_word, &font_prompt_28, 0);
     lv_label_set_text(l_word, "...");
     lv_obj_align(l_word, LV_ALIGN_CENTER, 0, -30);
     l_stats = lv_label_create(scr);

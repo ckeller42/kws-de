@@ -79,11 +79,15 @@ static void recognise_task(void *)
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_st.infer_ms = ms; s_st.arena_used = interp.arena_used_bytes();
-        if (fired >= 0) { strlcpy(s_st.word, KWS_LABELS[fired], sizeof s_st.word); s_st.conf = probs[fired]; s_st.fired_count++; }
-        else if (best != KWS_SILENCE_INDEX) { /* keep last fired word on screen; show live top-1 only in conf */ s_st.conf = probs[best]; }
+        /* Test view: show the live top-1 prediction + its confidence every step, so
+           speaking a word immediately shows what the model hears (not only threshold
+           fires). fired_count still tracks how often the detector actually triggered. */
+        strlcpy(s_st.word, KWS_LABELS[best], sizeof s_st.word);
+        s_st.conf = probs[best];
+        if (fired >= 0) s_st.fired_count++;
         recognise_status_t copy = s_st;
         xSemaphoreGive(s_lock);
-        if (fired >= 0) { ESP_LOGI(TAG, "fired %s %.2f (%lu ms)", copy.word, copy.conf, (unsigned long)ms); log_fire(copy.word, copy.conf); }
+        if (fired >= 0) { ESP_LOGI(TAG, "fired %s %.2f (%lu ms)", KWS_LABELS[fired], (double)probs[fired], (unsigned long)ms); log_fire(KWS_LABELS[fired], probs[fired]); }
         ui_recognise_refresh(&copy);
     }
 }

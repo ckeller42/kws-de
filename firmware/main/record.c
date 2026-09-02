@@ -24,7 +24,7 @@ static const char *TAG = "record";
 #define NO_SPEECH_MS 8000
 #define HOLD_MS 700
 #define TAKES_PER_PROMPT 2            /* two reads per word, for wrong-read review */
-#define GETREADY_MS 1500             /* "get ready" beat before the first take of a word */
+#define GETREADY_MS 800              /* "get ready" beat before the first take of a word */
 #define BETWEEN_TAKES_MS 500         /* short pause before the second read */
 
 static int s_take_idx;               /* 0-based take of the current prompt */
