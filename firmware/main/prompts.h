@@ -7,7 +7,7 @@
 #include "gen/prompts.h"
 
 /** @brief Which prompt table a session draws from. */
-typedef enum { PROMPT_WORDS = 0, PROMPT_SENTENCES = 1, PROMPT_NEGS = 2 } prompt_set_t;
+typedef enum { PROMPT_WORDS = 0, PROMPT_SENTENCES = 1, PROMPT_NEGS = 2, PROMPT_WAKE = 3 } prompt_set_t;
 /** @brief A shuffled walk through one prompt set. */
 typedef struct {
     prompt_set_t set;
@@ -27,3 +27,10 @@ const char *prompt_slug(const prompt_session_t *p);
 int         prompt_advance(prompt_session_t *p);
 /** @brief Recording time cap for a prompt set, in ms (4000 for words, 6000 otherwise). */
 uint32_t    prompt_cap_ms(prompt_set_t set);
+/** @brief Reads captured per prompt before advancing (2 normally, for wrong-read review;
+ * 1 for PROMPT_WAKE — a "Hey Bus" session wants exactly config.WAKE_PROMPT_REPEATS real
+ * positives, not doubled reads). */
+int         prompt_takes_per_prompt(prompt_set_t set);
+/** @brief Set name as used in session.csv and the UI progress line
+ * ("words"|"sentences"|"negatives"|"wake"). */
+const char *prompt_set_name(prompt_set_t set);

@@ -135,13 +135,12 @@ void ui_record_refresh(const record_status_t *st)
        caller's task -> IDLE0 watchdog). Only paint while our screen is live. */
     if (!scr || lv_screen_active() != scr) return;
     if (st->phase == REC_SESSION_DONE) { ui_show_success(st->speaker, st->saved_takes); return; }
-    static const char *setname[] = {"words", "sentences", "negatives"};
     static const char *phase[] = {"paused", "listening...", "recording", "saved", "CLIPPED - redo", "no speech - redo", "flash full", "set complete", "get ready..."};
     char buf[64];
     if (!bsp_display_lock(50)) return;          /* skip a frame rather than block the recorder */
     /* "<set> <n>/<N> - read <r>/<takes>" — one progress line replaces the old
        three-label header row (set/seed, counter, speaker). */
-    snprintf(buf, sizeof buf, "%s %d/%d - read %d/%d", setname[st->set], st->index + 1, st->count, st->take, st->takes);
+    snprintf(buf, sizeof buf, "%s %d/%d - read %d/%d", prompt_set_name(st->set), st->index + 1, st->count, st->take, st->takes);
     lv_label_set_text(l_counter, buf);
     lv_label_set_text(l_prompt, st->prompt);
     /* The background stays a constant dark charcoal (set once in ui_show_record);

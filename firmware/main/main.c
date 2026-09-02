@@ -30,7 +30,7 @@ void app_set_mode(ui_mode_t m)
 {
     if (m == s_mode) return;
     ESP_LOGI(TAG, "mode %d -> %d", s_mode, m);
-    if (s_mode == UI_MODE_RECORD) record_post(REC_CMD_PAUSE);
+    if (s_mode == UI_MODE_RECORD || s_mode == UI_MODE_RECORD_WAKE) record_post(REC_CMD_PAUSE);
     if (s_mode == UI_MODE_USB) ESP_ERROR_CHECK(usb_drive_exit());
     if (s_mode == UI_MODE_RECOGNISE) recognise_set_active(false);
     if (s_mode == UI_MODE_WAKE) wake_set_active(false);
@@ -44,6 +44,9 @@ void app_set_mode(ui_mode_t m)
     /* Entering RECORD always starts a fresh guided session: new speaker id,
        sentences first, negatives auto-chained on completion (record.c). */
     if (m == UI_MODE_RECORD) { ui_show_record(); record_post(REC_CMD_START_SESSION); }
+    /* RECORD_WAKE reuses the record screen for a "Hey Bus"-only session: new
+       speaker id, PROMPT_WAKE only, no negatives chained on completion. */
+    if (m == UI_MODE_RECORD_WAKE) { ui_show_record(); record_post(REC_CMD_START_WAKE_SESSION); }
     if (m == UI_MODE_RECOGNISE) { ui_show_recognise(); recognise_set_active(true); }
     /* Wake mode measures the wake model alone: the command recogniser stays off
        so nothing else competes for the mic, the CPU, or the screen. */

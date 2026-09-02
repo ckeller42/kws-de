@@ -23,7 +23,8 @@ static const char *TAG = "record";
 #define PREROLL_SAMPLES (KWS_SAMPLE_RATE * 300 / 1000)
 #define NO_SPEECH_MS 8000
 #define HOLD_MS 700
-#define TAKES_PER_PROMPT 2            /* two reads per word, for wrong-read review */
+/* Reads per prompt before advancing: prompt_takes_per_prompt() (2 normally, for
+   wrong-read review; 1 for PROMPT_WAKE — real "Hey Bus" positives, not doubled reads). */
 #define GETREADY_MS 800              /* "get ready" beat before the first take of a word */
 #define BETWEEN_TAKES_MS 500         /* short pause before the second read */
 
@@ -45,7 +46,7 @@ static void status_set(record_phase_t ph)
     s_st.phase = ph;
     s_st.set = s_prompts.set; s_st.seed = s_prompts.seed;
     s_st.index = s_prompts.index; s_st.count = s_prompts.count;
-    s_st.take = s_take_idx + 1; s_st.takes = TAKES_PER_PROMPT;
+    s_st.take = s_take_idx + 1; s_st.takes = prompt_takes_per_prompt(s_prompts.set);
     s_st.saved_takes = s_saved_takes;
     strlcpy(s_st.prompt, prompt_text(&s_prompts), sizeof s_st.prompt);
     snprintf(s_st.speaker, sizeof s_st.speaker, "spk%02lu", (unsigned long)s_speaker);
@@ -72,17 +73,18 @@ static void nvs_bump_speaker(void)
     nvs_close(h);
 }
 
-/* /rec/spk03/licht/001.wav | /rec/spk03/_phrase_/licht-hinten-an_001.wav | /rec/spk03/_neg_/... */
+/* /rec/spk03/licht/001.wav | /rec/spk03/hey-bus/001.wav | /rec/spk03/_phrase_/licht-hinten-an_001.wav | /rec/spk03/_neg_/... */
 static int next_path(char *out, size_t n)
 {
     char dir[64];
-    const char *sub = s_prompts.set == PROMPT_WORDS ? prompt_slug(&s_prompts)
+    int slugdir = s_prompts.set == PROMPT_WORDS || s_prompts.set == PROMPT_WAKE;
+    const char *sub = slugdir ? prompt_slug(&s_prompts)
                     : s_prompts.set == PROMPT_SENTENCES ? "_phrase_" : "_neg_";
     snprintf(dir, sizeof dir, "/rec/%s", s_st.speaker);            mkdir(dir, 0777);
     snprintf(dir, sizeof dir, "/rec/%s/%s", s_st.speaker, sub);    mkdir(dir, 0777);
     for (int i = 1; i < 1000; i++) {
         struct stat st;
-        if (s_prompts.set == PROMPT_WORDS) snprintf(out, n, "%s/%03d.wav", dir, i);
+        if (slugdir) snprintf(out, n, "%s/%03d.wav", dir, i);
         else snprintf(out, n, "%s/%s_%03d.wav", dir, prompt_slug(&s_prompts), i);
         if (stat(out, &st) != 0) return 0;
     }
@@ -97,9 +99,8 @@ static void append_session_csv(const char *path, uint32_t ms, float peak_dbfs)
     FILE *f = fopen(csv, "a");
     if (!f) { ESP_LOGE(TAG, "csv open failed"); return; }
     if (fresh) fputs("prompt,file,ms,peak_dbfs,set,seed,ts\n", f);
-    static const char *setname[] = {"words", "sentences", "negatives"};
     fprintf(f, "\"%s\",%s,%lu,%.1f,%s,%lu,%lld\n", prompt_text(&s_prompts), path + 5 /* strip /rec/ */,
-            (unsigned long)ms, peak_dbfs, setname[s_prompts.set], (unsigned long)s_prompts.seed,
+            (unsigned long)ms, peak_dbfs, prompt_set_name(s_prompts.set), (unsigned long)s_prompts.seed,
             esp_timer_get_time() / 1000);
     fclose(f);
 }
@@ -181,10 +182,10 @@ static void record_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(s_take_idx == 0 ? GETREADY_MS : BETWEEN_TAKES_MS));
             int r = capture_one(&cmd);
             if (r == 0) {                                 /* take saved */
-                if (++s_take_idx >= TAKES_PER_PROMPT) {   /* both reads done → next word */
+                if (++s_take_idx >= prompt_takes_per_prompt(s_prompts.set)) {  /* all reads done → next prompt */
                     s_take_idx = 0;
                     if (!prompt_advance(&s_prompts)) {
-                        /* Sentences done → auto-chain into negatives; negatives done → session over. */
+                        /* Sentences done → auto-chain into negatives; negatives/wake done → session over. */
                         if (s_prompts.set == PROMPT_SENTENCES) {
                             prompt_session_init(&s_prompts, PROMPT_NEGS, (uint32_t)esp_timer_get_time());
                         } else {
@@ -203,6 +204,12 @@ static void record_task(void *arg)
             s_take_idx = 0; s_saved_takes = 0;
             nvs_bump_speaker();
             prompt_session_init(&s_prompts, PROMPT_SENTENCES, (uint32_t)esp_timer_get_time());
+            s_paused = 0;
+            break;
+        case REC_CMD_START_WAKE_SESSION:
+            s_take_idx = 0; s_saved_takes = 0;
+            nvs_bump_speaker();
+            prompt_session_init(&s_prompts, PROMPT_WAKE, (uint32_t)esp_timer_get_time());
             s_paused = 0;
             break;
         }
