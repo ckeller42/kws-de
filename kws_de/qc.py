@@ -25,11 +25,19 @@ log = logging.getLogger(__name__)
 Transcript = dict
 Transcriber = Callable[[Path], Transcript]
 
-CAP_MS = {"words": 4000, "sentences": 6000, "negatives": 6000}
+CAP_MS = {"words": 4000, "sentences": 6000, "negatives": 6000, "wake": 4000}
 MIN_MS = 300
 MIN_RMS_DBFS = -45.0
 CLIP_DBFS = -0.5
 FILLER = {"prozent"}
+
+# Whisper large-v3 writes the light-level number words as numerals ("50" not "fünfzig") -
+# map the digits it hears back onto the config vocabulary's spoken forms before matching.
+NUM_WORDS = {"25": "fünfundzwanzig", "50": "fünfzig", "75": "fünfundsiebzig", "100": "hundert"}
+
+# "Hey Bus" heard as e.g. "Hej Boss" or "He Bos" - loose enough for common ASR variants,
+# tight enough that ordinary German sentences don't accidentally match.
+_WAKE_RE = re.compile(r"(hey|hej|he|hei)(bus|buss|bos|boss)", re.IGNORECASE)
 
 
 @dataclass
@@ -58,7 +66,7 @@ class QcRow:
 def normalise(text: str) -> list[str]:
     t = unicodedata.normalize("NFC", text).lower().replace("ß", "ss")
     t = re.sub(r"[^\w\s]", " ", t)
-    return [w for w in t.split() if w not in FILLER]
+    return [NUM_WORDS.get(w, w) for w in t.split() if w not in FILLER]
 
 
 def vocab() -> set[str]:
@@ -73,6 +81,8 @@ def required_tokens(prompt: str, set_name: str) -> list[str]:
     if set_name == "sentences":
         v = vocab()
         return [t for t in toks if t in v]
+    if set_name == "wake":
+        return ["hey", "bus"]
     return []
 
 
@@ -117,22 +127,55 @@ def _matches(want: str, heard: str) -> bool:
     return want == heard or (len(want) > 5 and _edit1(want, heard))
 
 
+def _find_token(tok: str, glued: str, start: int) -> int | None:
+    """Find `tok` inside glued[start:] — a whitespace-free transcript, so a
+    keyword glued to its neighbour ("lichtan" for "licht") still matches.
+    Exact substring first; for tokens of MORE than 5 letters also try an
+    edit-distance<=1 substring over a sliding window of len(tok)-1..+1 (same
+    cutoff as `_matches`, so "Licht" never fuzzy-matches "nicht"). Returns the
+    end index of the match, or None."""
+    idx = glued.find(tok, start)
+    if idx != -1:
+        return idx + len(tok)
+    if len(tok) <= 5:
+        return None
+    for wlen in (len(tok) - 1, len(tok), len(tok) + 1):
+        if wlen <= 0:
+            continue
+        for i in range(start, len(glued) - wlen + 1):
+            if _edit1(tok, glued[i : i + wlen]):
+                return i + wlen
+    return None
+
+
 def content_gate(set_name: str, prompt: str, transcript_text: str) -> tuple[float, str | None]:
     heard = normalise(transcript_text)
     if set_name == "negatives":
-        bad = [h for h in heard if h in vocab()]
-        return (0.0, f"contains_command:{bad[0]}") if bad else (1.0, None)
+        v = vocab()
+        counts: dict[str, int] = {}
+        for h in heard:
+            if h in v:
+                counts[h] = counts.get(h, 0) + 1
+        # a keyword must appear as a whole token (heard is already whitespace-split, so
+        # this holds by construction); a 2-letter keyword ("an", "zu") alone is too easy
+        # to hallucinate to reject on — it must appear at least twice, or be >=3 letters.
+        for h in heard:
+            if h in counts and (len(h) >= 3 or counts[h] >= 2):
+                return 0.0, f"contains_command:{h}"
+        return 1.0, None
+    glued = "".join(heard)
+    if set_name == "wake":
+        return (1.0, None) if _WAKE_RE.fullmatch(glued) else (0.0, f"wrong_word:{glued or '-'}")
     need = required_tokens(prompt, set_name)
     if set_name == "words":
-        ok = any(_matches(need[0], h) for h in heard) if need else False
+        ok = bool(need) and _find_token(need[0], glued, 0) is not None
         return (1.0, None) if ok else (0.0, f"wrong_word:{' '.join(heard) or '-'}")
     pos, found = 0, 0
     for tok in need:
-        while pos < len(heard) and not _matches(tok, heard[pos]):
-            pos += 1
-        if pos < len(heard):
+        end = _find_token(tok, glued, pos)
+        if end is not None:
             found += 1
-            pos += 1
+            pos = end
     score = found / len(need) if need else 1.0
     if found == len(need):
         return 1.0, None
@@ -248,7 +291,7 @@ def _clear_stamp(approved: Path, qc_dir: Path) -> None:
         f = approved / rel
         if f.exists():
             f.unlink()
-    for sub in ("phrases", "negatives"):
+    for sub in ("phrases", "negatives", "wake"):
         idx = approved / sub / "index.csv"
         if idx.exists():
             keep = [r for r in csv.DictReader(idx.open()) if r["file"] not in prev]
@@ -288,7 +331,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
 
     takes = read_sessions(incoming)
     rows, words_rows, written, gap_files = [], [], [], []
-    n_words = n_skipped = 0
+    n_words = n_skipped = n_wake = 0
     for t in takes:
         try:
             row, tr = judge(t, transcriber)
@@ -372,6 +415,21 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                     }
                 )
                 n_words += 1
+        elif t.set == "wake":
+            d = approved / "wake" / t.speaker
+            dst = d / f"{t.speaker}_{_next_no(d, t.speaker)}.wav"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(t.file.read_bytes())
+            written.append(str(dst.relative_to(approved)))
+            _append_index(
+                approved / "wake" / "index.csv",
+                {
+                    "file": str(dst.relative_to(approved)),
+                    "prompt": t.prompt,
+                    "speaker": t.speaker,
+                },
+            )
+            n_wake += 1
         else:
             slug = _slug_of(t.file)
             d = approved / "negatives" / t.speaker
@@ -403,7 +461,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
     (qc_dir / "report.md").write_text(
         f"# QC {incoming.name}\n\n{len(rows)} takes, {approved_n} approved, "
         f"{len(rejects)} rejected, {n_words} word clips written, "
-        f"{n_skipped} word clips skipped.\n\n## Rejects\n\n"
+        f"{n_skipped} word clips skipped, {n_wake} wake clips written.\n\n## Rejects\n\n"
         + "".join(
             f"- `{Path(r.file).relative_to(incoming)}` — reject: {r.reason} "
             f'(heard: "{r.transcript}")\n'
@@ -418,7 +476,14 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         "rejected": len(rejects),
         "words_written": n_words,
         "words_skipped": n_skipped,
+        "wake_written": n_wake,
     }
+
+
+_QC_PROMPT = (
+    ", ".join([*config.DEVICES, *config.ZONES, *config.ACTIONS, "Prozent", config.WAKE_WORD]) + "."
+)
+_PAD_SAMPLES = config.SAMPLE_RATE // 2  # 500 ms of silence on each side
 
 
 def whisper_transcriber(
@@ -432,15 +497,23 @@ def whisper_transcriber(
             raise ValueError(
                 f"{path}: sample rate {sr} != {config.SAMPLE_RATE} (mono 16 kHz PCM expected)"
             )
+        pad = np.zeros(_PAD_SAMPLES, dtype=np.float32)
+        padded = np.concatenate([pad, audio[:, 0], pad])
         r = mlx_whisper.transcribe(
-            audio[:, 0],
+            padded,
             path_or_hf_repo=model_id,
             language="de",
             word_timestamps=True,
             temperature=0.0,
+            initial_prompt=_QC_PROMPT,
         )
+        offset = _PAD_SAMPLES / config.SAMPLE_RATE
         words = [
-            {"word": w["word"].strip(), "start": float(w["start"]), "end": float(w["end"])}
+            {
+                "word": w["word"].strip(),
+                "start": float(w["start"]) - offset,
+                "end": float(w["end"]) - offset,
+            }
             for seg in r.get("segments", [])
             for w in seg.get("words", [])
         ]

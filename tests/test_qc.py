@@ -51,6 +51,45 @@ def test_content_gate_rules():
     assert reason == "contains_command:licht"
 
 
+def test_content_gate_numerals_heard_as_digits():
+    # Whisper large-v3 writes the light levels as numerals, not the German number words.
+    assert qc.content_gate("words", "fünfzig", "50") == (1.0, None)
+    assert qc.content_gate("sentences", "Licht Küche fünfzig Prozent", "Licht Küche 50%") == (
+        1.0,
+        None,
+    )
+
+
+def test_content_gate_glued_keywords_still_order_sensitive_and_short_word_exact():
+    # sentence: keywords glued into one Whisper token still match, in order
+    assert qc.content_gate("sentences", "Licht Dach heller", "Lichtdach heller") == (1.0, None)
+    reason = qc.content_gate("sentences", "Licht Dach heller", "Licht heller Dach")[1]
+    assert reason.startswith("missing")
+    # words: keyword glued to a neighbour still matches
+    assert qc.content_gate("words", "Licht", "lichtan") == (1.0, None)
+    # but a short (<=5 letter) keyword never fuzzy-matches a different word
+    assert qc.content_gate("words", "Licht", "nicht")[1].startswith("wrong_word")
+
+
+def test_content_gate_negatives_two_letter_keyword_needs_whole_token_or_repeat():
+    # a lone 2-letter keyword hallucination doesn't reject...
+    assert qc.content_gate("negatives", "wann fahren wir los", "An den fahren wir los") == (
+        1.0,
+        None,
+    )
+    # ...but a real (>=3 letter) command keyword still does...
+    assert qc.content_gate("negatives", "x", "Licht an bitte")[1] == "contains_command:licht"
+    # ...and a 2-letter keyword appearing twice still does
+    assert qc.content_gate("negatives", "x", "an und an")[1] == "contains_command:an"
+
+
+def test_required_tokens_and_content_gate_wake():
+    assert qc.required_tokens("Hey Bus", "wake") == ["hey", "bus"]
+    assert qc.content_gate("wake", "Hey Bus", "Hey Bus") == (1.0, None)
+    assert qc.content_gate("wake", "Hey Bus", "Hej Boss") == (1.0, None)
+    assert qc.content_gate("wake", "Hey Bus", "Hallo")[1].startswith("wrong_word")
+
+
 def test_audio_gate_ok_clipped_quiet_short(tmp_path):
     ok = _wav(tmp_path / "ok.wav", _tone())
     m, reason = qc.audio_gate(ok, "words")
@@ -169,6 +208,7 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
         "rejected": 1,
         "words_written": 4,
         "words_skipped": 0,
+        "wake_written": 0,
     }
     licht_files = sorted((appr / "words" / "Licht").glob("*.wav"))
     assert len(licht_files) == 2  # bare take + phrase-segmented word, distinct files
@@ -327,6 +367,40 @@ def test_run_qc_isolates_a_transcriber_error_to_one_row(tmp_path):
     assert rows[2]["verdict"] == "approve"  # third take: batch continued past the error
 
 
+def test_run_qc_writes_approved_wake_set_and_is_idempotent(tmp_path):
+    inc = tmp_path / "incoming" / "s1"
+    _wav(inc / "spk07" / "hey-bus" / "001.wav", _tone())
+    _wav(inc / "spk07" / "hey-bus" / "002.wav", _tone())
+    _wav(inc / "spk07" / "hey-bus" / "003.wav", _tone())
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        "spk07,t,Hey Bus,spk07/hey-bus/001.wav,800,-10,wake,1,1\n"
+        "spk07,t,Hey Bus,spk07/hey-bus/002.wav,800,-10,wake,1,2\n"
+        "spk07,t,Hey Bus,spk07/hey-bus/003.wav,800,-10,wake,1,3\n"
+    )
+    heard = {"001.wav": "Hey Bus", "002.wav": "Hey Bus", "003.wav": "Hallo"}
+
+    def transcriber(p: Path):
+        return {"text": heard[p.name], "words": []}
+
+    qcd, appr = tmp_path / "qc" / "s1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["wake_written"] == 2
+    assert counts["approved"] == 2 and counts["rejected"] == 1
+    files = sorted((appr / "wake" / "spk07").glob("*.wav"))
+    assert len(files) == 2
+    idx = list(csv.DictReader((appr / "wake" / "index.csv").open()))
+    assert len(idx) == 2
+    assert all(r["prompt"] == "Hey Bus" and r["speaker"] == "spk07" for r in idx)
+    assert "wake" in (qcd / "report.md").read_text()
+
+    # re-run the same stamp: no duplication
+    counts2 = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts2 == counts
+    assert len(list((appr / "wake" / "spk07").glob("*.wav"))) == 2
+    assert len(list(csv.DictReader((appr / "wake" / "index.csv").open()))) == 2
+
+
 def test_cli_missing_sessions_csv_exits_2(tmp_path, monkeypatch):
     inc = tmp_path / "incoming" / "nope"
     inc.mkdir(parents=True)
@@ -347,6 +421,29 @@ def test_cli_dry_run_lists_takes_without_model(tmp_path, capsys, monkeypatch):
     qc.main()
     out = capsys.readouterr().out
     assert "1 takes" in out and "licht/001.wav" in out
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("mlx_whisper") is None, reason="mlx-whisper not installed"
+)
+def test_whisper_transcriber_pads_audio_and_shifts_word_offsets_back(tmp_path, monkeypatch):
+    import mlx_whisper
+
+    captured = {}
+
+    def fake_transcribe(audio, **kwargs):
+        captured["len"] = len(audio)
+        captured["initial_prompt"] = kwargs.get("initial_prompt")
+        return {"text": "x", "segments": [{"words": [{"word": "x", "start": 0.6, "end": 0.7}]}]}
+
+    monkeypatch.setattr(mlx_whisper, "transcribe", fake_transcribe)
+    tr = qc.whisper_transcriber("dummy-model")
+    wav = _wav(tmp_path / "t.wav", _tone(ms=800))
+    out = tr(wav)
+    assert captured["len"] == 800 * 16 + 2 * 8000  # 800ms audio + 500ms pad each side @16kHz
+    assert out["words"][0]["start"] == pytest.approx(0.1)
+    assert "Hey Bus" in captured["initial_prompt"]
+    assert "Licht" in captured["initial_prompt"]
 
 
 @pytest.mark.skipif(
