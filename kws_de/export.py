@@ -145,13 +145,15 @@ def main() -> None:  # pragma: no cover - I/O wrapper
         action="store_true",
         help="also write firmware/main/gen/{model_data,model_config}.h (implies --v2)",
     )
+    ap.add_argument("--prefix", default=None, help="npz prefix (default: features[_v2])")
+    ap.add_argument("--model", default=None, help="model filename (default: kws/command.keras)")
     args = ap.parse_args()
     if args.firmware:
         args.v2 = True
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    model_name = "command.keras" if args.v2 else "kws.keras"
-    prefix = "features_v2" if args.v2 else "features"
+    model_name = args.model or ("command.keras" if args.v2 else "kws.keras")
+    prefix = args.prefix or ("features_v2" if args.v2 else "features")
     tflite_name = "command.tflite" if args.v2 else "model.tflite"
     header_name = "command_data.h" if args.v2 else "model_data.h"
     labels = config.COMMAND_LABELS if args.v2 else config.LABELS

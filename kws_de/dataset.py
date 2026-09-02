@@ -70,12 +70,14 @@ def build(  # pragma: no cover - I/O
     # so the split (the reproducibility contract) is independent of augmentation draws.
     tr_ws, va_ws, te_ws = split_three_way(clips_ws, np.random.default_rng(seed), keep_speaker=True)
     splits = {}
+    speakers = {}
     for i, (name, ws) in enumerate((("train", tr_ws), ("val", va_ws), ("test", te_ws))):
         X, y, is_tts = assemble(ws, noises, np.random.default_rng(seed + 1 + i), labels, words)
         np.savez(config.DATA_DIR / f"{out_prefix}_{name}.npz", X=X, y=y, is_tts=is_tts)
         splits[name] = (X, y, is_tts)
+        speakers[name] = [s for items in ws.values() for _, s in items]
 
-    manifest = build_manifest(splits, seed=seed, labels=labels)
+    manifest = build_manifest(splits, seed=seed, labels=labels, speakers=speakers)
     suffix = out_prefix.removeprefix("features")
     (config.DATA_DIR / f"manifest{suffix}.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False)

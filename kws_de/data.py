@@ -16,6 +16,33 @@ from kws_de import config, tts
 from kws_de.augment import mix_at_snr, perturb
 from kws_de.features import mfcc
 
+
+def recordings_root() -> Path:
+    """QC-approved word clips if the pipeline has run, else the legacy hand-dropped layout."""
+    approved = config.DATA_DIR / "recordings" / "approved" / "words"
+    return approved if approved.is_dir() else config.DATA_DIR / "recordings"
+
+
+def negative_windows(root: Path, rng) -> list[tuple[np.ndarray, str]]:
+    """1 s windows at 1 s hops from every approved negative phrase -> `_unknown_` material,
+    speaker id `rec:<spk>` so speaker-disjoint splitting treats them like other real clips."""
+    import soundfile as sf
+
+    out = []
+    for f in sorted(Path(root).glob("*/*.wav")):
+        sig, sr = sf.read(f, dtype="float32", always_2d=True)
+        sig = sig[:, 0]
+        if sr != config.SAMPLE_RATE:
+            continue
+        n = config.CLIP_SAMPLES
+        for start in range(0, max(len(sig) - n + 1, 1), n):
+            win = sig[start : start + n]
+            if len(win) < n:
+                win = np.pad(win, (0, n - len(win)))
+            out.append((win.astype(np.float32), f"rec:{f.parent.name}"))
+    return out
+
+
 _ESC50_URL = "https://github.com/karolpiczak/ESC-50/archive/refs/heads/master.zip"
 
 # macOS `say` German voices actually installed on this machine (checked via
@@ -330,8 +357,13 @@ def _fetch_and_cache(
             from kws_de.recordings import load_recordings
 
             clips = mine(mswc_root, words, n_per_word=n_per_word, n_unknown=n_unknown)
-            for w, items in load_recordings(config.DATA_DIR / "recordings", words).items():
+            for w, items in load_recordings(recordings_root(), words).items():
                 clips[w].extend(items)
+            neg_root = config.DATA_DIR / "recordings" / "approved" / "negatives"
+            if neg_root.is_dir():
+                clips.setdefault("_unknown_", []).extend(
+                    negative_windows(neg_root, np.random.default_rng(0))
+                )
             scanned = "mswc-tarball"
         else:
             clips, scanned = _fetch_mswc(words, n_per_word, n_unknown, safety_cap)
