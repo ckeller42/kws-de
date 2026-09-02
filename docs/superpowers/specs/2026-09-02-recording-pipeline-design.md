@@ -81,7 +81,7 @@ Per take, two gates then a verdict:
 2. **Content gate** (Whisper): transcript normalised (lower-case, umlauts kept, ß→ss and
    ss→ß both accepted, punctuation stripped, number words compared as words, "prozent"
    optional) and matched to the prompt from `session.csv`:
-   - words: the single keyword must appear (token match, edit distance ≤ 1 for ≥ 5-letter
+   - words: the single keyword must appear (token match, edit distance ≤ 1 for > 5-letter
      words);
    - phrases: every command keyword of the prompt (device, zone?, action) must appear in
      order; extra filler is fine;

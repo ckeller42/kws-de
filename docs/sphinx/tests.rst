@@ -152,6 +152,52 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
    ``data/recordings/``, ``sessions.csv`` is appended, and the source is
    emptied.
 
+.. test:: QC audio/content gates, segmentation, and approved-tree layout
+   :id: TEST_QC_RULES
+   :status: passing
+   :links: REQ_PIPE_QC_AUDIO, REQ_PIPE_QC_CONTENT, REQ_PIPE_SEGMENT,
+           REQ_PIPE_APPROVED_LAYOUT
+
+   ``tests/test_qc.py``: the audio gate against synthetic clipped/quiet/
+   short/long/unreadable WAVs; the content gate's word/sentence/negative
+   rules with a stubbed transcriber, including umlaut/ß/"Prozent"
+   normalisation and the >5-letter edit-distance-1 cutoff; word
+   segmentation centres the 1 s window on the word span and zero-pads at
+   the edges; ``run_qc`` end to end writes the approved tree with
+   collision-proof numbering and is idempotent across re-runs of the same
+   stamp and across separate stamps for the same speaker.
+
+.. test:: ingest.sh pulls a session without deleting on the remote host
+   :id: TEST_INGEST
+   :status: passing
+   :links: REQ_PIPE_INGEST
+
+   ``tests/test_ingest.py``: runs the script against fake ``ssh``/``scp``/
+   ``rsync`` on ``PATH``, asserting the serial commands fire in order
+   (usb -> pull -> rsync -> menu), the local pull is count-verified against
+   the remote, and an unreachable host (ssh exit 255) exits 3.
+
+.. test:: Recordings-based eval figures and labels
+   :id: TEST_EVAL_RECORDINGS
+   :status: passing
+   :links: REQ_PIPE_EVAL_LABELS
+
+   ``tests/test_eval_recordings.py``: builds a tiny approved tree with a
+   stub predict function and asserts the isolated/e2e/false-accept figures
+   are computed and reported under the correct ``"held-out"`` /
+   ``"user-customised, in-training"`` label depending on whether the
+   clip's speaker appears in a given training manifest's ``train`` split.
+
+.. test:: v3 dataset build reads the approved tree and records provenance
+   :id: TEST_V3_PROVENANCE
+   :status: passing
+   :links: REQ_PIPE_APPROVED_LAYOUT
+
+   ``tests/test_data_v3_provenance.py``: ``recordings_root`` prefers
+   ``approved/`` over the legacy layout when it exists; negative windows
+   are cut at 1 s hops tagged ``rec:<spkNN>`` (and a wrong-sample-rate file
+   is warned about and skipped, not silently included).
+
 CI build/gate jobs
 -------------------
 

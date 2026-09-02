@@ -277,3 +277,83 @@ Data hygiene
    ``firmware/dependencies.lock`` are gitignored and never committed;
    ``firmware/main/gen/*.h`` (the config/model-derived headers) ARE
    committed, since CI builds without training.
+
+Recording pipeline (host workflow)
+-----------------------------------
+
+The workstation-side loop that turns a pulled CoreS3 session into
+QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
+
+.. req:: Ingest never deletes on the remote host
+   :id: REQ_PIPE_INGEST
+   :status: implemented
+
+   ``scripts/ingest.sh`` runs its steps in exactly this order: (1) send
+   ``mode usb`` over the CoreS3's serial port and wait for the ``KWSREC``
+   volume to mount, (2) run ``scripts/pull-recordings.sh`` on the remote
+   host into a stamped ``~/kwsrec-pull/<stamp>/`` staging directory, (3)
+   ``rsync`` that staging directory to
+   ``$KWS_DATA_ROOT/data/recordings/incoming/<stamp>/`` with
+   ``--ignore-existing``, verifying the local ``.wav``/``sessions.csv`` row
+   count matches the remote before declaring success, (4) send ``mode
+   menu``. Nothing on the remote host is ever deleted — the stamped staging
+   directory is a safety copy, pruned by hand once trusted. An unreachable
+   host (ssh exit 255) exits 3.
+
+.. req:: QC audio gate thresholds
+   :id: REQ_PIPE_QC_AUDIO
+   :status: implemented
+
+   ``kws_de.qc.audio_gate`` rejects a take unless it is 16000 Hz mono
+   16-bit PCM, at least 300 ms long, no longer than its set's cap (4000 ms
+   for words, 6000 ms for sentences/negatives), peak level below
+   -0.5 dBFS (not clipped), and RMS at or above -45 dBFS. A corrupt or
+   unreadable WAV is rejected (``unreadable: <exception>``), never a
+   crash.
+
+.. req:: QC content gate rules and text normalisation
+   :id: REQ_PIPE_QC_CONTENT
+   :status: implemented
+
+   Whisper's transcript is normalised (``kws_de.qc.normalise``: NFC,
+   lower-cased, ``ß`` -> ``ss``, punctuation stripped, the filler word
+   "prozent" dropped) before matching. A word take approves if the single
+   keyword is heard, exact match required at 5 letters or fewer and
+   edit-distance-1 forgiving above 5 letters (so "Licht" never matches
+   "nicht"). A sentence take approves if every required command token
+   (device/zone/action) appears in order, filler in between allowed. A
+   negative take approves only if **no** command-vocabulary word is heard;
+   the first one found is reported as ``contains_command:<word>``.
+
+.. req:: Word segmentation window
+   :id: REQ_PIPE_SEGMENT
+   :status: implemented
+
+   ``kws_de.qc.segment_word`` cuts a 1 s window (``config.CLIP_SAMPLES``)
+   centred on the midpoint of Whisper's word span, zero-padded where the
+   window runs past the start or end of the source recording.
+
+.. req:: Approved-tree layout is regenerable and speaker ids are numeric
+   :id: REQ_PIPE_APPROVED_LAYOUT
+   :status: implemented
+
+   Approved clips land at ``approved/words/<label>/<spkNN>_<NNN>.wav``,
+   ``approved/phrases/<spkNN>/<slug>_<NNN>.wav`` (+ ``phrases/index.csv``),
+   and ``approved/negatives/<spkNN>/<slug>_<NNN>.wav`` (+
+   ``negatives/index.csv``); ``<NNN>`` is the next-free number in that
+   directory, independent of the source take number. Speaker ids are
+   numeric (``spkNN``) only, never a name. Re-running QC on the same
+   ``incoming/<stamp>`` first undoes exactly what that stamp wrote last
+   time (via ``qc/<stamp>/written.txt``), so the approved tree is fully
+   regenerable from ``incoming/`` + the QC rules, and never touches another
+   stamp's or another speaker's files.
+
+.. req:: Recordings-based eval never mixes held-out and in-training figures
+   :id: REQ_PIPE_EVAL_LABELS
+   :status: implemented
+
+   ``kws_de.eval.eval_recordings`` labels every approved-recording figure
+   with one of exactly two strings, verbatim: ``"held-out"`` or
+   ``"user-customised, in-training"`` (a speaker-level match against the
+   training manifest's ``train`` split). The two are always reported as
+   separate sections, never combined into one number.

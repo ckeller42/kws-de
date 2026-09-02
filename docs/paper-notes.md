@@ -459,6 +459,24 @@ snapshots in `archive/<version>/` (v2 = the frozen 20 116 / 4 101 / 4 042 set + 
 the models and E9/E10 report). The paper's provenance table regenerates from a snapshot, and
 the device-recording ingest gets a canonical home (`data/recordings/`) for the v3 build.
 
+**Recording loop (2026-09-02, feat/recording-pipeline).** The device-recording data loop is
+now a repeatable pipeline: `scripts/ingest.sh` pulls a session over SSH into a stamped,
+never-deleted `incoming/<stamp>/`; `kws-qc` runs an audio gate (format/duration/level) then a
+Whisper large-v3 (`mlx-community/whisper-large-v3-mlx`) content gate per take, segments
+approved sentence takes into 1 s word clips centred on Whisper's word spans, and writes an
+idempotent `approved/` tree; `kws-dataset build --prefix features_v3` folds it into the v3
+build; `kws-eval --recordings` reports two figures that are never mixed — `held-out` and
+`user-customised, in-training` (speaker-level match against the training manifest). First
+real run, over an early two-speaker bring-up session (208 takes, `spk01`+`spk02`, full
+command vocabulary): **48/208 approved (23%), 41 word clips written**. Rejection breakdown:
+75 `missing` (sentence token not found/out of order), 48 `wrong_word`, 34 `too_quiet`, 2
+`clipped`, 1 `contains_command`. Most rejects were content mismatches, not audio-quality
+failures — several transcripts ("Vielen Dank.", "Test.") show these were early/placeholder
+takes rather than genuine misreads, so the low approval rate here is not yet a QC-strictness
+signal; a clean recording session is needed before this loop's numbers say anything about
+QC threshold tuning. `scripts/data-loop.sh` chains ingest → QC → build → train → export
+(model-health gate) → evals behind one command, stopping at the first failing stage.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

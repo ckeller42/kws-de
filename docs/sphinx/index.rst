@@ -9,4 +9,5 @@ CoreS3 firmware requirements traceability and Doxygen C API reference.
    requirements
    tests
    traceability
+   pipeline
    api
