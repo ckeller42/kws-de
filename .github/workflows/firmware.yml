@@ -43,7 +43,13 @@ jobs:
         run: |
           uv sync --frozen
           uv run kws-fwgen --out /tmp/gen
-          for f in labels.h prompts.h features_config.h test_vectors.h; do
+          # test_vectors.h is intentionally NOT byte-checked: TV_MFCC is built with
+          # matmuls whose float32 reduction order is BLAS-dependent (Accelerate vs
+          # OpenBLAS), so it is not byte-reproducible across platforms. It is a test
+          # fixture, validated functionally by firmware/test/test_mfcc.c (C MFCC vs
+          # TV_MFCC within 1e-2). The config headers below have no matmul and are
+          # deterministic.
+          for f in labels.h prompts.h features_config.h; do
             diff -q "/tmp/gen/$f" "firmware/main/gen/$f"
           done
   host-test:
