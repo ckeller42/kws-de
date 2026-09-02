@@ -3,6 +3,7 @@
 import argparse
 import os
 import pickle
+import re
 
 import numpy as np
 
@@ -298,7 +299,7 @@ def render_recordings_section(res: dict) -> str:
     for label in (IN_TRAINING, HELD_OUT):
         fig = res["figures"][label]
         n_clips, speakers = _figure_totals(fig)
-        out.append(f"## {label}\n")
+        out.append(f"\n## {label}\n")  # leading blank line: markdownlint MD022/MD058
         out.append(f"{n_clips} clips across {len(speakers)} speakers.\n")
         out.append(
             "| speaker | isolated words n | acc | e2e phrases n | intent acc "
@@ -313,7 +314,8 @@ def render_recordings_section(res: dict) -> str:
                 f"| {e.get('n', 0)} | {e.get('acc', float('nan')):.3f} "
                 f"| {f.get('n', 0)} | {f.get('rate', float('nan')):.3f} |"
             )
-    return "\n".join(out) + "\n"
+    # one blank line between blocks, never two (markdownlint MD012/MD022/MD058)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out) + "\n")
 
 
 def _tts_word_clip(word: str, voice: str, rate: int = 170):  # pragma: no cover - shells out
