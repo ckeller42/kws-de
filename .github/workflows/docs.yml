@@ -8,6 +8,13 @@ on:
     paths:
       - 'docs/**'
       - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/sphinx/**'
+      - 'firmware/main/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
@@ -38,6 +45,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -45,3 +53,26 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # Firmware requirements-traceability + Doxygen API docs (docs/sphinx),
+  # separate from the architecture docs above: build + upload only, no
+  # Pages deploy.
+  firmware-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5
+        with:
+          python-version: '3.11'
+      - run: sudo apt-get update && sudo apt-get install -y doxygen
+      - name: Doxygen XML (firmware C API)
+        run: cd firmware && doxygen Doxyfile
+      - run: pip install uv
+      - run: uv sync --frozen --extra docs
+      - name: Sphinx build (requirements traceability + API)
+        run: uv run sphinx-build -W --keep-going -b html docs/sphinx docs/sphinx/_build/html
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kws-de-firmware-docs
+          path: docs/sphinx/_build/html
+          retention-days: 30
