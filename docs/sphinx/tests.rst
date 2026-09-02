@@ -49,17 +49,21 @@ binary is a small ``assert``-based program built by
    exactly once. Also asserts the wake set: 5 prompts, all "Hey Bus",
    slug "hey-bus", ``prompt_set_name(PROMPT_WAKE)`` == "wake", and
    ``prompt_takes_per_prompt`` returns 1 for the wake set vs. 2 for the
-   normal sets.
+   normal sets. ``prompt_hangover_ms`` returns 500 for ``PROMPT_WORDS`` and
+   1200 for sentences/negatives/wake.
 
 .. test:: Energy VAD open/close thresholds
    :id: TEST_VAD_ENERGY
    :status: passing
-   :links: REQ_FW_VAD_ENDPOINT
+   :links: REQ_FW_VAD_ENDPOINT, REQ_FW_RECORD_HANGOVER
 
    ``firmware/test/test_vad.c``: quiet frames never open speech; loud
    frames open after 2 consecutive frames; speech stays open through
    ``VAD_TRAILING_FRAMES - 1`` silent frames and closes exactly on the
-   next.
+   next. A synthetic 200 ms-burst/800 ms-silence/200 ms-burst signal stays
+   one segment at the 1200 ms sentence/negs/wake hangover but splits into
+   two at the 500 ms word hangover. A 40 ms transient followed by silence
+   leaves ``speech_total`` under 200 ms, the false-start threshold.
 
 .. test:: Wake front-end reproduces microWakeWord's features exactly
    :id: TEST_WAKE_FRONTEND_PARITY
@@ -219,7 +223,7 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    :links: REQ_FW_RECORD_TWO_TAKES, REQ_FW_RECORD_CAPS,
            REQ_FW_RECORD_SPEAKER_ID, REQ_FW_RECORD_SESSION_CSV,
            REQ_FW_USB_SINGLE_OWNER, REQ_FW_VAD_ENDPOINT,
-           REQ_FW_23_CLASSES, REQ_FW_RECOGNISE_LOG
+           REQ_FW_RECORD_HANGOVER, REQ_FW_23_CLASSES, REQ_FW_RECOGNISE_LOG
 
    ``firmware/README.md`` "Manual test checklist": record 3 words + 1
    sentence + 1 negative → USB → pull →

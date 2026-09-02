@@ -22,6 +22,8 @@
 static const char *TAG = "record";
 #define PREROLL_SAMPLES (KWS_SAMPLE_RATE * 300 / 1000)
 #define NO_SPEECH_MS 8000
+#define MIN_SPEECH_MS 200     /* below this much total time above threshold, a closed take is a
+                                  false start (breath/click) — discard and keep listening. */
 #define HOLD_MS 700
 /* Reads per prompt before advancing: prompt_takes_per_prompt() (2 normally, for
    wrong-read review; 1 for PROMPT_WAKE — real "Hey Bus" positives, not doubled reads). */
@@ -125,7 +127,7 @@ static int save_take(uint32_t n_samples, float peak_dbfs)
 static int capture_one(record_cmd_t *cmd)
 {
     if (storage_free_bytes() < STORAGE_MIN_FREE_BYTES) { status_set(REC_FULL); return 1; }
-    vad_t vad; vad_reset(&vad);
+    vad_t vad; vad_reset(&vad, (int)(prompt_hangover_ms(s_prompts.set) / 20));
     int16_t frame[KWS_HOP];
     uint32_t cap = prompt_cap_ms(s_prompts.set) * (KWS_SAMPLE_RATE / 1000);
     uint32_t cursor = audio_write_pos();
@@ -157,7 +159,18 @@ static int capture_one(record_cmd_t *cmd)
         }
         memcpy(s_take + n, frame, sizeof frame); n += KWS_HOP;
         if (peak >= 32767) { status_set(REC_CLIPPED); return 1; }
-        if (!active || n >= cap + PREROLL_SAMPLES) break;
+        if (!active || n >= cap + PREROLL_SAMPLES) {
+            if (vad.speech_total * 20 < MIN_SPEECH_MS) {
+                /* False start (breath/click before speech): discard and keep listening
+                   in this same call, so idle_frames — and the NO_SPEECH_MS timeout —
+                   keeps running from the original start instead of restarting. */
+                capturing = 0; n = 0; peak = 0;
+                vad_reset(&vad, (int)(prompt_hangover_ms(s_prompts.set) / 20));
+                status_set(REC_LISTENING);
+                continue;
+            }
+            break;
+        }
     }
     (void)speech_start;
     float peak_dbfs = 20.f * log10f((peak > 0 ? peak : 1) / 32768.f);

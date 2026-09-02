@@ -49,6 +49,8 @@ int prompt_advance(prompt_session_t *p)
 
 uint32_t prompt_cap_ms(prompt_set_t set) { return set == PROMPT_WORDS ? 4000 : 6000; }
 
+uint32_t prompt_hangover_ms(prompt_set_t set) { return set == PROMPT_WORDS ? 500 : 1200; }
+
 int prompt_takes_per_prompt(prompt_set_t set) { return set == PROMPT_WAKE ? 1 : 2; }
 
 const char *prompt_set_name(prompt_set_t set)

@@ -27,6 +27,11 @@ const char *prompt_slug(const prompt_session_t *p);
 int         prompt_advance(prompt_session_t *p);
 /** @brief Recording time cap for a prompt set, in ms (4000 for words, 6000 otherwise). */
 uint32_t    prompt_cap_ms(prompt_set_t set);
+/** @brief Trailing-silence hangover before a take closes, in ms: 500 for words, 1200
+ * for sentences/negatives/wake. A natural reading pause between the words of a longer
+ * prompt exceeds 500 ms, so those sets need the longer hangover or the take gets cut
+ * after the first word. */
+uint32_t    prompt_hangover_ms(prompt_set_t set);
 /** @brief Reads captured per prompt before advancing (2 normally, for wrong-read review;
  * 1 for PROMPT_WAKE — a "Hey Bus" session wants exactly config.WAKE_PROMPT_REPEATS real
  * positives, not doubled reads). */

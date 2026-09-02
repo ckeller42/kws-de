@@ -28,6 +28,13 @@ int main(void)
     assert(strlen(prompt_text(&a)) > 0 && strlen(prompt_slug(&a)) > 0);
     assert(prompt_cap_ms(PROMPT_WORDS) == 4000 && prompt_cap_ms(PROMPT_NEGS) == 6000);
 
+    /* Trailing-silence hangover: words keep the short 500 ms hangover; sentences,
+       negatives and wake need 1200 ms so a natural pause doesn't cut a take. */
+    assert(prompt_hangover_ms(PROMPT_WORDS) == 500);
+    assert(prompt_hangover_ms(PROMPT_SENTENCES) == 1200);
+    assert(prompt_hangover_ms(PROMPT_NEGS) == 1200);
+    assert(prompt_hangover_ms(PROMPT_WAKE) == 1200);
+
     /* wake set: KWS_NUM_WAKE_PROMPTS reads, all "Hey Bus", set name "wake",
        exactly one take per prompt (real positives, no doubled reads). */
     prompt_session_init(&a, PROMPT_WAKE, 1);
