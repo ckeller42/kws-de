@@ -20,13 +20,15 @@ def test_slug_is_ascii_and_stable():
 
 
 def test_prompt_sets_cover_labels_and_catalog():
-    words, sentences, negs = firmware_gen.prompt_sets()
+    words, sentences, negs, wake = firmware_gen.prompt_sets()
     assert [w for w, _ in words] == [
         label for label in config.COMMAND_LABELS if not label.startswith("_")
     ]
     assert len(sentences) == len(firmware_gen.build_catalog())
     assert len(negs) == len(config.NEGATIVE_PROMPTS)
     assert len({s for _, s in words + sentences + negs}) == len(words + sentences + negs)
+    wake_prompt = (config.WAKE_WORD, firmware_gen.slug(config.WAKE_WORD))
+    assert wake == [wake_prompt] * config.WAKE_PROMPT_REPEATS
 
 
 def test_sentence_prompts_say_prozent_for_light_levels():

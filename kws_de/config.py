@@ -40,6 +40,10 @@ def label_index(label: str) -> int:
 
 # --- v2: wake word + slot commands (additive; v1 constants above untouched) ---
 WAKE_WORD = "Hey Bus"
+# Guided-recorder "Hey Bus"-only session: this many single-take reads, no
+# doubled reads like the word/sentence/negative sets (real wake positives,
+# not review pairs).
+WAKE_PROMPT_REPEATS = 5
 WAKE_LABELS = ["wake", "_not_"]
 DEVICES = ["Licht", "Kühlschrank", "Heizung", "Aufstelldach"]
 ZONES = ["Küche", "Dach", "Außen", "Lesen"]  # light zones — apply to Licht only

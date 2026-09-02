@@ -195,3 +195,18 @@ static const char *const KWS_NEG_SLUGS[20] = {
   "die-kinder-schlafen-schon",
   "was-gibt-es-heute-zum-essen"
 };
+#define KWS_NUM_WAKE_PROMPTS 5
+static const char *const KWS_WAKE_PROMPTS[5] = {
+  "Hey Bus",
+  "Hey Bus",
+  "Hey Bus",
+  "Hey Bus",
+  "Hey Bus"
+};
+static const char *const KWS_WAKE_SLUGS[5] = {
+  "hey-bus",
+  "hey-bus",
+  "hey-bus",
+  "hey-bus",
+  "hey-bus"
+};
