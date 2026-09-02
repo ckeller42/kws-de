@@ -58,6 +58,20 @@ binary is a small ``assert``-based program built by
    ``VAD_TRAILING_FRAMES - 1`` silent frames and closes exactly on the
    next.
 
+.. test:: Wake front-end reproduces microWakeWord's features exactly
+   :id: TEST_WAKE_FRONTEND_PARITY
+   :status: passing
+   :links: REQ_FW_WAKE_FRONTEND_PARITY, REQ_FW_HOST_TESTS_NO_IDF
+
+   ``firmware/test/test_wakefront.c``: pushes ``gen/wake_test_vectors.h``'s
+   1 s of synthetic PCM through ``wakefront_push`` in 10 ms strides and
+   asserts all 98 x 40 int8 feature values equal ``WT_FEATURES`` — the rows
+   ``pymicro_features`` produced for the same PCM under microWakeWord's
+   int8 requantisation. Max deviation must be 0, not a tolerance: both
+   sides run the same vendored integer C, so any difference means the
+   config or the requantisation drifted. Also asserts the 3-row
+   ``wakefront_take`` block the model consumes is oldest-row-first.
+
 Python tests (pytest)
 ----------------------
 
@@ -210,6 +224,39 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    Recognise → say "Licht" → word appears, inference < 30 ms;
    ``recognise.log`` replays through ``stream.KeywordStream`` with the same
    events. Run by hand on real M5Stack CoreS3 hardware; not automated.
+
+.. test:: On-device "Hey Bus" wake test mode
+   :id: TEST_MANUAL_WAKE_MODE
+   :status: manual
+   :links: REQ_FW_WAKE_DETECT, REQ_FW_WAKE_BEEP, REQ_FW_WAKE_ISOLATED
+
+   ``firmware/README.md`` "Manual test checklist": tap **Wake** on the
+   record screen → the probability updates live and stays low on silence;
+   say "Hey Bus" → the screen flashes green, the speaker beeps once, and
+   the fire count goes up by exactly one per utterance; other words
+   (including command words like "Licht") do not fire, confirming no
+   command recognition is running; tap **Menu** to leave → back in Record
+   mode, ``/rec/wake.log`` carries one ``[Wake] <ms> <prob>`` line per
+   fire. Run by hand on real M5Stack CoreS3 hardware; not automated.
+
+.. test:: Selection-menu flow, guided session auto-chain, and remote control
+   :id: TEST_MANUAL_MENU_FLOW
+   :status: manual
+   :links: REQ_FW_MENU_FLOW, REQ_FW_RECORD_SESSION, REQ_FW_REMOTE_MODE
+
+   ``firmware/README.md`` "Manual test checklist": device boots to the
+   4-button menu; each of Recognition/Hey Bus/Record/USB opens its
+   screen, and that screen's back button (Abbrechen on Record) returns to
+   the menu; tapping **Record** bumps the speaker id and starts the
+   sentence set, completing it auto-chains into the negative set without
+   any button press, and completing negatives shows "Fertig - danke!"
+   with the speaker id and a saved-take count, whose **Menu** button
+   returns to the selection menu; aborting mid-session instead returns
+   straight to the menu with no success screen. Separately, over the
+   serial console: ``echo 'mode wake' > /dev/cu.usbmodemNNN`` switches
+   the device to wake mode and ``echo 'status'`` reports it; ``mode
+   record`` then ``status`` reports the recorder's phase/index/speaker.
+   Run by hand on real M5Stack CoreS3 hardware; not automated.
 
 .. note::
 

@@ -28,6 +28,7 @@ static const char *TAG = "record";
 #define BETWEEN_TAKES_MS 500         /* short pause before the second read */
 
 static int s_take_idx;               /* 0-based take of the current prompt */
+static int s_saved_takes;            /* takes saved since the last REC_CMD_START_SESSION */
 
 static QueueHandle_t s_cmds;
 static SemaphoreHandle_t s_lock;
@@ -45,6 +46,7 @@ static void status_set(record_phase_t ph)
     s_st.set = s_prompts.set; s_st.seed = s_prompts.seed;
     s_st.index = s_prompts.index; s_st.count = s_prompts.count;
     s_st.take = s_take_idx + 1; s_st.takes = TAKES_PER_PROMPT;
+    s_st.saved_takes = s_saved_takes;
     strlcpy(s_st.prompt, prompt_text(&s_prompts), sizeof s_st.prompt);
     snprintf(s_st.speaker, sizeof s_st.speaker, "spk%02lu", (unsigned long)s_speaker);
     record_status_t copy = s_st;
@@ -159,6 +161,7 @@ static int capture_one(record_cmd_t *cmd)
     (void)speech_start;
     float peak_dbfs = 20.f * log10f((peak > 0 ? peak : 1) / 32768.f);
     if (save_take(n, peak_dbfs) != 0) { status_set(REC_FULL); return 1; }
+    s_saved_takes++;
     status_set(REC_SAVED);
     vTaskDelay(pdMS_TO_TICKS(HOLD_MS));
     return 0;
@@ -180,22 +183,28 @@ static void record_task(void *arg)
             if (r == 0) {                                 /* take saved */
                 if (++s_take_idx >= TAKES_PER_PROMPT) {   /* both reads done → next word */
                     s_take_idx = 0;
-                    if (!prompt_advance(&s_prompts)) { status_set(REC_DONE); s_paused = 1; }
+                    if (!prompt_advance(&s_prompts)) {
+                        /* Sentences done → auto-chain into negatives; negatives done → session over. */
+                        if (s_prompts.set == PROMPT_SENTENCES) {
+                            prompt_session_init(&s_prompts, PROMPT_NEGS, (uint32_t)esp_timer_get_time());
+                        } else {
+                            status_set(REC_SESSION_DONE);
+                            s_paused = 1;
+                        }
+                    }
                 }
                 continue;
             }
             if (r == 1) { vTaskDelay(pdMS_TO_TICKS(HOLD_MS)); continue; }  /* redo this take */
         }
         switch (cmd) {                                    /* r == -1 or woken while paused */
-        case REC_CMD_PAUSE:  s_paused = 1; status_set(REC_IDLE); break;
-        case REC_CMD_RESUME: s_paused = 0; s_take_idx = 0; break;
-        case REC_CMD_REDO:   s_take_idx = 0; break;       /* redo the whole prompt from take 1 */
-        case REC_CMD_SKIP:
-        case REC_CMD_NEXT:   s_take_idx = 0; if (!prompt_advance(&s_prompts)) { status_set(REC_DONE); s_paused = 1; } break;
-        case REC_CMD_NEW_SPEAKER: s_take_idx = 0; nvs_bump_speaker(); prompt_session_init(&s_prompts, s_prompts.set, s_prompts.seed + 1); status_set(REC_IDLE); break;
-        case REC_CMD_SET_WORDS:     s_take_idx = 0; prompt_session_init(&s_prompts, PROMPT_WORDS,     (uint32_t)esp_timer_get_time()); status_set(REC_IDLE); break;
-        case REC_CMD_SET_SENTENCES: s_take_idx = 0; prompt_session_init(&s_prompts, PROMPT_SENTENCES, (uint32_t)esp_timer_get_time()); status_set(REC_IDLE); break;
-        case REC_CMD_SET_NEGS:      s_take_idx = 0; prompt_session_init(&s_prompts, PROMPT_NEGS,      (uint32_t)esp_timer_get_time()); status_set(REC_IDLE); break;
+        case REC_CMD_PAUSE: s_paused = 1; status_set(REC_IDLE); break;
+        case REC_CMD_START_SESSION:
+            s_take_idx = 0; s_saved_takes = 0;
+            nvs_bump_speaker();
+            prompt_session_init(&s_prompts, PROMPT_SENTENCES, (uint32_t)esp_timer_get_time());
+            s_paused = 0;
+            break;
         }
     }
 }
@@ -207,8 +216,9 @@ void record_start(void)
     s_take = heap_caps_malloc(TAKE_MAX * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     assert(s_take);
     nvs_load();
-    /* Sentences are the default set: full commands as spoken (the words set is
-       reachable via the W button for isolated-word takes). */
+    /* Idle-state placeholder only; REC_CMD_START_SESSION re-seeds this for real
+       when the menu's Record button is tapped. PROMPT_WORDS stays unused here
+       (isolated words are not part of the guided session). */
     prompt_session_init(&s_prompts, PROMPT_SENTENCES, (uint32_t)esp_timer_get_time() | 1);
     snprintf(s_st.speaker, sizeof s_st.speaker, "spk%02lu", (unsigned long)s_speaker);
     xTaskCreatePinnedToCore(record_task, "record", 8192, NULL, 5, NULL, 0);

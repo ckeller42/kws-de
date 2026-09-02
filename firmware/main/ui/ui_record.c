@@ -11,11 +11,12 @@
    words showed boxes. Generated with lv_font_conv, committed as source. */
 LV_FONT_DECLARE(font_prompt_28);
 
-static lv_obj_t *scr, *l_set, *l_counter, *l_speaker, *l_prompt, *bar, *l_phase, *b_next;
+static lv_obj_t *scr, *l_counter, *l_prompt, *bar, *l_phase;
 
-static void on_cmd(lv_event_t *e) { record_post((record_cmd_t)(intptr_t)lv_event_get_user_data(e)); }
-static void on_mode_recognise(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_RECOGNISE); }
-static void on_mode_usb(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_USB); }
+/* app_set_mode() already pauses the recorder whenever RECORD is left (see
+   main.c), so aborting is just a mode switch — same pattern as every other
+   screen's back button. */
+static void on_abort(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_MENU); }
 
 static lv_obj_t *button(lv_obj_t *parent, const char *txt, lv_event_cb_t cb, void *ud, int x, int y, int w)
 {
@@ -92,8 +93,9 @@ static void ui_shot_maybe(int phase)
 static void ui_shot_maybe(int phase) { (void)phase; }
 #endif
 
-/* CoreS3 screen is 320x240. Two button rows of 34 px end at y=234 (was 262,
-   which pushed the bottom row — Recog/USB/…/N — off the bottom edge). */
+/* CoreS3 screen is 320x240. Just the guided prompt now — mode switching and
+   set selection moved to the menu and the automatic session flow, so the
+   only control left is Abbrechen (abort -> menu). */
 void ui_show_record(void)
 {
     bsp_display_lock(0);
@@ -102,54 +104,45 @@ void ui_show_record(void)
        colour flashing. Only the status pill (l_phase) changes colour per phase. */
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x12161c), 0);
     lv_obj_set_style_text_color(scr, lv_color_hex(0xe6eaef), 0);   /* inherited by labels */
-    l_set = lv_label_create(scr);     lv_obj_set_pos(l_set, 8, 4);
-    l_counter = lv_label_create(scr); lv_obj_set_pos(l_counter, 200, 4);
-    l_speaker = lv_label_create(scr); lv_obj_set_pos(l_speaker, 268, 4);
-    lv_obj_set_style_text_color(l_set, lv_color_hex(0x8a94a0), 0);      /* dim secondary text */
-    lv_obj_set_style_text_color(l_counter, lv_color_hex(0x8a94a0), 0);
-    lv_obj_set_style_text_color(l_speaker, lv_color_hex(0x8a94a0), 0);
-    l_prompt = lv_label_create(scr);  lv_obj_set_width(l_prompt, 304); lv_obj_set_pos(l_prompt, 8, 32);
+    l_prompt = lv_label_create(scr);  lv_obj_set_width(l_prompt, 304); lv_obj_set_pos(l_prompt, 8, 12);
     lv_obj_set_style_text_font(l_prompt, &font_prompt_28, 0);
     lv_obj_set_style_text_color(l_prompt, lv_color_white(), 0);
     lv_label_set_long_mode(l_prompt, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(l_prompt, LV_TEXT_ALIGN_CENTER, 0);
-    bar = lv_bar_create(scr); lv_obj_set_size(bar, 200, 10); lv_obj_set_pos(bar, 60, 84);
+    l_counter = lv_label_create(scr); lv_obj_set_width(l_counter, 304); lv_obj_set_pos(l_counter, 8, 86);
+    lv_obj_set_style_text_align(l_counter, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(l_counter, lv_color_hex(0x8a94a0), 0);  /* dim secondary text */
+    bar = lv_bar_create(scr); lv_obj_set_size(bar, 200, 10); lv_obj_set_pos(bar, 60, 112);
     lv_bar_set_range(bar, -60, 0);
-    l_phase = lv_label_create(scr);   lv_obj_set_pos(l_phase, 8, 104); lv_obj_set_size(l_phase, 304, LV_SIZE_CONTENT);
+    l_phase = lv_label_create(scr);   lv_obj_set_pos(l_phase, 8, 132); lv_obj_set_size(l_phase, 304, LV_SIZE_CONTENT);
     lv_obj_set_style_text_align(l_phase, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(l_phase, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(l_phase, lv_color_white(), 0);
     lv_obj_set_style_radius(l_phase, 8, 0);
     lv_obj_set_style_pad_all(l_phase, 6, 0);
     lv_obj_set_style_bg_opa(l_phase, LV_OPA_COVER, 0);
-    button(scr, "Redo", on_cmd, (void *)REC_CMD_REDO, 8, 152, 86);
-    button(scr, "Skip", on_cmd, (void *)REC_CMD_SKIP, 100, 152, 86);
-    b_next = button(scr, "Next", on_cmd, (void *)REC_CMD_NEXT, 226, 152, 86);
-    button(scr, "Recog", on_mode_recognise, NULL, 8, 200, 60);
-    button(scr, "USB", on_mode_usb, NULL, 72, 200, 48);
-    button(scr, "+Spk", on_cmd, (void *)REC_CMD_NEW_SPEAKER, 124, 200, 54);
-    button(scr, "W", on_cmd, (void *)REC_CMD_SET_WORDS, 182, 200, 38);
-    button(scr, "S", on_cmd, (void *)REC_CMD_SET_SENTENCES, 224, 200, 38);
-    button(scr, "Neg", on_cmd, (void *)REC_CMD_SET_NEGS, 266, 200, 46);
+    button(scr, "Abbrechen", on_abort, NULL, 60, 190, 200);
     lv_screen_load(scr);
     bsp_display_unlock();
 }
 
 void ui_record_refresh(const record_status_t *st)
 {
+    /* The recorder reports status from boot on (record_start() -> REC_IDLE) and
+       after Abbrechen, i.e. while the menu or another mode owns the display.
+       Our widgets then either do not exist yet or belong to an unloaded screen;
+       writing to them trips LVGL's assert handler (an endless loop on the
+       caller's task -> IDLE0 watchdog). Only paint while our screen is live. */
+    if (!scr || lv_screen_active() != scr) return;
+    if (st->phase == REC_SESSION_DONE) { ui_show_success(st->speaker, st->saved_takes); return; }
     static const char *setname[] = {"words", "sentences", "negatives"};
     static const char *phase[] = {"paused", "listening...", "recording", "saved", "CLIPPED - redo", "no speech - redo", "flash full", "set complete", "get ready..."};
     char buf[64];
     if (!bsp_display_lock(50)) return;          /* skip a frame rather than block the recorder */
-    snprintf(buf, sizeof buf, "%s | seed %lu", setname[st->set], (unsigned long)st->seed); lv_label_set_text(l_set, buf);
-    /* word position always; the read number rides in the counter during a read so
-       the status pill can stay a single clean word ("SPEAK NOW") that fits full width */
-    if (st->phase == REC_GETREADY || st->phase == REC_LISTENING || st->phase == REC_CAPTURING)
-        snprintf(buf, sizeof buf, "%d/%d  r%d/%d", st->index + 1, st->count, st->take, st->takes);
-    else
-        snprintf(buf, sizeof buf, "%d/%d", st->index + 1, st->count);
+    /* "<set> <n>/<N> - read <r>/<takes>" — one progress line replaces the old
+       three-label header row (set/seed, counter, speaker). */
+    snprintf(buf, sizeof buf, "%s %d/%d - read %d/%d", setname[st->set], st->index + 1, st->count, st->take, st->takes);
     lv_label_set_text(l_counter, buf);
-    lv_label_set_text(l_speaker, st->speaker);
     lv_label_set_text(l_prompt, st->prompt);
     /* The background stays a constant dark charcoal (set once in ui_show_record);
        only the status *pill* changes colour, so the screen never flashes garish

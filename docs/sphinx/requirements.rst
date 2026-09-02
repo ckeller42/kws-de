@@ -219,6 +219,97 @@ Recogniser
    needed to replay through ``kws_de.stream.KeywordStream`` on the host
    and compare event-for-event against the on-device detector.
 
+Wake word ("Hey Bus")
+---------------------
+
+.. req:: On-device wake features match microWakeWord's training front-end
+   :id: REQ_FW_WAKE_FRONTEND_PARITY
+   :status: implemented
+
+   ``firmware/main/wakefront.c`` drives the TFLite-Micro audio frontend
+   vendored under ``firmware/main/microfrontend/`` with exactly the
+   ``FrontendConfig`` microWakeWord trains with (16 kHz, 30 ms window,
+   10 ms step, 40 channels, 125-7500 Hz, PCAN on, log scaling), and
+   requantises its uint16 output to int8 with microWakeWord's own integer
+   expression ``(v * 256 + 333) / 666 - 128``. The rows it emits are
+   bit-identical to ``pymicro_features``' for the same PCM.
+
+.. req:: Wake detection fires once per utterance
+   :id: REQ_FW_WAKE_DETECT
+   :status: implemented
+
+   ``wake.cc`` runs the streaming ``models/hey_bus.tflite`` interpreter
+   once per 3 feature rows (30 ms of audio), keeping the interpreter and
+   its resource variables alive between steps and resetting them when the
+   mode is entered. A detection needs ``WAKE_THRESHOLD`` (0.99) on
+   ``WAKE_MIN_CONSECUTIVE`` (2) consecutive steps, after which
+   ``WAKE_REFRACTORY_MS`` (1500) suppresses further fires, so one spoken
+   "Hey Bus" produces exactly one fire. Each fire is logged to
+   ``/rec/wake.log`` as ``[Wake] <ms> <prob>``.
+
+.. req:: A wake detection is confirmed on screen and by ear
+   :id: REQ_FW_WAKE_BEEP
+   :status: implemented
+
+   On a fire the screen background turns green for ``WAKE_FLASH_MS``
+   (600 ms) and ``beep.c`` plays a 150 ms 1 kHz tone through the AW88298
+   amplifier. The speaker shares one full-duplex I2S channel pair with the
+   microphone, so it is opened with the mic's exact format (16 kHz,
+   16-bit, 2 channels); any other rate would be rejected by
+   ``esp_codec_dev`` and take capture down.
+
+.. req:: Wake mode runs the wake model alone
+   :id: REQ_FW_WAKE_ISOLATED
+   :status: implemented
+
+   ``UI_MODE_WAKE`` calls ``recognise_set_active(false)`` on entry and
+   ``wake_set_active(false)`` on exit, so no command-word inference runs
+   while wake mode is active and no wake inference runs outside it. The
+   two tasks share priority 3 on core 1 and only one is ever enabled, so
+   what the wake screen reports is the wake model's behaviour and nothing
+   else's.
+
+Selection menu and remote control
+----------------------------------
+
+.. req:: Every mode is reached from, and returns to, one selection menu
+   :id: REQ_FW_MENU_FLOW
+   :status: implemented
+
+   ``app_main`` boots into ``UI_MODE_MENU`` (``ui_show_menu()``), a 2x2
+   grid of four buttons — Recognition, Hey Bus, Record, USB — each a
+   direct ``app_set_mode()`` call. Every other screen's back/abort button
+   (record, recognise, wake, USB) calls ``app_set_mode(UI_MODE_MENU)``,
+   so the menu is the only hub: no mode links directly to another mode.
+
+.. req:: Entering Record always starts a fresh guided session
+   :id: REQ_FW_RECORD_SESSION
+   :status: implemented
+
+   ``app_set_mode(UI_MODE_RECORD)`` posts ``REC_CMD_START_SESSION``,
+   which bumps the speaker id (``nvs_bump_speaker``) and starts the
+   sentence set. On ``REC_DONE`` the recorder auto-chains: sentences
+   completing re-seeds the negative set and continues; negatives
+   completing sets ``REC_SESSION_DONE`` (with a running
+   ``saved_takes`` count in ``record_status_t``), which
+   ``ui_record_refresh()`` turns into the success screen
+   (``ui_show_success``). Aborting mid-session (Abbrechen) instead posts
+   ``REC_CMD_PAUSE`` and returns straight to the menu — no success
+   screen. ``PROMPT_WORDS`` remains in the code but is not reachable from
+   this flow.
+
+.. req:: The device accepts remote mode/status commands over the serial console
+   :id: REQ_FW_REMOTE_MODE
+   :status: implemented
+
+   ``console.c`` reads newline-terminated commands from ``stdin`` (the
+   UART console) in a low-priority task: ``mode
+   menu|record|recognise|wake|usb`` calls ``app_set_mode()``; ``status``
+   reports the current mode and, in record mode, the recorder's
+   phase/index/count/speaker. Every command ends with an ``ok`` or ``err
+   <reason>`` line, so a host script driving the device (e.g. ``echo
+   'mode usb' > /dev/cu.usbmodemNNN``) can tell when a command finished.
+
 Build / CI
 ----------
 
@@ -245,8 +336,9 @@ Build / CI
    :id: REQ_FW_HOST_TESTS_NO_IDF
    :status: implemented
 
-   ``mfcc.c``, ``stream.c``, ``wav.c``, ``prompts.c``, and ``vad.c`` have
-   no ESP-IDF dependency and build/run as host binaries with plain ``cc``
+   ``mfcc.c``, ``stream.c``, ``wav.c``, ``prompts.c``, ``vad.c``, and
+   ``wakefront.c`` (with the vendored microfrontend) have no ESP-IDF
+   dependency and build/run as host binaries with plain ``cc``/``c++``
    via ``firmware/test/Makefile`` (``make -C firmware/test``), on Mac, the
    Pi, and CI, with no Docker/IDF toolchain needed.
 

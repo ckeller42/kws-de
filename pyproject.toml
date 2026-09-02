@@ -30,6 +30,10 @@ train = ["microwakeword @ git+https://github.com/kahrendt/microWakeWord"]
 # Firmware requirements-traceability docs (docs/sphinx): sphinx-needs for
 # req/test traceability, breathe for the Doxygen C API reference.
 docs = ["sphinx>=7", "breathe>=4.35", "sphinx-needs>=2"]
+# The TFLite-Micro audio frontend microWakeWord trains against, exposed as a
+# Python extension. Only needed to regenerate the wake front-end golden vector
+# (`kws-fwgen`); the committed header and the firmware need nothing extra.
+wake = ["pymicro-features>=2.0.2"]
 
 [project.scripts]
 kws-data = "kws_de.data:main"
