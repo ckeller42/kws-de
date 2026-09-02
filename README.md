@@ -66,6 +66,12 @@ uv run kws-export             # -> models/model.tflite + firmware/main/model_dat
 uv run kws-eval               # -> docs/eval-report.md (accuracy, SNR sweep, budgets)
 ```
 
+`data/` and `models/` are gitignored and can live anywhere: set `KWS_DATA_ROOT`
+to a directory containing `data/` and `models/` (e.g. an external SSD) and every
+checkout and worktree shares it — no per-worktree symlinks. Unset, they are
+repo-relative. Keep frozen dataset/model versions in `<root>/archive/<version>/`
+for reproducibility; scripts only ever write to `<root>/data` and `<root>/models`.
+
 ## Firmware (M5Stack CoreS3)
 
 `firmware/` is an ESP-IDF app with two modes: a guided recorder that

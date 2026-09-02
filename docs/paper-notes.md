@@ -453,6 +453,12 @@ frame — with a ~270 ms loop period that is still ~14 new frames per step — s
 an exact 480-point mixed-radix FFT (kissfft, being vendored for the wake-word front-end), which
 should bring a step to ~10 ms and make the on-device recogniser genuinely real-time.
 
+**Data provenance housekeeping (2026-09-02).** All datasets and models now live under one
+`KWS_DATA_ROOT` on the external SSD, shared by every worktree, with immutable per-version
+snapshots in `archive/<version>/` (v2 = the frozen 20 116 / 4 101 / 4 042 set + manifest +
+the models and E9/E10 report). The paper's provenance table regenerates from a snapshot, and
+the device-recording ingest gets a canonical home (`data/recordings/`) for the v3 build.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
