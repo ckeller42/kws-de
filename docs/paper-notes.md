@@ -496,6 +496,13 @@ same synthetic distribution) could not reveal. Fix in progress: TTS hard negativ
 the command vocabulary, everyday sentences) generated with the same voices, a wider speaker
 spread, and reverb augmentation; the probe with unseen voices is the acceptance test.
 
+**Real wake positives (2026-09-02).** The synthetic-only wake training is the weak link, so the
+device menu gained a "Hey Bus"-only recording session (5 single-read takes per speaker, stored as
+set `wake`). These real utterances enter the same ingest → QC path as the command recordings and
+give the wake retrain its first in-domain positives and, held out, the first honest recall number
+on real speech — the synthetic held-out metric (71.65 % recall) said nothing about the real-voice
+failure.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
