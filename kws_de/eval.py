@@ -86,6 +86,109 @@ def intent_text(intent) -> str:
     return " ".join(words)
 
 
+def prompt_intent(prompt: str):
+    """Recover the true `Intent` a sentence prompt asks for, via the same
+    qc.required_tokens/label_for_token mapping QC uses to segment/label words —
+    so this is the same ground truth QC already agreed the recording matches."""
+    from kws_de import qc
+    from kws_de.grammar import parse
+
+    return parse([qc.label_for_token(t) for t in qc.required_tokens(prompt, "sentences")])
+
+
+def eval_recordings(approved, predict_fn, *, step_ms: int = 100) -> dict:
+    """User-customised figures on a speaker's own QC-approved recordings. These clips may
+    be in the training set — that is the point of the personalisation step — so the
+    result is labelled and must never be reported as held-out accuracy."""
+    import csv
+    from collections import defaultdict
+    from pathlib import Path
+
+    import soundfile as sf
+
+    from kws_de.grammar import Intent, parse
+
+    approved = Path(approved)
+    labels = config.COMMAND_LABELS
+    step = config.SAMPLE_RATE * step_ms // 1000
+
+    iso = defaultdict(lambda: {"n": 0, "ok": 0, "per_word": defaultdict(lambda: [0, 0])})
+    for f in sorted((approved / "words").glob("*/*.wav")):
+        lab, spk = f.parent.name, f.stem.split("_")[0]
+        sig, _ = sf.read(f, dtype="float32", always_2d=True)
+        pred = labels[int(np.argmax(predict_fn(sig[:, 0])))]
+        r = iso[spk]
+        r["n"] += 1
+        r["ok"] += pred == lab
+        r["per_word"][lab][0] += pred == lab
+        r["per_word"][lab][1] += 1
+    isolated = {
+        s: {
+            "n": r["n"],
+            "acc": r["ok"] / r["n"],
+            "per_word": {w: a / n for w, (a, n) in r["per_word"].items()},
+        }
+        for s, r in iso.items()
+    }
+
+    def _events(path):
+        sig, _ = sf.read(path, dtype="float32", always_2d=True)
+        return _stream_events(predict_fn, sig[:, 0], labels, step)
+
+    e2e = defaultdict(lambda: {"n": 0, "ok": 0})
+    idx = approved / "phrases" / "index.csv"
+    if idx.exists():
+        for r in csv.DictReader(idx.open()):
+            got = parse(_events(approved / "phrases" / r["file"]))
+            e = e2e[r["speaker"]]
+            e["n"] += 1
+            e["ok"] += isinstance(got, Intent) and got == prompt_intent(r["prompt"])
+
+    fa = defaultdict(lambda: {"n": 0, "fired": 0})
+    nidx = approved / "negatives" / "index.csv"
+    if nidx.exists():
+        for r in csv.DictReader(nidx.open()):
+            got = parse(_events(approved / "negatives" / r["file"]))
+            n = fa[r["speaker"]]
+            n["n"] += 1
+            n["fired"] += isinstance(got, Intent)
+
+    return {
+        "label": "user-customised, in-training",
+        "isolated": isolated,
+        "e2e": {s: {"n": v["n"], "acc": v["ok"] / v["n"]} for s, v in e2e.items()},
+        "false_accepts": {s: {"n": v["n"], "rate": v["fired"] / v["n"]} for s, v in fa.items()},
+    }
+
+
+def render_recordings_section(res: dict) -> str:
+    """Markdown for the recordings-based eval: per-speaker isolated-word accuracy,
+    end-to-end phrase intent accuracy, and negative false-accept rate — all under
+    the `res["label"]` heading (verbatim `user-customised, in-training`), with an
+    explicit note that these clips may overlap the training set and are therefore
+    not the held-out figure."""
+    out = [
+        f"## {res['label']}\n",
+        "These clips may be in the training set; this is the personalised-device "
+        "figure, not the held-out one.\n",
+    ]
+    out.append(
+        "| speaker | isolated words n | acc | e2e phrases n | intent acc "
+        "| negatives n | false-accept rate |\n|---|---|---|---|---|---|---|"
+    )
+    speakers = sorted(set(res["isolated"]) | set(res["e2e"]) | set(res["false_accepts"]))
+    for spk in speakers:
+        i = res["isolated"].get(spk, {})
+        e = res["e2e"].get(spk, {})
+        f = res["false_accepts"].get(spk, {})
+        out.append(
+            f"| {spk} | {i.get('n', 0)} | {i.get('acc', float('nan')):.3f} "
+            f"| {e.get('n', 0)} | {e.get('acc', float('nan')):.3f} "
+            f"| {f.get('n', 0)} | {f.get('rate', float('nan')):.3f} |"
+        )
+    return "\n".join(out) + "\n"
+
+
 def _tts_word_clip(word: str, voice: str, rate: int = 170):  # pragma: no cover - shells out
     """Synthesize one word via macOS `say` -> 16 kHz mono float32 array."""
     import subprocess
@@ -514,10 +617,32 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         action="store_true",
         help="run the v2 full command-catalog end-to-end eval instead of the v1 report",
     )
+    ap.add_argument(
+        "--recordings",
+        default=None,
+        help="QC-approved recordings dir -> append the user-customised section",
+    )
     args = ap.parse_args()
     if args.v2_catalog:
         out = args.out if args.out != "docs/eval-report.md" else "docs/eval-report-v2.md"
         _write_catalog_report(out)
+        return
+    if args.recordings:
+        import json
+        from pathlib import Path
+
+        out = args.out if args.out != "docs/eval-report.md" else "docs/eval-report-v2.md"
+        tflite_bytes = (config.MODELS_DIR / "command.tflite").read_bytes()
+        predict_fn = make_command_predict_fn(tflite_bytes)
+        res = eval_recordings(Path(args.recordings), predict_fn)
+        section = render_recordings_section(res)
+        out_path = config.DATA_DIR.parent / out
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("a") as fh:
+            fh.write("\n" + section)
+        json_path = Path(f"{out_path}.recordings.json")
+        json_path.write_text(json.dumps(res, indent=2))
+        print(f"wrote recordings section to {out_path}, data to {json_path}")
         return
 
     model = tf.keras.models.load_model(config.MODELS_DIR / "kws.keras")
