@@ -13,6 +13,14 @@ typedef struct {
     int   gap_since_last_fired;
 } stream_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void stream_reset(stream_t *s);
 /* Returns the fired label index, or -1. */
 int  stream_push(stream_t *s, const float posterior[KWS_NUM_LABELS]);
+
+#ifdef __cplusplus
+}
+#endif

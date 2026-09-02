@@ -30,7 +30,7 @@ void app_set_mode(ui_mode_t m)
     ESP_LOGI(TAG, "mode %d -> %d", s_mode, m);
     if (s_mode == UI_MODE_RECORD) record_post(REC_CMD_PAUSE);
     if (s_mode == UI_MODE_USB) ESP_ERROR_CHECK(usb_drive_exit());
-    /* Task 7 adds: recognise_pause/resume */
+    if (s_mode == UI_MODE_RECOGNISE) recognise_set_active(false);
     s_mode = m;
     if (m == UI_MODE_USB) {
         ui_show_usb();
@@ -38,6 +38,7 @@ void app_set_mode(ui_mode_t m)
         ESP_ERROR_CHECK(usb_drive_enter());
     }
     if (m == UI_MODE_RECORD) { ui_show_record(); record_post(REC_CMD_RESUME); }
+    if (m == UI_MODE_RECOGNISE) { ui_show_recognise(); recognise_set_active(true); }
 }
 
 void app_main(void)
@@ -53,6 +54,7 @@ void app_main(void)
     char label[12] = {0};
     if (f_getlabel("0:", label, NULL) == FR_OK && label[0] == '\0') f_setlabel("0:KWSREC");
     audio_start();
+    recognise_start();
     ui_show_record();
     record_start();
     record_post(REC_CMD_RESUME);

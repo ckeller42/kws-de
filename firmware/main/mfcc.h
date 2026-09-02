@@ -9,6 +9,10 @@ typedef struct {
     int   count;                             /* rows filled (<= KWS_N_FRAMES) */
 } mfcc_state_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void mfcc_init(mfcc_state_t *s);
 /* Push exactly KWS_WIN samples (one analysis window, caller advances by KWS_HOP). */
 void mfcc_push_frame(mfcc_state_t *s, const int16_t pcm[KWS_WIN]);
@@ -19,3 +23,7 @@ void mfcc_finish(const mfcc_state_t *s, float out[KWS_N_FRAMES][KWS_N_MFCC]);
 void mfcc_compute(const int16_t *pcm, float out[KWS_N_FRAMES][KWS_N_MFCC]);
 /* TFLite int8 quantisation: q = round(x/scale) + zero_point, clamped. */
 void mfcc_quantize(const float in[KWS_N_FRAMES][KWS_N_MFCC], int8_t *out, float scale, int zero_point);
+
+#ifdef __cplusplus
+}
+#endif
