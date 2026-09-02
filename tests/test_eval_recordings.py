@@ -60,7 +60,11 @@ def test_eval_recordings_splits_by_manifest(tmp_path):
 
     res = ev.eval_recordings(root, predict_fn, manifest_path=manifest_path)
     assert res["manifest_found"] is True
-    assert res["manifest_path"] == str(manifest_path)
+    # manifest_path is outside config.DATA_DIR here (a bare tmp_path, not the data
+    # root), so the safe display form falls back to just the basename -- never the
+    # absolute tmp_path (see test_eval_recordings_manifest_path_is_data_root_relative
+    # for the data-root-relative production case).
+    assert res["manifest_path"] == "manifest.json"
 
     trained = res["figures"]["user-customised, in-training"]
     held_out = res["figures"]["held-out"]
@@ -85,10 +89,40 @@ def test_eval_recordings_splits_by_manifest(tmp_path):
     assert n_held == 2 and spk_held == {"spk02", "spk03"}
 
     md = ev.render_recordings_section(res)
-    assert f"Training manifest checked: `{manifest_path}`" in md
+    assert "Training manifest checked: `manifest.json`" in md
     assert "## user-customised, in-training" in md and "## held-out" in md
     assert "2 clips across 1 speakers" in md  # in-training figure
     assert "2 clips across 2 speakers" in md  # held-out figure
+    assert "speaker-level, not per-clip" in md  # honest-match disclosure
+
+
+def test_eval_recordings_manifest_path_is_data_root_relative(tmp_path, monkeypatch):
+    """Blocker fix: a manifest under config.DATA_DIR must render/serialize as
+    `data/manifest.json`, never the absolute (machine-local, username-bearing)
+    path -- checked in both the rendered section and the JSON sidecar content
+    (`json.dumps(res)`, exactly what main() writes to `<out>.recordings.json`)."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", data_dir)
+    root, predict_fn = _build_approved(tmp_path)
+    manifest_path = data_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {"built_at": "2026-09-02T12:00:00+00:00", "splits": {"train": {"speakers": ["spk02"]}}}
+        )
+    )
+
+    res = ev.eval_recordings(root, predict_fn, manifest_path=manifest_path)
+    assert res["manifest_path"] == "data/manifest.json"
+    assert res["manifest_built_at"] == "2026-09-02T12:00:00+00:00"
+
+    md = ev.render_recordings_section(res)
+    sidecar = json.dumps(res)
+    for text in (md, sidecar):
+        assert "/Users" not in text
+        assert str(tmp_path) not in text
+    assert "data/manifest.json" in md
+    assert "2026-09-02T12:00:00+00:00" in md
 
 
 def test_eval_recordings_no_manifest_all_held_out(tmp_path):

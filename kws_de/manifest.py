@@ -5,6 +5,7 @@ is the only caller that writes its output to `data/manifest.json`.
 """
 
 import hashlib
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -15,15 +16,19 @@ def build_manifest(
     splits: dict, *, seed: int, labels: list[str], speakers: dict[str, list[str]] | None = None
 ) -> dict:
     """`splits` maps "train"/"val"/"test" -> (X, y, is_tts). Returns a
-    JSON-serialisable dict: seed, labels, mfcc params, and per-split
-    {n, real, tts, per_label_counts, hash} — hash is sha256 of the X bytes, so
-    any rebuild can be verified byte-for-byte against a committed manifest.
-    With `speakers` (per-split flat list of speaker ids, prefixed "tts:"/"rec:"/
-    plain-mswc), each split additionally gets "sources" (counts by origin) and
-    "speakers" (sorted numeric ids of device recordings only, "rec:" stripped) —
-    provenance for QC-approved device recordings mixed into the build."""
+    JSON-serialisable dict: seed, built_at (ISO-8601 UTC, when this manifest was
+    built -- consumers like `kws_de.eval.eval_recordings` use it to flag how
+    stale a "speaker was in training" match might be), labels, mfcc params, and
+    per-split {n, real, tts, per_label_counts, hash} — hash is sha256 of the X
+    bytes, so any rebuild can be verified byte-for-byte against a committed
+    manifest. With `speakers` (per-split flat list of speaker ids, prefixed
+    "tts:"/"rec:"/plain-mswc), each split additionally gets "sources" (counts by
+    origin) and "speakers" (sorted numeric ids of device recordings only, "rec:"
+    stripped) — provenance for QC-approved device recordings mixed into the
+    build."""
     out: dict = {
         "seed": seed,
+        "built_at": datetime.now(UTC).isoformat(),
         "labels": list(labels),
         "mfcc": {
             "n_mfcc": config.N_MFCC,

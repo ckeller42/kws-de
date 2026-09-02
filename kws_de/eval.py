@@ -100,18 +100,44 @@ HELD_OUT = "held-out"
 IN_TRAINING = "user-customised, in-training"
 
 
-def _trained_speakers(manifest_path) -> tuple[set[str], bool]:
-    """Speaker ids (`rec:` stripped) present in the training manifest's `train`
-    split -> these speakers' device recordings actually updated model weights.
-    (`() , False` if no path given or the file doesn't exist -> caller treats
-    every clip as held-out, never guessing "in-training" without the manifest.)"""
+def _relative_to_data_root(p) -> str:
+    """Portable display form of a path under the data root (`data/manifest.json`,
+    `data/recordings/approved`, ...) for reports/sidecars that get git-committed —
+    NEVER the absolute resolution, which embeds the local `KWS_DATA_ROOT` and
+    username (`config.py`: "Never commit a machine path here"). Falls back to
+    just the basename for a path outside the data root (e.g. a test's tmp_path),
+    which is still safe (no machine-local directory structure leaked)."""
+    from pathlib import Path
+
+    p = Path(p)
+    try:
+        return str(Path("data") / p.relative_to(config.DATA_DIR))
+    except ValueError:
+        return p.name
+
+
+def _trained_speakers(manifest_path) -> tuple[set[str], bool, str | None]:
+    """Speaker ids (`rec:` stripped) listed in the training manifest's `train`
+    split. This is a SPEAKER-LEVEL match, not a per-clip one — `build_manifest`
+    records no per-file/take field, only which speakers' device recordings went
+    into the split (`kws_de/manifest.py`). So "in `trained_speakers`" means "this
+    speaker had SOME word/negative clip in the training build as of
+    `built_at`" — it does NOT mean this specific clip was in that build. A new
+    take QC-approved for an already-trained speaker after the manifest's
+    `built_at` is real, was never seen by the current model, and is still
+    reported as `IN_TRAINING` by `eval_recordings` purely because the speaker
+    id matches; only a fresh `kws-dataset build` (+ retrain) makes the match
+    exact again. Returns `(set(), False, None)` if no path is given or the file
+    doesn't exist — callers must never guess "in-training" without the manifest
+    saying so."""
     import json
     from pathlib import Path
 
     if manifest_path is None or not Path(manifest_path).exists():
-        return set(), False
+        return set(), False, None
     manifest = json.loads(Path(manifest_path).read_text())
-    return set(manifest.get("splits", {}).get("train", {}).get("speakers", [])), True
+    speakers = set(manifest.get("splits", {}).get("train", {}).get("speakers", []))
+    return speakers, True, manifest.get("built_at")
 
 
 def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=None) -> dict:
@@ -134,7 +160,7 @@ def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=N
     approved = Path(approved)
     labels = config.COMMAND_LABELS
     step = config.SAMPLE_RATE * step_ms // 1000
-    trained_speakers, manifest_found = _trained_speakers(manifest_path)
+    trained_speakers, manifest_found, built_at = _trained_speakers(manifest_path)
 
     def figure_for(set_name: str, spk: str) -> str:
         return IN_TRAINING if set_name != "phrases" and spk in trained_speakers else HELD_OUT
@@ -197,8 +223,11 @@ def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=N
         }
 
     return {
-        "manifest_path": str(manifest_path) if manifest_path is not None else None,
+        "manifest_path": (
+            _relative_to_data_root(manifest_path) if manifest_path is not None else None
+        ),
         "manifest_found": manifest_found,
+        "manifest_built_at": built_at,
         "figures": figures,
     }
 
@@ -214,10 +243,22 @@ def _figure_totals(fig: dict) -> tuple[int, set[str]]:
 def render_recordings_section(res: dict) -> str:
     """Markdown for the recordings-based eval: two figures, labelled verbatim
     `IN_TRAINING` (`"user-customised, in-training"`) and `HELD_OUT` (`"held-out"`),
-    each stating its clip count, speaker count, and (once, up top) the manifest
-    path checked -- or that none was found, in which case every clip is held-out."""
+    each stating its clip count, speaker count, and (once, up top) the
+    data-root-relative manifest path checked (never an absolute, machine-local
+    path -- see `_relative_to_data_root`) -- or that none was found, in which
+    case every clip is held-out."""
     if res["manifest_found"]:
-        out = [f"Training manifest checked: `{res['manifest_path']}`.\n"]
+        built = f", built {res['manifest_built_at']}" if res.get("manifest_built_at") else ""
+        out = [f"Training manifest checked: `{res['manifest_path']}`{built}.\n"]
+        out.append(
+            "Match is speaker-level, not per-clip: a clip counts `user-customised, "
+            "in-training` if its speaker has ANY word/negative clip in this "
+            "manifest's train split, including takes recorded/QC-approved after "
+            f"{res['manifest_built_at'] or 'the manifest was built'} — those clips "
+            "were never actually seen by the current model. Re-run `kws-dataset "
+            "build` + retrain to make the match exact again. Phrase clips are "
+            "always `held-out` (never used for training).\n"
+        )
     elif res["manifest_path"] is not None:
         out = [f"No training manifest found at `{res['manifest_path']}`; all clips held-out.\n"]
     else:
@@ -693,14 +734,24 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         from pathlib import Path
 
         out = args.out if args.out != "docs/eval-report.md" else "docs/eval-report-v2.md"
-        tflite_bytes = (config.MODELS_DIR / "command.tflite").read_bytes()
-        predict_fn = make_command_predict_fn(tflite_bytes)
-        suffix = (args.prefix or "features").removeprefix("features")
-        manifest_path = config.DATA_DIR / f"manifest{suffix}.json"
-        res = eval_recordings(Path(args.recordings), predict_fn, manifest_path=manifest_path)
-        section = render_recordings_section(res)
         out_path = config.DATA_DIR.parent / out
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        approved_dir = Path(args.recordings)
+        if not approved_dir.is_dir():
+            note = f"no approved recordings found under {_relative_to_data_root(approved_dir)}\n"
+            with out_path.open("a") as fh:
+                fh.write("\n" + note)
+            print(note.strip())
+            return
+        try:
+            tflite_bytes = (config.MODELS_DIR / "command.tflite").read_bytes()
+            predict_fn = make_command_predict_fn(tflite_bytes)
+        except Exception as e:  # noqa: BLE001 - re-raised with context, not swallowed
+            raise SystemExit(f"could not load command model for --recordings: {e}") from e
+        suffix = (args.prefix or "features").removeprefix("features")
+        manifest_path = config.DATA_DIR / f"manifest{suffix}.json"
+        res = eval_recordings(approved_dir, predict_fn, manifest_path=manifest_path)
+        section = render_recordings_section(res)
         with out_path.open("a") as fh:
             fh.write("\n" + section)
         json_path = Path(f"{out_path}.recordings.json")
