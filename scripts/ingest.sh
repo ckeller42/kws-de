@@ -10,34 +10,73 @@ host=${KWSREC_HOST:-}; port=""; root=${KWS_DATA_ROOT:+$KWS_DATA_ROOT/data/record
 while getopts "H:p:d:n" o; do case $o in H) host=$OPTARG;; p) port=$OPTARG;; d) root=$OPTARG;; n) dry=1;; *) exit 2;; esac; done
 [[ -n $host ]] || { echo "usage: $0 -H host [-p port] [-d root] [-n]  (or set KWSREC_HOST)" >&2; exit 2; }
 [[ -n $root ]] || { echo "set KWS_DATA_ROOT or pass -d" >&2; exit 2; }
+script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 run() { if (( dry )); then echo "+ $*"; else "$@"; fi; }
 
+# Run a read-only command on the host; leaves its stdout in $reply. Called as a plain
+# statement (never inside "$(...)") so its `exit` really terminates the script:
+# distinguishes "ssh itself failed" (exit 255: unreachable/auth, fatal) from "command
+# found nothing" (any other status, e.g. ls on a dir that doesn't exist yet — normal
+# while polling for the device/drive to show up).
+ssh_probe() {
+  local status
+  # shellcheck disable=SC2029 # $1 is the caller-built remote command; client-side expansion is intended
+  if reply=$(ssh "$host" "$1" 2>/dev/null); then status=0; else status=$?; fi
+  if (( status == 255 )); then
+    echo "cannot reach host: $host (ssh exit 255)" >&2
+    exit 3
+  fi
+}
+
+# Retry a probe up to 20x1s until it prints something; leaves it in $reply.
+# Returns 1 (reply empty) on timeout.
+wait_for() {
+  for _ in $(seq 1 20); do
+    ssh_probe "$1"
+    [[ -n $reply ]] && return 0
+    sleep 1
+  done
+  reply=""
+  return 1
+}
+
 if [[ -z $port ]]; then
-  # shellcheck disable=SC2029 # expand $port client-side; it names the file on the remote we write to
-  port=$(ssh "$host" 'ls /dev/cu.usbmodem* 2>/dev/null | head -1' || true)
+  ssh_probe 'ls /dev/cu.usbmodem* 2>/dev/null | head -1'
+  port=$reply
   [[ -n $port ]] || { echo "no /dev/cu.usbmodem* on $host — device unplugged or already in USB-drive mode" >&2; exit 1; }
 fi
 # 1. device -> USB drive mode (serial link disappears while the drive is exported)
-# shellcheck disable=SC2029
+# shellcheck disable=SC2029 # $port must expand client-side: it names the file on the remote we write to
 run ssh "$host" "printf 'mode usb\n' > '$port'"
-for _ in $(seq 1 20); do
-  if [[ -n $(ssh "$host" 'ls /Volumes/KWSREC 2>/dev/null' || true) ]]; then break; fi
-  sleep 1
-done
-[[ -n $(ssh "$host" 'ls /Volumes/KWSREC 2>/dev/null' || true) ]] || { echo "KWSREC did not mount on $host within 20 s" >&2; exit 3; }
-# 2. copy the pull script over (the host need not carry a kws-de checkout) and run it there
-run scp -q scripts/pull-recordings.sh "$host:~/pull-recordings.sh"
-run ssh "$host" 'rm -rf ~/kwsrec-pull && bash ~/pull-recordings.sh ~/kwsrec-pull'
-# 3. bring it here, never deleting anything on either side
+wait_for 'ls /Volumes/KWSREC 2>/dev/null' || { echo "KWSREC did not mount on $host within 20 s" >&2; exit 3; }
+# 2. copy the pull script over (the host need not carry a kws-de checkout) and run it
+#    there into a stamped stage dir. Never wipe the host stage ourselves — it is the
+#    only surviving copy of the device's data until step 4 verifies the local rsync.
+#    Old stamped dirs under ~/kwsrec-pull/ can be pruned by hand once you trust the pull.
 stamp=$(date +%Y-%m-%d-%H%M); dest="$root/incoming/$stamp"
+# shellcheck disable=SC2088 # tilde is meant to expand on the remote host, not here
+hostdir="~/kwsrec-pull/$stamp"
+run scp -q "$script_dir/pull-recordings.sh" "$host:~/pull-recordings.sh"
+run ssh "$host" "bash ~/pull-recordings.sh $hostdir"
+# 3. bring it here, never deleting anything on either side
 mkdir -p "$dest"
-run rsync -a --ignore-existing "$host:~/kwsrec-pull/" "$dest/"
-# 4. device back to the selection screen (port is back once the drive is ejected)
-for _ in $(seq 1 20); do
-  p=$(ssh "$host" 'ls /dev/cu.usbmodem* 2>/dev/null | head -1' || true); [[ -n $p ]] && { port=$p; break; }; sleep 1
-done
-# shellcheck disable=SC2029
+run rsync -a --ignore-existing "$host:$hostdir/" "$dest/"
+# 4. verify the local copy actually matches what's on the host before trusting it
+local_wavs=$(find "$dest" -name '*.wav' | wc -l | tr -d ' ')
+ssh_probe "find $hostdir -name '*.wav' 2>/dev/null | wc -l"
+remote_wavs=$(printf '%s' "$reply" | tr -d ' ')
+if [[ $local_wavs != "$remote_wavs" ]]; then
+  echo "wav count mismatch: local=$local_wavs remote=$remote_wavs — host copy kept at $host:$hostdir" >&2
+  exit 1
+fi
+session_rows=$(($(wc -l < "$dest/sessions.csv") - 1))
+if [[ $session_rows != "$local_wavs" ]]; then
+  echo "sessions.csv has $session_rows rows but $local_wavs wavs — host copy kept at $host:$hostdir" >&2
+  exit 1
+fi
+(( local_wavs > 0 )) || { echo "nothing pulled into $dest" >&2; exit 1; }
+# 5. device back to the selection screen (port is back once the drive is ejected)
+wait_for 'ls /dev/cu.usbmodem* 2>/dev/null | head -1' && port=$reply
+# shellcheck disable=SC2029 # $port must expand client-side: it names the file on the remote we write to
 run ssh "$host" "printf 'mode menu\n' > '$port'" || echo "warning: could not send 'mode menu' — tap Menu on the device" >&2
-n=$(find "$dest" -name '*.wav' | wc -l | tr -d ' ')
-(( n > 0 )) || { echo "nothing pulled into $dest" >&2; exit 1; }
-echo "ingested $n takes -> $dest"
+echo "ingested $local_wavs takes -> $dest"
