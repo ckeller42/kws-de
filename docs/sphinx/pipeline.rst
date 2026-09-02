@@ -46,6 +46,7 @@ Everything lives under ``$KWS_DATA_ROOT/data/recordings/``:
      spkNN/<slug>/NNN.wav                 word takes (only if recorded)
      spkNN/_phrase_/<slug>_NNN.wav        sentence takes
      spkNN/_neg_/<slug>_NNN.wav           negative-phrase takes
+     spkNN/hey-bus/NNN.wav                wake-word ("Hey Bus") takes
      sessions.csv                         speaker,pulled,prompt,file,ms,
                                            peak_dbfs,set,seed,ts (merged
                                            across every speaker in the pull)
@@ -64,6 +65,8 @@ Everything lives under ``$KWS_DATA_ROOT/data/recordings/``:
      phrases/index.csv                    file,prompt,speaker
      negatives/<spkNN>/<slug>_<NNN>.wav   approved non-command phrases
      negatives/index.csv                  file,prompt,speaker
+     wake/<spkNN>/<spkNN>_<NNN>.wav       approved "Hey Bus" takes
+     wake/index.csv                       file,prompt,speaker
 
 ``incoming/`` is never modified. ``approved/`` is regenerated from
 ``incoming/`` + the QC rules on every ``kws-qc`` run — re-running one
@@ -81,19 +84,40 @@ Every take passes an **audio gate** (no model) and, if that passes, a
 text; the numbers:
 
 - Format: 16000 Hz, mono, 16-bit PCM.
-- Duration: at least 300 ms; at most 4000 ms for a word take, 6000 ms for a
-  sentence or negative take.
+- Duration: at least 300 ms; at most 4000 ms for a word or wake take,
+  6000 ms for a sentence or negative take.
 - Level: peak below -0.5 dBFS (not clipped); RMS at or above -45 dBFS.
 - Transcript normalisation: NFC, lower-cased, ``ß`` -> ``ss``, punctuation
-  stripped, the filler word "prozent" dropped.
-- Word match: exact for keywords of 5 letters or fewer; edit-distance-1
-  forgiving above 5 letters — so "Licht" (5 letters) never accidentally
-  matches a misheard "nicht", but a keyword like "Kühlschrank" tolerates one
-  Whisper substitution/insertion/deletion.
-- Sentence match: every required command token (device, zone, action) must
-  appear in order; filler words in between are fine.
+  stripped, the filler word "prozent" dropped, and the numerals Whisper
+  writes for the light levels (``25``/``50``/``75``/``100``, an optional
+  trailing ``%`` dropped like "prozent") mapped back onto the German number
+  words ("fünfzig" etc.) before matching — evidence from the first real run
+  showed Whisper large-v3 transcribing "fünfzig" as the digit "50".
+  ``whisper_transcriber()`` also biases the model with an ``initial_prompt``
+  built from the command vocabulary (devices, zones, actions, "Prozent",
+  the wake word) and pads each clip with 500 ms of silence on both sides
+  before transcribing (word timestamps are shifted back by the same amount
+  so segmentation stays correct).
+- Word and sentence match: required tokens are searched in order as
+  substrings of the whitespace-free transcript, so a keyword Whisper glues
+  to its neighbour (heard "Lichtdach" for prompt "Licht Dach") still
+  matches; edit-distance-1 fuzzy matching is restricted to tokens of more
+  than 5 letters, over a sliding window of the token's length ± 1 — so
+  "Licht" (5 letters) never fuzzy-matches a misheard "nicht", but a keyword
+  like "Kühlschrank" tolerates one Whisper substitution/insertion/deletion.
 - Negative match: **no** command-vocabulary word may appear anywhere in the
-  transcript; the first one found is the rejection reason.
+  transcript as a whole token, with one refinement: a 2-letter keyword
+  ("an", "zu") alone does not reject — it must appear at least twice, or be
+  3 letters or more — since a single one-letter-off hallucination of a
+  2-letter keyword (heard "An den fahren wir los" for "wann fahren wir
+  los") was a false reject in the first real run.
+- Wake match (the ``wake`` set, "Hey Bus" takes): the whitespace-free,
+  lower-cased transcript must match
+  ``(hey|hej|he|hei)(bus|buss|bos|boss)`` — loose enough for common
+  mishearings, tight enough that ordinary German sentences don't
+  accidentally match. Approved takes are written to
+  ``approved/wake/<spkNN>/<spkNN>_<NNN>.wav`` plus a ``wake/index.csv`` row,
+  idempotently per stamp like the other sets.
 
 A corrupt or unreadable WAV, or an exception from the transcriber, rejects
 that one row (``unreadable: …`` / ``error: …``) — it never aborts the

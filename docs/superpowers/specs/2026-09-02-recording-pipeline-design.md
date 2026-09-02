@@ -76,16 +76,24 @@ Model: **Whisper large-v3 via `mlx-whisper`** (Apple-Silicon native; ~3 GB, fits
 Per take, two gates then a verdict:
 
 1. **Audio gate** (no model): 16 kHz mono 16-bit; duration within the set's cap
-   (words ≤ 4 s, phrases/negatives ≤ 6 s) and ≥ 0.3 s; RMS ≥ −45 dBFS; peak < −0.5 dBFS
+   (words/wake ≤ 4 s, phrases/negatives ≤ 6 s) and ≥ 0.3 s; RMS ≥ −45 dBFS; peak < −0.5 dBFS
    (not clipped); leading/trailing silence trimmed for the measurements only.
-2. **Content gate** (Whisper): transcript normalised (lower-case, umlauts kept, ß→ss and
-   ss→ß both accepted, punctuation stripped, number words compared as words, "prozent"
-   optional) and matched to the prompt from `session.csv`:
-   - words: the single keyword must appear (token match, edit distance ≤ 1 for > 5-letter
-     words);
-   - phrases: every command keyword of the prompt (device, zone?, action) must appear in
-     order; extra filler is fine;
-   - negatives: **no** command keyword may appear.
+2. **Content gate** (Whisper): `whisper_transcriber()` biases decoding with an
+   `initial_prompt` built from the command vocabulary (devices, zones, actions, "Prozent",
+   the wake word) and pads each clip with 500 ms of silence on both sides (word timestamps
+   shifted back by the same amount). Transcript normalised (lower-case, umlauts kept, ß→ss
+   and ss→ß both accepted, punctuation stripped, number words compared as words, "prozent"
+   optional, and the numerals Whisper writes for the light levels — `25`/`50`/`75`/`100`, a
+   trailing `%` dropped like "prozent" — mapped back to their German number words before
+   matching) and matched to the prompt from `session.csv`:
+   - words/phrases: required tokens are searched in order as substrings of the
+     whitespace-free transcript, so a keyword glued to its neighbour (heard "Lichtdach" for
+     "Licht Dach") still matches; edit distance ≤ 1 only for tokens of > 5 letters, over a
+     sliding window of the token's length ± 1;
+   - negatives: no command keyword may appear as a whole token, except a 2-letter keyword
+     ("an", "zu") alone does not reject — it must appear at least twice, or be ≥ 3 letters;
+   - wake ("Hey Bus" takes): the glued, lower-cased transcript must match
+     `(hey|hej|he|hei)(bus|buss|bos|boss)`.
    `match_score` = fraction of required tokens found (0–1).
 3. **Verdict:** `approve` if both gates pass; `reject:<reason>` otherwise (`clipped`,
    `too_quiet`, `too_short`, `too_long`, `wrong_word:<heard>`, `missing:<token>`,
