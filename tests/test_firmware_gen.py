@@ -29,6 +29,26 @@ def test_prompt_sets_cover_labels_and_catalog():
     assert len({s for _, s in words + sentences + negs}) == len(words + sentences + negs)
 
 
+def test_sentence_prompts_say_prozent_for_light_levels():
+    """Sentence prompts are spoken commands: light levels get the natural
+    'Prozent' (a filler the grammar ignores), nothing else does; every valid
+    intent in the catalog is present exactly once."""
+    from kws_de.eval import build_catalog, intent_text
+
+    sents = [intent_text(it) for it in build_catalog()]
+    assert len(sents) == len(set(sents)) == 49
+    levels = [s for s in sents if any(lv in s.split() for lv in config.LIGHT_LEVELS)]
+    assert levels and all(s.endswith(" Prozent") for s in levels)
+    assert not any("Prozent" in s for s in sents if s not in levels)
+    assert "Licht Küche fünfzig Prozent" in sents
+    assert "Heizung wärmer" in sents and "Aufstelldach auf" in sents
+    # zones only ever attach to Licht (camper business logic)
+    zoned_non_light = [
+        s for s in sents if not s.startswith("Licht") and set(s.split()) & set(config.ZONES)
+    ]
+    assert not zoned_non_light
+
+
 def test_c_tables_reproduce_librosa_mfcc():
     win, mel, dct = firmware_gen.mfcc_tables()
     rng = np.random.default_rng(0)

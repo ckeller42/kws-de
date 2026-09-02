@@ -130,7 +130,7 @@ void ui_show_record(void)
     button(scr, "+Spk", on_cmd, (void *)REC_CMD_NEW_SPEAKER, 124, 200, 54);
     button(scr, "W", on_cmd, (void *)REC_CMD_SET_WORDS, 182, 200, 38);
     button(scr, "S", on_cmd, (void *)REC_CMD_SET_SENTENCES, 224, 200, 38);
-    button(scr, "N", on_cmd, (void *)REC_CMD_SET_NEGS, 266, 200, 38);
+    button(scr, "Neg", on_cmd, (void *)REC_CMD_SET_NEGS, 266, 200, 46);
     lv_screen_load(scr);
     bsp_display_unlock();
 }

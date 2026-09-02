@@ -207,7 +207,9 @@ void record_start(void)
     s_take = heap_caps_malloc(TAKE_MAX * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     assert(s_take);
     nvs_load();
-    prompt_session_init(&s_prompts, PROMPT_WORDS, (uint32_t)esp_timer_get_time() | 1);
+    /* Sentences are the default set: full commands as spoken (the words set is
+       reachable via the W button for isolated-word takes). */
+    prompt_session_init(&s_prompts, PROMPT_SENTENCES, (uint32_t)esp_timer_get_time() | 1);
     snprintf(s_st.speaker, sizeof s_st.speaker, "spk%02lu", (unsigned long)s_speaker);
     xTaskCreatePinnedToCore(record_task, "record", 8192, NULL, 5, NULL, 0);
     status_set(REC_IDLE);

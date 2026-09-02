@@ -16,7 +16,7 @@ import scipy.signal
 from librosa.filters import mel as mel_filter
 
 from kws_de import config, features
-from kws_de.eval import build_catalog
+from kws_de.eval import build_catalog, intent_text
 
 TOP_DB = 80.0
 AMIN = 1e-10
@@ -35,7 +35,7 @@ def prompt_sets() -> tuple[list, list, list]:
     words = [(label, slug(label)) for label in config.COMMAND_LABELS if not label.startswith("_")]
     sentences = []
     for it in build_catalog():
-        text = " ".join(t for t in (it.device, it.zone, it.action) if t)
+        text = intent_text(it)
         sentences.append((text, slug(text)))
     negs = [(p, slug(p)) for p in config.NEGATIVE_PROMPTS]
     return words, sentences, negs
