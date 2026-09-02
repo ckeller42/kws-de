@@ -97,7 +97,10 @@ extern "C" void recognise_start(void)
     s_lock = xSemaphoreCreateMutex();
     s_arena = (uint8_t *)heap_caps_malloc(KWS_MODEL_ARENA_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     assert(s_arena);
-    xTaskCreatePinnedToCore(recognise_task, "recognise", 16384, nullptr, 6, nullptr, 1);
+    /* Priority 3: BELOW the LVGL task (4, same core). Inference is heavy and
+       best-effort; if it outranked LVGL it starved touch handling, so the
+       Record button on the recognise screen never registered. */
+    xTaskCreatePinnedToCore(recognise_task, "recognise", 16384, nullptr, 3, nullptr, 1);
 }
 extern "C" void recognise_set_active(bool on) { s_active = on; if (!on && s_log) { fclose(s_log); s_log = nullptr; } }
 extern "C" void recognise_get_status(recognise_status_t *out) { xSemaphoreTake(s_lock, portMAX_DELAY); *out = s_st; xSemaphoreGive(s_lock); }
