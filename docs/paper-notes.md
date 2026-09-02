@@ -418,6 +418,33 @@ long enough to trip the idle-task watchdog once (WDT-panic off, non-fatal, never
 for the paper's "reproducible on-device" claim: board-specific memory config is the real
 bring-up cost, invisible to a host build.
 
+**Recorder UX + recogniser bring-up (2026-09-02, fix/cores3-recorder-ux).** Live testing on
+the device drove a round of recorder fixes (umlaut font subset, layout fit, two reads per
+word for later misread review, paced get-ready/between-read beats, a single colour-coded
+"SPEAK NOW" pill instead of full-screen tinting, mic gain +6 dB) — reviewed by streaming the
+LVGL framebuffer over the serial console as RLE-packed base64 (a gated debug tool). The
+recorded set passed a technical QC (21/21 words, 16 kHz mono 16-bit, 0.8–1.3 s, non-silent,
+non-clipped; levels ~−18 dBFS peak before the gain bump).
+
+The recogniser's first on-device run produced near-uniform outputs (top-1 ≈ 0.12, never
+firing). Systematic debugging isolated it to the **saved `command.keras` being a
+mode-collapsed artifact** — 0.3 % accuracy on its own training set, ~3 classes predicted for
+everything — not to the firmware: the C MFCC matches Python to 5e-4 and a fresh model on the
+same data reaches 65 % val in 4 epochs. Retrained (87 % train / **74.8 % INT8 test**) and
+re-exported; on-device the model is now confident (0.5–0.8) and the detector fires. Two
+guards so it cannot recur silently: `kws-export --v2 --firmware` runs a **model-health gate**
+(≥50 % held-out accuracy, ≥10 predicted classes) before writing the device header, and a
+pure regression test covers both failure modes in CI.
+
+Residual finding worth a paper sentence: with a healthy model, real mic speech of a command
+word is still classified **`_unknown_`** (0.7–0.8) — the TTS-dominated v2 training set does
+not generalise to the real microphone, which is precisely the gap the recorder collects data
+to close (v3). Perf: the naive one-shot DFT cost ~1.2 s/inference on the S3 (an integer
+modulo per multiply plus a `-Og` build); an incremental twiddle index + `-O2` fixes it, and
+the recogniser was moved below the LVGL task priority so touch stays responsive during
+inference. Firmware headers now carry Doxygen docs; requirements are traced to tests with
+sphinx-needs (see `docs/sphinx`).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
