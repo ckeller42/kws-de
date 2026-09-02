@@ -459,6 +459,19 @@ snapshots in `archive/<version>/` (v2 = the frozen 20 116 / 4 101 / 4 042 set + 
 the models and E9/E10 report). The paper's provenance table regenerates from a snapshot, and
 the device-recording ingest gets a canonical home (`data/recordings/`) for the v3 build.
 
+**Remote-controllable USB mode (2026-09-02, feat/usb-cdc-console).** The serial console
+(`mode`/`status`) used to go dark the moment the device entered USB mode: TinyUSB's MSC device
+takes the USB PHY, and the console's own port rides that same PHY, so it vanished along with
+it — the automated data-ingest loop had no way to leave USB mode again except a physical touch
+on the screen. Fixed by making the USB device composite: MSC ("KWSREC") plus a CDC-ACM serial
+port, with stdio redirected onto the CDC port for the duration of USB mode
+(`firmware/main/usb_drive.c`) and restored on exit. One real bug surfaced building it: the
+console task's `fgets(stdin)` used a blocking UART read, so a mode switch triggered from a
+different task (e.g. tapping the menu) while the console task sat blocked in that read could
+leave it parked forever, deaf to the new CDC port — fixed by making stdin non-blocking
+(`O_NONBLOCK`), matching how TinyUSB's own CDC read already behaves, so the console task never
+blocks past one 20 ms poll tick on either side of the switch (`firmware/main/console.c`).
+
 ### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
 
 Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the

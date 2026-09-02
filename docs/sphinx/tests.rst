@@ -246,7 +246,7 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    :id: TEST_MANUAL_MENU_FLOW
    :status: manual
    :links: REQ_FW_MENU_FLOW, REQ_FW_RECORD_SESSION, REQ_FW_RECORD_WAKE_SET,
-           REQ_FW_REMOTE_MODE
+           REQ_FW_REMOTE_MODE, REQ_FW_USB_CDC_CONSOLE
 
    ``firmware/README.md`` "Manual test checklist": device boots to the
    5-button menu; each of Recognition/Hey Bus/Record/Hey Bus
@@ -263,8 +263,13 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    console: ``echo 'mode wake' > /dev/cu.usbmodemNNN`` switches the
    device to wake mode and ``echo 'status'`` reports it; ``mode
    recordwake`` then ``status`` reports the wake session's
-   phase/index/speaker. Run by hand on real M5Stack CoreS3 hardware; not
-   automated.
+   phase/index/speaker. Tapping **USB** (or ``mode usb``) mounts
+   ``KWSREC`` and a new ``/dev/cu.usbmodemNNN`` (the CDC-ACM port) shows
+   up alongside/in place of the original console port; ``echo 'status' >``
+   that new port answers ``mode usb`` / ``ok``, and ``echo 'mode menu' >``
+   it unmounts the drive and returns to the menu, with the original
+   console port working again afterwards. Run by hand on real M5Stack
+   CoreS3 hardware; not automated.
 
 .. note::
 
