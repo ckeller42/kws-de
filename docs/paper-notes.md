@@ -398,11 +398,25 @@ final image 0xedf00 bytes (~950 KB, 69 % of the 3 MB app partition free). Two mo
   op-set gate and the front-end parity claims the paper makes are real on-device, not just in
   simulation. Device throughput (`infer_ms`, real `arena_used`) still to be logged on hardware.
 
-Reproducibility: config-derived C headers regenerate byte-identically via `kws-fwgen` (CI
-`gen-fresh` gate); model headers via `kws-export --v2 --firmware`. Follow-up: switch the
-`--firmware` INT8 calibration from `features_v2_train[:200]` to `export.balanced_calibration`
-(now available post-merge; the distill run showed balanced calibration recovers ~1.1 pt
-isolated / ~4 pt catalog) and re-export.
+Reproducibility: config-derived C headers are checked current by `kws-fwgen --check` (CI
+`gen-fresh` gate) — structure byte-exact, float tables (mel/DCT/window, TV_MFCC) within a
+tolerance, because those are computed through numpy/scipy kernels whose SIMD (CPU-feature)
+and BLAS (reduction-order) paths are not bit-reproducible across machines; model headers via
+`kws-export --v2 --firmware`. Follow-up: switch the `--firmware` INT8 calibration from
+`features_v2_train[:200]` to `export.balanced_calibration` (now available post-merge; the
+distill run showed balanced calibration recovers ~1.1 pt isolated / ~4 pt catalog) and re-export.
+
+**First on-device bring-up (2026-09-02, fix/cores3-psram-quad).** Flashed to a real CoreS3
+over the network (esptool, `write_flash @flash_args`). Two `sdkconfig.defaults` corrections the
+compile-only reviews could not catch: the CoreS3 uses **quad** SPI PSRAM, not octal
+(`CONFIG_SPIRAM_MODE_OCT` boot-looped on `octal_psram: chip not connected`; `..._QUAD` →
+`Found 8MB PSRAM, memory test OK`), and `CONFIG_TINYUSB_MSC_BUFSIZE` must be ≥ the 4096-byte WL
+sector (default 512 aborted `storage_mount`). After both, it boots clean and the guided recorder
+runs end to end — energy VAD end-points speech and writes `/rec/spk01/<word>/001.wav` (observed
+for `kueche`, `waermer`, `licht`). Known minor: the first save formats the FAT and blocks CPU0
+long enough to trip the idle-task watchdog once (WDT-panic off, non-fatal, never recurs). Lesson
+for the paper's "reproducible on-device" claim: board-specific memory config is the real
+bring-up cost, invisible to a host build.
 
 ## Open questions
 
