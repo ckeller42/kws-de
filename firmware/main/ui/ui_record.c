@@ -128,6 +128,12 @@ void ui_show_record(void)
 
 void ui_record_refresh(const record_status_t *st)
 {
+    /* The recorder reports status from boot on (record_start() -> REC_IDLE) and
+       after Abbrechen, i.e. while the menu or another mode owns the display.
+       Our widgets then either do not exist yet or belong to an unloaded screen;
+       writing to them trips LVGL's assert handler (an endless loop on the
+       caller's task -> IDLE0 watchdog). Only paint while our screen is live. */
+    if (!scr || lv_screen_active() != scr) return;
     if (st->phase == REC_SESSION_DONE) { ui_show_success(st->speaker, st->saved_takes); return; }
     static const char *setname[] = {"words", "sentences", "negatives"};
     static const char *phase[] = {"paused", "listening...", "recording", "saved", "CLIPPED - redo", "no speech - redo", "flash full", "set complete", "get ready..."};
