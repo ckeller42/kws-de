@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import soundfile as sf
 
@@ -10,7 +12,10 @@ def test_prompt_intent():
     assert ev.prompt_intent("Licht Küche fünfzig Prozent") == Intent("Licht", "Küche", "fünfzig")
 
 
-def test_eval_recordings_with_stub_model(tmp_path):
+def _build_approved(tmp_path):
+    """spk02: one word clip, one phrase clip, one negative clip. spk03: one word
+    clip only. A stub predict_fn that always says "Licht" (isolated 100%, e2e
+    Rejection(missing action), negatives fire)."""
     root = tmp_path / "approved"
     licht = config.COMMAND_LABELS.index("Licht")
     sil = config.COMMAND_LABELS.index("_silence_")
@@ -39,16 +44,70 @@ def test_eval_recordings_with_stub_model(tmp_path):
         "file,prompt,speaker\nspk02/hallo_001.wav,hallo,spk02\n"
     )
 
-    def predict_fn(window):  # always "Licht" -> isolated 100%, e2e Rejection(missing action)
+    def predict_fn(window):
         p = np.zeros(len(config.COMMAND_LABELS), np.float32)
         p[licht] = 0.9
         p[sil] = 0.1
         return p
 
-    res = ev.eval_recordings(root, predict_fn)
-    assert res["label"] == "user-customised, in-training"
-    assert res["isolated"]["spk02"]["acc"] == 1.0 and res["isolated"]["spk03"]["n"] == 1
-    assert res["e2e"]["spk02"]["n"] == 1 and res["e2e"]["spk02"]["acc"] == 0.0
-    assert res["false_accepts"]["spk02"]["n"] == 1
+    return root, predict_fn
+
+
+def test_eval_recordings_splits_by_manifest(tmp_path):
+    root, predict_fn = _build_approved(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"splits": {"train": {"speakers": ["spk02"]}}}))
+
+    res = ev.eval_recordings(root, predict_fn, manifest_path=manifest_path)
+    assert res["manifest_found"] is True
+    assert res["manifest_path"] == str(manifest_path)
+
+    trained = res["figures"]["user-customised, in-training"]
+    held_out = res["figures"]["held-out"]
+
+    # spk02's word + negative clips trained the model -> in-training. spk02's
+    # phrase clip is never training material (phrases aren't built into the
+    # dataset), so it's held-out even though spk02 is a trained speaker.
+    assert trained["isolated"]["spk02"]["n"] == 1 and trained["isolated"]["spk02"]["acc"] == 1.0
+    assert trained["false_accepts"]["spk02"]["n"] == 1
+    assert "spk02" not in trained["e2e"]
+    assert set(trained["isolated"]) == {"spk02"}
+
+    # spk03 never trained -> its word clip is held-out, alongside spk02's phrase.
+    assert held_out["isolated"]["spk03"]["n"] == 1
+    assert held_out["e2e"]["spk02"]["n"] == 1 and held_out["e2e"]["spk02"]["acc"] == 0.0
+    assert "spk02" not in held_out["isolated"]
+    assert "spk03" not in held_out["e2e"] and "spk03" not in held_out["false_accepts"]
+
+    n_trained, spk_trained = ev._figure_totals(trained)
+    n_held, spk_held = ev._figure_totals(held_out)
+    assert n_trained == 2 and spk_trained == {"spk02"}
+    assert n_held == 2 and spk_held == {"spk02", "spk03"}
+
     md = ev.render_recordings_section(res)
-    assert "user-customised, in-training" in md and "held-out" not in md.split("user-customised")[0]
+    assert f"Training manifest checked: `{manifest_path}`" in md
+    assert "## user-customised, in-training" in md and "## held-out" in md
+    assert "2 clips across 1 speakers" in md  # in-training figure
+    assert "2 clips across 2 speakers" in md  # held-out figure
+
+
+def test_eval_recordings_no_manifest_all_held_out(tmp_path):
+    root, predict_fn = _build_approved(tmp_path)
+
+    res = ev.eval_recordings(root, predict_fn)  # no manifest_path passed
+    assert res["manifest_found"] is False
+    assert res["manifest_path"] is None
+
+    trained = res["figures"]["user-customised, in-training"]
+    held_out = res["figures"]["held-out"]
+    n_trained, spk_trained = ev._figure_totals(trained)
+    n_held, spk_held = ev._figure_totals(held_out)
+    assert n_trained == 0 and spk_trained == set()
+    assert spk_held == {"spk02", "spk03"}
+    assert held_out["isolated"]["spk02"]["n"] == 1 and held_out["isolated"]["spk03"]["n"] == 1
+    assert held_out["e2e"]["spk02"]["n"] == 1
+    assert held_out["false_accepts"]["spk02"]["n"] == 1
+
+    md = ev.render_recordings_section(res)
+    assert "No training manifest given; all clips held-out." in md
+    assert "## user-customised, in-training" in md and "## held-out" in md

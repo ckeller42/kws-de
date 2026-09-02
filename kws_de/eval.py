@@ -96,10 +96,33 @@ def prompt_intent(prompt: str):
     return parse([qc.label_for_token(t) for t in qc.required_tokens(prompt, "sentences")])
 
 
-def eval_recordings(approved, predict_fn, *, step_ms: int = 100) -> dict:
-    """User-customised figures on a speaker's own QC-approved recordings. These clips may
-    be in the training set — that is the point of the personalisation step — so the
-    result is labelled and must never be reported as held-out accuracy."""
+HELD_OUT = "held-out"
+IN_TRAINING = "user-customised, in-training"
+
+
+def _trained_speakers(manifest_path) -> tuple[set[str], bool]:
+    """Speaker ids (`rec:` stripped) present in the training manifest's `train`
+    split -> these speakers' device recordings actually updated model weights.
+    (`() , False` if no path given or the file doesn't exist -> caller treats
+    every clip as held-out, never guessing "in-training" without the manifest.)"""
+    import json
+    from pathlib import Path
+
+    if manifest_path is None or not Path(manifest_path).exists():
+        return set(), False
+    manifest = json.loads(Path(manifest_path).read_text())
+    return set(manifest.get("splits", {}).get("train", {}).get("speakers", [])), True
+
+
+def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=None) -> dict:
+    """Recordings-based eval, split into the two honest figures: `IN_TRAINING`
+    (`"user-customised, in-training"`) for clips whose speaker's device recordings
+    are listed in `manifest_path`'s `train` split, `HELD_OUT` (`"held-out"`)
+    for everything else. Phrase clips are always `HELD_OUT` — the training build
+    (`kws_de.dataset.build`) never reads `approved/phrases/`, only `approved/words/`
+    and `approved/negatives/` (see `kws_de.data.recordings_root`/`negative_windows`),
+    so a phrase clip is never actually training material regardless of speaker.
+    With no manifest (missing path or file absent), every clip is `HELD_OUT`."""
     import csv
     from collections import defaultdict
     from pathlib import Path
@@ -111,81 +134,113 @@ def eval_recordings(approved, predict_fn, *, step_ms: int = 100) -> dict:
     approved = Path(approved)
     labels = config.COMMAND_LABELS
     step = config.SAMPLE_RATE * step_ms // 1000
+    trained_speakers, manifest_found = _trained_speakers(manifest_path)
 
-    iso = defaultdict(lambda: {"n": 0, "ok": 0, "per_word": defaultdict(lambda: [0, 0])})
+    def figure_for(set_name: str, spk: str) -> str:
+        return IN_TRAINING if set_name != "phrases" and spk in trained_speakers else HELD_OUT
+
+    figures = {
+        label: {"isolated": {}, "e2e": {}, "false_accepts": {}} for label in (IN_TRAINING, HELD_OUT)
+    }
+
+    def _new_word_row():
+        return {"n": 0, "ok": 0, "per_word": defaultdict(lambda: [0, 0])}
+
+    iso = defaultdict(lambda: defaultdict(_new_word_row))
     for f in sorted((approved / "words").glob("*/*.wav")):
         lab, spk = f.parent.name, f.stem.split("_")[0]
         sig, _ = sf.read(f, dtype="float32", always_2d=True)
         pred = labels[int(np.argmax(predict_fn(sig[:, 0])))]
-        r = iso[spk]
+        r = iso[figure_for("words", spk)][spk]
         r["n"] += 1
         r["ok"] += pred == lab
         r["per_word"][lab][0] += pred == lab
         r["per_word"][lab][1] += 1
-    isolated = {
-        s: {
-            "n": r["n"],
-            "acc": r["ok"] / r["n"],
-            "per_word": {w: a / n for w, (a, n) in r["per_word"].items()},
+    for label, per_spk in iso.items():
+        figures[label]["isolated"] = {
+            s: {
+                "n": r["n"],
+                "acc": r["ok"] / r["n"],
+                "per_word": {w: a / n for w, (a, n) in r["per_word"].items()},
+            }
+            for s, r in per_spk.items()
         }
-        for s, r in iso.items()
-    }
 
     def _events(path):
         sig, _ = sf.read(path, dtype="float32", always_2d=True)
         return _stream_events(predict_fn, sig[:, 0], labels, step)
 
-    e2e = defaultdict(lambda: {"n": 0, "ok": 0})
+    e2e = defaultdict(lambda: defaultdict(lambda: {"n": 0, "ok": 0}))
     idx = approved / "phrases" / "index.csv"
     if idx.exists():
         for r in csv.DictReader(idx.open()):
             got = parse(_events(approved / "phrases" / r["file"]))
-            e = e2e[r["speaker"]]
+            e = e2e[figure_for("phrases", r["speaker"])][r["speaker"]]
             e["n"] += 1
             e["ok"] += isinstance(got, Intent) and got == prompt_intent(r["prompt"])
+    for label, per_spk in e2e.items():
+        figures[label]["e2e"] = {
+            s: {"n": v["n"], "acc": v["ok"] / v["n"]} for s, v in per_spk.items()
+        }
 
-    fa = defaultdict(lambda: {"n": 0, "fired": 0})
+    fa = defaultdict(lambda: defaultdict(lambda: {"n": 0, "fired": 0}))
     nidx = approved / "negatives" / "index.csv"
     if nidx.exists():
         for r in csv.DictReader(nidx.open()):
             got = parse(_events(approved / "negatives" / r["file"]))
-            n = fa[r["speaker"]]
+            n = fa[figure_for("negatives", r["speaker"])][r["speaker"]]
             n["n"] += 1
             n["fired"] += isinstance(got, Intent)
+    for label, per_spk in fa.items():
+        figures[label]["false_accepts"] = {
+            s: {"n": v["n"], "rate": v["fired"] / v["n"]} for s, v in per_spk.items()
+        }
 
     return {
-        "label": "user-customised, in-training",
-        "isolated": isolated,
-        "e2e": {s: {"n": v["n"], "acc": v["ok"] / v["n"]} for s, v in e2e.items()},
-        "false_accepts": {s: {"n": v["n"], "rate": v["fired"] / v["n"]} for s, v in fa.items()},
+        "manifest_path": str(manifest_path) if manifest_path is not None else None,
+        "manifest_found": manifest_found,
+        "figures": figures,
     }
 
 
-def render_recordings_section(res: dict) -> str:
-    """Markdown for the recordings-based eval: per-speaker isolated-word accuracy,
-    end-to-end phrase intent accuracy, and negative false-accept rate — all under
-    the `res["label"]` heading (verbatim `user-customised, in-training`), with an
-    explicit note that these clips may overlap the training set and are therefore
-    not the held-out figure."""
-    out = [
-        f"## {res['label']}\n",
-        "These clips may be in the training set; this is the personalised-device "
-        "figure, not the held-out one.\n",
-    ]
-    out.append(
-        "| speaker | isolated words n | acc | e2e phrases n | intent acc "
-        "| negatives n | false-accept rate |\n|---|---|---|---|---|---|---|"
+def _figure_totals(fig: dict) -> tuple[int, set[str]]:
+    n_clips = sum(
+        v["n"] for bucket in ("isolated", "e2e", "false_accepts") for v in fig[bucket].values()
     )
-    speakers = sorted(set(res["isolated"]) | set(res["e2e"]) | set(res["false_accepts"]))
-    for spk in speakers:
-        i = res["isolated"].get(spk, {})
-        e = res["e2e"].get(spk, {})
-        f = res["false_accepts"].get(spk, {})
+    speakers = set(fig["isolated"]) | set(fig["e2e"]) | set(fig["false_accepts"])
+    return n_clips, speakers
+
+
+def render_recordings_section(res: dict) -> str:
+    """Markdown for the recordings-based eval: two figures, labelled verbatim
+    `IN_TRAINING` (`"user-customised, in-training"`) and `HELD_OUT` (`"held-out"`),
+    each stating its clip count, speaker count, and (once, up top) the manifest
+    path checked -- or that none was found, in which case every clip is held-out."""
+    if res["manifest_found"]:
+        out = [f"Training manifest checked: `{res['manifest_path']}`.\n"]
+    elif res["manifest_path"] is not None:
+        out = [f"No training manifest found at `{res['manifest_path']}`; all clips held-out.\n"]
+    else:
+        out = ["No training manifest given; all clips held-out.\n"]
+
+    for label in (IN_TRAINING, HELD_OUT):
+        fig = res["figures"][label]
+        n_clips, speakers = _figure_totals(fig)
+        out.append(f"## {label}\n")
+        out.append(f"{n_clips} clips across {len(speakers)} speakers.\n")
         out.append(
-            f"| {spk} | {i.get('n', 0)} | {i.get('acc', float('nan')):.3f} "
-            f"| {e.get('n', 0)} | {e.get('acc', float('nan')):.3f} "
-            f"| {f.get('n', 0)} | {f.get('rate', float('nan')):.3f} |"
+            "| speaker | isolated words n | acc | e2e phrases n | intent acc "
+            "| negatives n | false-accept rate |\n|---|---|---|---|---|---|---|"
         )
+        for spk in sorted(speakers):
+            i = fig["isolated"].get(spk, {})
+            e = fig["e2e"].get(spk, {})
+            f = fig["false_accepts"].get(spk, {})
+            out.append(
+                f"| {spk} | {i.get('n', 0)} | {i.get('acc', float('nan')):.3f} "
+                f"| {e.get('n', 0)} | {e.get('acc', float('nan')):.3f} "
+                f"| {f.get('n', 0)} | {f.get('rate', float('nan')):.3f} |"
+            )
     return "\n".join(out) + "\n"
 
 
@@ -620,7 +675,13 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
     ap.add_argument(
         "--recordings",
         default=None,
-        help="QC-approved recordings dir -> append the user-customised section",
+        help="QC-approved recordings dir -> append the held-out / in-training sections",
+    )
+    ap.add_argument(
+        "--prefix",
+        default=None,
+        help="npz/manifest prefix the model was trained on (default: features -> "
+        "manifest.json; e.g. features_v3 -> manifest_v3.json), see kws_de.dataset.build",
     )
     args = ap.parse_args()
     if args.v2_catalog:
@@ -634,7 +695,9 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         out = args.out if args.out != "docs/eval-report.md" else "docs/eval-report-v2.md"
         tflite_bytes = (config.MODELS_DIR / "command.tflite").read_bytes()
         predict_fn = make_command_predict_fn(tflite_bytes)
-        res = eval_recordings(Path(args.recordings), predict_fn)
+        suffix = (args.prefix or "features").removeprefix("features")
+        manifest_path = config.DATA_DIR / f"manifest{suffix}.json"
+        res = eval_recordings(Path(args.recordings), predict_fn, manifest_path=manifest_path)
         section = render_recordings_section(res)
         out_path = config.DATA_DIR.parent / out
         out_path.parent.mkdir(parents=True, exist_ok=True)
