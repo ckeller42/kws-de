@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 SAMPLE_RATE = 16000
@@ -24,8 +25,13 @@ MAX_MACS = 3_000_000
 MAX_LATENCY_MS = 30
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = _REPO_ROOT / "data"  # gitignored; where it physically lives is a local detail
-MODELS_DIR = _REPO_ROOT / "models"  # gitignored
+# data/ and models/ are gitignored; their physical home is a local detail. Set
+# KWS_DATA_ROOT to keep ONE root (<root>/data, <root>/models) outside every
+# worktree — e.g. on an external SSD — shared by all checkouts and the ingest
+# scripts; unset, they stay repo-relative. Never commit a machine path here.
+_DATA_ROOT = Path(os.environ.get("KWS_DATA_ROOT", _REPO_ROOT))
+DATA_DIR = _DATA_ROOT / "data"
+MODELS_DIR = _DATA_ROOT / "models"
 
 
 def label_index(label: str) -> int:
