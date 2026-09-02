@@ -20,7 +20,11 @@ Seven stages, from the device to a retrained model:
    gate judge every take, and approved sentence takes are segmented into
    word clips.
 4. **Data prep** (``kws-dataset build --prefix features_v3``) — folds the
-   approved recordings into the v3 dataset build alongside MSWC/TTS.
+   approved recordings into the v3 dataset build alongside MSWC/TTS. The
+   split is speaker-disjoint by assigning each speaker to exactly one of
+   train/val/test *across all labels*, so a label recorded by only one or
+   two speakers can end up with no train rows, no test rows, or both —
+   the fix is more speakers, not a different split.
 5. **Train / export** (``kws-train --v2``, ``kws-export --firmware``) — the
    usual path, unchanged except for the ``--prefix``/``--out``/``--model``
    flags that point it at the v3 build.
@@ -176,7 +180,7 @@ The ``kws-dataset build`` cache (``raw_clips_v3.pkl``) must already exist —
 run ``uv run --no-sync kws-data --fetch --mswc-root <mswc-de-dir>`` once
 first to mine MSWC and build it; the data loop itself never fetches MSWC.
 Flashing the exported model back onto the device is a manual step, covered
-by the ``flashing-cores3-on-bar`` skill, not by this pipeline.
+by the remote flashing helper for the device host, not by this pipeline.
 
 A firmware ``wake`` set (five "Hey Bus" takes per speaker,
 ``spkNN/hey-bus/NNN.wav``) is already recorded by the device; QC support

@@ -62,7 +62,7 @@ ingest.sh [-H bar] [-p /dev/cu.usbmodemNNN]
   5. print the new incoming dir(s); exit non-zero if nothing was pulled
 ```
 
-Requires the `flashing-cores3-on-bar` conventions (host `bar`, port auto-detect). The
+Requires the remote flashing helper's conventions (device host, port auto-detect). The
 device's serial link is gone while in USB mode, so `mode menu` is sent only after the
 drive has been ejected and the port is back. Failure at any step leaves the device in USB
 mode at worst — the script says so and how to recover (`mode menu` by hand).
@@ -138,7 +138,7 @@ instead of TTS.
 
 `ingest → kws-qc → kws-dataset --v3 → kws-train --v3 → kws-export --v3 --firmware → kws-eval
 --recordings`, each step skippable by flag, stopping on the first failure, printing the two
-figures at the end. Flashing is left to the `flashing-cores3-on-bar` skill (manual step).
+figures at the end. Flashing is left to the remote flashing helper (manual step).
 
 ## 4. Interfaces (exact)
 

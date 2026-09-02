@@ -76,4 +76,4 @@ fi
 stage "evals"
 run uv run --no-sync kws-eval --recordings "$rec/approved" --prefix "$prefix" --out docs/eval-report-v3.md
 
-echo "done: held-out figures + user-customised section in docs/eval-report-v3.md. Flash with the flashing-cores3-on-bar skill."
+echo "done: held-out figures + user-customised section in docs/eval-report-v3.md. Flash with your flash script for the device host."
