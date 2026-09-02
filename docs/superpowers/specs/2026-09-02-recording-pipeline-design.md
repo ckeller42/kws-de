@@ -79,17 +79,23 @@ Per take, two gates then a verdict:
    (words/wake ≤ 4 s, phrases/negatives ≤ 6 s) and ≥ 0.3 s; RMS ≥ −45 dBFS; peak < −0.5 dBFS
    (not clipped); leading/trailing silence trimmed for the measurements only.
 2. **Content gate** (Whisper): `whisper_transcriber()` biases decoding with an
-   `initial_prompt` built from the command vocabulary (devices, zones, actions, "Prozent",
-   the wake word) and pads each clip with 500 ms of silence on both sides (word timestamps
-   shifted back by the same amount). Transcript normalised (lower-case, umlauts kept, ß→ss
-   and ss→ß both accepted, punctuation stripped, number words compared as words, "prozent"
-   optional, and the numerals Whisper writes for the light levels — `25`/`50`/`75`/`100`, a
-   trailing `%` dropped like "prozent" — mapped back to their German number words before
-   matching) and matched to the prompt from `session.csv`:
-   - words/phrases: required tokens are searched in order as substrings of the
-     whitespace-free transcript, so a keyword glued to its neighbour (heard "Lichtdach" for
-     "Licht Dach") still matches; edit distance ≤ 1 only for tokens of > 5 letters, over a
-     sliding window of the token's length ± 1;
+   `initial_prompt` — narrow by design: only `fünfundzwanzig, fünfzig, fünfundsiebzig,
+   hundert, Prozent, Hey Bus` (the words Whisper actually mangles), not the whole command
+   vocabulary — a full-vocabulary prompt was tried first and caused prompt-echo
+   hallucination (Whisper regurgitating chunks of the prompt on weak audio), including new
+   false rejects on clean negatives; narrowing it removed that regression. Each clip is
+   padded with 500 ms of silence on both sides (word timestamps shifted back by the same
+   amount, clamped at 0). Transcript normalised (lower-case, umlauts kept, ß→ss and ss→ß
+   both accepted, punctuation stripped, number words compared as words, "prozent" optional,
+   and the numerals Whisper writes for the light levels — `25`/`50`/`75`/`100`, a trailing
+   `%` dropped like "prozent" — mapped back to their German number words before matching)
+   and matched to the prompt from `session.csv`:
+   - words/phrases: each heard (whitespace-delimited) word either matches one required
+     token outright (exact, or edit distance ≤ 1 for a token of > 5 letters over a sliding
+     window of the token's length ± 1), or is the exact concatenation of two or more
+     *consecutive required* tokens Whisper glued with no space (heard "Lichtdach" for
+     "Licht Dach"); a short (≤5-letter) keyword never matches as a mere substring of an
+     unrelated longer word ("an" inside "dank" does not match);
    - negatives: no command keyword may appear as a whole token, except a 2-letter keyword
      ("an", "zu") alone does not reject — it must appear at least twice, or be ≥ 3 letters;
    - wake ("Hey Bus" takes): the glued, lower-cased transcript must match

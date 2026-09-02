@@ -65,10 +65,25 @@ def test_content_gate_glued_keywords_still_order_sensitive_and_short_word_exact(
     assert qc.content_gate("sentences", "Licht Dach heller", "Lichtdach heller") == (1.0, None)
     reason = qc.content_gate("sentences", "Licht Dach heller", "Licht heller Dach")[1]
     assert reason.startswith("missing")
-    # words: keyword glued to a neighbour still matches
-    assert qc.content_gate("words", "Licht", "lichtan") == (1.0, None)
+    # words scope has only ONE required token ("licht") - "an" isn't required here, so
+    # gluing it on must NOT match (that would be the boundary-check regression: a short
+    # keyword false-positiving inside an unrelated glued word).
+    assert qc.content_gate("words", "Licht", "lichtan")[1].startswith("wrong_word")
     # but a short (<=5 letter) keyword never fuzzy-matches a different word
     assert qc.content_gate("words", "Licht", "nicht")[1].startswith("wrong_word")
+
+
+def test_content_gate_short_keyword_boundary_check():
+    # a short (<=5 letter) required keyword must never match merely because it occurs as
+    # a substring inside an unrelated, longer heard word
+    assert qc.content_gate("words", "an", "dank")[1].startswith("wrong_word")
+    # ...but gluing IS allowed when the neighbour is itself another required keyword of
+    # the same prompt (sentences scope: "Licht an" requires both "licht" and "an")
+    assert qc.content_gate("sentences", "Licht an", "Lichtan") == (1.0, None)
+    # a short keyword still doesn't match when the glued word isn't a run of required
+    # tokens ("nichtdach" isn't "licht"+"dach" - it doesn't even start with "licht")
+    reason = qc.content_gate("sentences", "Licht Dach", "nichtdach")[1]
+    assert reason.startswith("missing")
 
 
 def test_content_gate_negatives_two_letter_keyword_needs_whole_token_or_repeat():
@@ -442,8 +457,28 @@ def test_whisper_transcriber_pads_audio_and_shifts_word_offsets_back(tmp_path, m
     out = tr(wav)
     assert captured["len"] == 800 * 16 + 2 * 8000  # 800ms audio + 500ms pad each side @16kHz
     assert out["words"][0]["start"] == pytest.approx(0.1)
+    # narrow prompt: only the words Whisper actually mangles, not the whole vocabulary
     assert "Hey Bus" in captured["initial_prompt"]
-    assert "Licht" in captured["initial_prompt"]
+    assert "fünfzig" in captured["initial_prompt"]
+    assert "Licht" not in captured["initial_prompt"]
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("mlx_whisper") is None, reason="mlx-whisper not installed"
+)
+def test_whisper_transcriber_clamps_word_offset_at_zero(tmp_path, monkeypatch):
+    import mlx_whisper
+
+    def fake_transcribe(audio, **kwargs):
+        # word starts at 0.3s in the padded audio - before the 0.5s pad boundary
+        return {"text": "x", "segments": [{"words": [{"word": "x", "start": 0.3, "end": 0.4}]}]}
+
+    monkeypatch.setattr(mlx_whisper, "transcribe", fake_transcribe)
+    tr = qc.whisper_transcriber("dummy-model")
+    wav = _wav(tmp_path / "t.wav", _tone(ms=800))
+    out = tr(wav)
+    assert out["words"][0]["start"] == 0.0
+    assert out["words"][0]["end"] == 0.0
 
 
 @pytest.mark.skipif(

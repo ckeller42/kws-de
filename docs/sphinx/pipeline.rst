@@ -94,17 +94,25 @@ text; the numbers:
   words ("fünfzig" etc.) before matching — evidence from the first real run
   showed Whisper large-v3 transcribing "fünfzig" as the digit "50".
   ``whisper_transcriber()`` also biases the model with an ``initial_prompt``
-  built from the command vocabulary (devices, zones, actions, "Prozent",
-  the wake word) and pads each clip with 500 ms of silence on both sides
-  before transcribing (word timestamps are shifted back by the same amount
-  so segmentation stays correct).
-- Word and sentence match: required tokens are searched in order as
-  substrings of the whitespace-free transcript, so a keyword Whisper glues
-  to its neighbour (heard "Lichtdach" for prompt "Licht Dach") still
-  matches; edit-distance-1 fuzzy matching is restricted to tokens of more
-  than 5 letters, over a sliding window of the token's length ± 1 — so
-  "Licht" (5 letters) never fuzzy-matches a misheard "nicht", but a keyword
-  like "Kühlschrank" tolerates one Whisper substitution/insertion/deletion.
+  — deliberately narrow: only the light-level number words, "Prozent" and
+  the wake word, i.e. only the words Whisper actually mangles. An earlier
+  version passed the *whole* command vocabulary, which backfired: on
+  weak/ambiguous audio Whisper echoed chunks of the prompt back as the
+  "transcript" instead of recognising silence, causing new false rejects on
+  otherwise-clean negatives. Each clip is also padded with 500 ms of
+  silence on both sides before transcribing (word timestamps are shifted
+  back by the same amount, clamped at 0, so segmentation stays correct).
+- Word and sentence match: each heard word (whitespace-delimited) is
+  checked against the required tokens in order — either it matches one
+  token outright (exact, or edit-distance-1 for a token of more than 5
+  letters, over a sliding window of the token's length ± 1), or it is the
+  exact concatenation of two or more *consecutive required* tokens that
+  Whisper glued together with no space (heard "Lichtdach" for prompt
+  "Licht Dach"). A short (5-letter-or-fewer) keyword never matches merely
+  because it occurs as a substring inside an unrelated longer word — "an"
+  never matches inside "dank", and "Licht" (5 letters) never fuzzy-matches
+  a misheard "nicht" — while a keyword like "Kühlschrank" tolerates one
+  Whisper substitution/insertion/deletion.
 - Negative match: **no** command-vocabulary word may appear anywhere in the
   transcript as a whole token, with one refinement: a 2-letter keyword
   ("an", "zu") alone does not reject — it must appear at least twice, or be

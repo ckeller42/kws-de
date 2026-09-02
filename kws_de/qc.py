@@ -127,24 +127,27 @@ def _matches(want: str, heard: str) -> bool:
     return want == heard or (len(want) > 5 and _edit1(want, heard))
 
 
-def _find_token(tok: str, glued: str, start: int) -> int | None:
-    """Find `tok` inside glued[start:] — a whitespace-free transcript, so a
-    keyword glued to its neighbour ("lichtan" for "licht") still matches.
-    Exact substring first; for tokens of MORE than 5 letters also try an
-    edit-distance<=1 substring over a sliding window of len(tok)-1..+1 (same
-    cutoff as `_matches`, so "Licht" never fuzzy-matches "nicht"). Returns the
-    end index of the match, or None."""
-    idx = glued.find(tok, start)
-    if idx != -1:
-        return idx + len(tok)
-    if len(tok) <= 5:
-        return None
-    for wlen in (len(tok) - 1, len(tok), len(tok) + 1):
-        if wlen <= 0:
-            continue
-        for i in range(start, len(glued) - wlen + 1):
-            if _edit1(tok, glued[i : i + wlen]):
-                return i + wlen
+def _token_covers(h: str, need: list[str], j: int) -> int | None:
+    """Does whitespace-delimited heard word `h` account for one or more of the
+    required tokens `need`, starting at `need[j]`? Two ways:
+    - `h` matches `need[j]` alone (`_matches`: exact, or edit-distance<=1 for a
+      token of MORE than 5 letters) -> covers just need[j];
+    - `h` is the exact concatenation of need[j], need[j+1], ... (ASR glued two+
+      required keywords into one word with no space, e.g. "Lichtdach" for
+      "Licht Dach", or "Lichtan" for "Licht an") -> covers need[j:k].
+    Boundary-safe: a short keyword can never match merely because it occurs as
+    a substring inside an unrelated longer word ("an" in "dank") — only a
+    whole heard word, or an exact run of required tokens, counts.
+    Returns the new pointer k (need[j:k] consumed), or None."""
+    if _matches(need[j], h):
+        return j + 1
+    acc = need[j]
+    k = j + 1
+    while k < len(need) and len(acc) < len(h):
+        acc += need[k]
+        if acc == h:
+            return k + 1
+        k += 1
     return None
 
 
@@ -163,19 +166,20 @@ def content_gate(set_name: str, prompt: str, transcript_text: str) -> tuple[floa
             if h in counts and (len(h) >= 3 or counts[h] >= 2):
                 return 0.0, f"contains_command:{h}"
         return 1.0, None
-    glued = "".join(heard)
     if set_name == "wake":
+        glued = "".join(heard)
         return (1.0, None) if _WAKE_RE.fullmatch(glued) else (0.0, f"wrong_word:{glued or '-'}")
     need = required_tokens(prompt, set_name)
     if set_name == "words":
-        ok = bool(need) and _find_token(need[0], glued, 0) is not None
+        ok = bool(need) and any(_token_covers(h, need, 0) is not None for h in heard)
         return (1.0, None) if ok else (0.0, f"wrong_word:{' '.join(heard) or '-'}")
-    pos, found = 0, 0
-    for tok in need:
-        end = _find_token(tok, glued, pos)
-        if end is not None:
-            found += 1
-            pos = end
+    found = 0
+    for h in heard:
+        if found >= len(need):
+            break
+        k = _token_covers(h, need, found)
+        if k is not None:
+            found = k
     score = found / len(need) if need else 1.0
     if found == len(need):
         return 1.0, None
@@ -480,9 +484,11 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
     }
 
 
-_QC_PROMPT = (
-    ", ".join([*config.DEVICES, *config.ZONES, *config.ACTIONS, "Prozent", config.WAKE_WORD]) + "."
-)
+# Only the words Whisper actually mangles (the light-level numerals + the wake word) -
+# the full command vocabulary caused prompt-echo hallucination on weak/ambiguous audio
+# (Whisper regurgitating chunks of the prompt as the "transcript"), including false
+# rejects on genuinely clean negatives.
+_QC_PROMPT = ", ".join([*config.LIGHT_LEVELS, "Prozent", config.WAKE_WORD]) + "."
 _PAD_SAMPLES = config.SAMPLE_RATE // 2  # 500 ms of silence on each side
 
 
@@ -511,8 +517,8 @@ def whisper_transcriber(
         words = [
             {
                 "word": w["word"].strip(),
-                "start": float(w["start"]) - offset,
-                "end": float(w["end"]) - offset,
+                "start": max(0.0, float(w["start"]) - offset),
+                "end": max(0.0, float(w["end"]) - offset),
             }
             for seg in r.get("segments", [])
             for w in seg.get("words", [])
