@@ -55,18 +55,39 @@ static void recognise_task(void *)
     TfLiteTensor *in = interp.input(0), *out = interp.output(0);
 
     static stream_t stream;
-    static int16_t pcm[KWS_SAMPLE_RATE];
+    static mfcc_state_t mstate;                            /* persistent ring of the last 49 log-mel frames */
+    static int16_t frame[KWS_WIN];
     static float feats[KWS_N_FRAMES][KWS_N_MFCC];
     static float probs[KWS_NUM_LABELS];
+    static uint32_t frame_start = 0;                       /* absolute sample index of the next frame to push */
+    static bool primed = false;
+    static uint32_t steps = 0;
 
     for (;;) {
-        if (!s_active) { vTaskDelay(pdMS_TO_TICKS(50)); stream_reset(&stream); continue; }
+        if (!s_active) { vTaskDelay(pdMS_TO_TICKS(50)); stream_reset(&stream); primed = false; continue; }
+        if (!primed) {                                     /* (re)entering: window = the last second up to now */
+            mfcc_init(&mstate);
+            uint32_t now = audio_write_pos();
+            frame_start = now > KWS_SAMPLE_RATE ? now - KWS_SAMPLE_RATE : 0;
+            primed = true;
+        }
         vTaskDelay(pdMS_TO_TICKS(100));                    /* ~10 Hz cadence */
-        uint32_t end = audio_write_pos();
-        if (end < KWS_SAMPLE_RATE) continue;               /* need a full 1 s window (avoids ring underflow) */
         int64_t t0 = esp_timer_get_time();
-        audio_read(end, pcm, KWS_SAMPLE_RATE);             /* always the freshest trailing 1 s */
-        mfcc_compute(pcm, feats);                          /* one-shot; ponytail: streaming ring is a later optimisation */
+        /* Streaming front-end: push only the frames that arrived since the last
+           step (~5 per 100 ms) instead of recomputing all 49 from a 1 s buffer —
+           a ~10x cut in front-end work. Frame t covers [start, start+KWS_WIN)
+           with start advancing by KWS_HOP, the same layout as mfcc_compute(), so
+           the features are bit-identical (the host test checks streaming == one-shot). */
+        int pushed = 0;
+        while (audio_write_pos() >= frame_start + KWS_WIN && pushed < KWS_N_FRAMES) {
+            audio_read(frame_start + KWS_WIN, frame, KWS_WIN);
+            mfcc_push_frame(&mstate, frame);
+            frame_start += KWS_HOP;
+            pushed++;
+        }
+        if (audio_write_pos() > frame_start + 2 * KWS_SAMPLE_RATE) { primed = false; continue; }  /* stalled: resync */
+        if (mstate.count < KWS_N_FRAMES) continue;         /* not a full 1 s of frames yet */
+        mfcc_finish(&mstate, feats);
         mfcc_quantize(feats, in->data.int8, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
         if (interp.Invoke() != kTfLiteOk) { ESP_LOGE(TAG, "Invoke failed"); continue; }
         int best = 0;
@@ -76,6 +97,8 @@ static void recognise_task(void *)
         }
         int fired = stream_push(&stream, probs);
         uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+        if ((++steps % 50) == 0)                           /* ~every 5 s: front-end + inference cost */
+            ESP_LOGI(TAG, "step %lu ms (%d new frames)", (unsigned long)ms, pushed);
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_st.infer_ms = ms; s_st.arena_used = interp.arena_used_bytes();

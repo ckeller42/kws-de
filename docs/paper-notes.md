@@ -445,6 +445,14 @@ the recogniser was moved below the LVGL task priority so touch stays responsive 
 inference. Firmware headers now carry Doxygen docs; requirements are traced to tests with
 sphinx-needs (see `docs/sphinx`).
 
+**Streaming front-end (2026-09-02, perf/streaming-mfcc).** The recogniser recomputed all 49
+MFCC frames of the trailing second every step; it now keeps a persistent 49-frame log-mel ring
+and pushes only the frames that arrived since the last step. Measured on the CoreS3 (`-O2`):
+**1001 ms → 173 ms per step** (5.8×). The residual is the naive 480-point DFT at ~12 ms per
+frame — with a ~270 ms loop period that is still ~14 new frames per step — so the next lever is
+an exact 480-point mixed-radix FFT (kissfft, being vendored for the wake-word front-end), which
+should bring a step to ~10 ms and make the on-device recogniser genuinely real-time.
+
 **Data provenance housekeeping (2026-09-02).** All datasets and models now live under one
 `KWS_DATA_ROOT` on the external SSD, shared by every worktree, with immutable per-version
 snapshots in `archive/<version>/` (v2 = the frozen 20 116 / 4 101 / 4 042 set + manifest +
