@@ -29,7 +29,8 @@ Guided recorder
 ----------------
 
 Implements :need:`REQ_FW_RECORD_TWO_TAKES`, :need:`REQ_FW_RECORD_CAPS`,
-:need:`REQ_FW_RECORD_CLIP_REJECT`, :need:`REQ_FW_RECORD_SPEAKER_ID` (see
+:need:`REQ_FW_RECORD_CLIP_REJECT`, :need:`REQ_FW_RECORD_SPEAKER_ID`,
+:need:`REQ_FW_RECORD_WAKE_SET` (see
 ``record_start``/``record_post``/``record_get_status`` below).
 
 .. doxygenfile:: record.h
@@ -63,8 +64,10 @@ Implements :need:`REQ_FW_RECORD_WAV_FORMAT` (``wav_write_header``).
 Prompts
 -------
 
-Implements :need:`REQ_FW_PROMPT_SHUFFLE_SEED` (``prompt_session_init``)
-and :need:`REQ_FW_RECORD_FILENAME_SLUG` (``prompt_slug``).
+Implements :need:`REQ_FW_PROMPT_SHUFFLE_SEED` (``prompt_session_init``),
+:need:`REQ_FW_RECORD_FILENAME_SLUG` (``prompt_slug``), and
+:need:`REQ_FW_RECORD_WAKE_SET` (``prompt_takes_per_prompt``,
+``prompt_set_name``).
 
 .. doxygenfile:: prompts.h
    :project: kws_de_fw

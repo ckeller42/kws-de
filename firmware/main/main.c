@@ -7,11 +7,13 @@
 #include "audio.h"
 #include "record.h"
 #include "storage.h"
+#include "wake.h"
 #include "usb_drive.h"
+#include "console.h"
 #include "ui/ui.h"
 
 static const char *TAG = "main";
-static ui_mode_t s_mode = UI_MODE_RECORD;
+static ui_mode_t s_mode = UI_MODE_MENU;
 
 /* wait up to 1s for the recorder task to drain to idle before pulling storage out from under it */
 static void wait_record_idle(void)
@@ -28,18 +30,30 @@ void app_set_mode(ui_mode_t m)
 {
     if (m == s_mode) return;
     ESP_LOGI(TAG, "mode %d -> %d", s_mode, m);
-    if (s_mode == UI_MODE_RECORD) record_post(REC_CMD_PAUSE);
+    if (s_mode == UI_MODE_RECORD || s_mode == UI_MODE_RECORD_WAKE) record_post(REC_CMD_PAUSE);
     if (s_mode == UI_MODE_USB) ESP_ERROR_CHECK(usb_drive_exit());
     if (s_mode == UI_MODE_RECOGNISE) recognise_set_active(false);
+    if (s_mode == UI_MODE_WAKE) wake_set_active(false);
     s_mode = m;
+    if (m == UI_MODE_MENU) ui_show_menu();
     if (m == UI_MODE_USB) {
         ui_show_usb();
         wait_record_idle();                /* no fopen races the unmount */
         ESP_ERROR_CHECK(usb_drive_enter());
     }
-    if (m == UI_MODE_RECORD) { ui_show_record(); record_post(REC_CMD_RESUME); }
+    /* Entering RECORD always starts a fresh guided session: new speaker id,
+       sentences first, negatives auto-chained on completion (record.c). */
+    if (m == UI_MODE_RECORD) { ui_show_record(); record_post(REC_CMD_START_SESSION); }
+    /* RECORD_WAKE reuses the record screen for a "Hey Bus"-only session: new
+       speaker id, PROMPT_WAKE only, no negatives chained on completion. */
+    if (m == UI_MODE_RECORD_WAKE) { ui_show_record(); record_post(REC_CMD_START_WAKE_SESSION); }
     if (m == UI_MODE_RECOGNISE) { ui_show_recognise(); recognise_set_active(true); }
+    /* Wake mode measures the wake model alone: the command recogniser stays off
+       so nothing else competes for the mic, the CPU, or the screen. */
+    if (m == UI_MODE_WAKE) { ui_show_wake(); recognise_set_active(false); wake_set_active(true); }
 }
+
+ui_mode_t app_get_mode(void) { return s_mode; }
 
 void app_main(void)
 {
@@ -55,7 +69,8 @@ void app_main(void)
     if (f_getlabel("0:", label, NULL) == FR_OK && label[0] == '\0') f_setlabel("0:KWSREC");
     audio_start();
     recognise_start();
-    ui_show_record();
-    record_start();
-    record_post(REC_CMD_RESUME);
+    wake_start();
+    record_start();                    /* starts paused (REC_IDLE) until Record is chosen */
+    console_start();
+    ui_show_menu();
 }

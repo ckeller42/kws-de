@@ -3,7 +3,7 @@ PROJECT_NAME           = "KWS-DE CoreS3 Firmware"
 INPUT                  = main
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.c *.cc
-EXCLUDE_PATTERNS       = */build/* */managed_components/* */gen/*
+EXCLUDE_PATTERNS       = */build/* */managed_components/* */gen/* */microfrontend/*
 
 OPTIMIZE_OUTPUT_FOR_C   = YES
 EXTRACT_ALL             = YES

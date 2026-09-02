@@ -459,6 +459,76 @@ snapshots in `archive/<version>/` (v2 = the frozen 20 116 / 4 101 / 4 042 set + 
 the models and E9/E10 report). The paper's provenance table regenerates from a snapshot, and
 the device-recording ingest gets a canonical home (`data/recordings/`) for the v3 build.
 
+**Remote-controllable USB mode (2026-09-02, feat/usb-cdc-console).** The serial console
+(`mode`/`status`) used to go dark the moment the device entered USB mode: TinyUSB's MSC device
+takes the USB PHY, and the console's own port rides that same PHY, so it vanished along with
+it — the automated data-ingest loop had no way to leave USB mode again except a physical touch
+on the screen. Fixed by making the USB device composite: MSC ("KWSREC") plus a CDC-ACM serial
+port, with stdio redirected onto the CDC port for the duration of USB mode
+(`firmware/main/usb_drive.c`) and restored on exit. One real bug surfaced building it: the
+console task's `fgets(stdin)` used a blocking UART read, so a mode switch triggered from a
+different task (e.g. tapping the menu) while the console task sat blocked in that read could
+leave it parked forever, deaf to the new CDC port — fixed by making stdin non-blocking
+(`O_NONBLOCK`), matching how TinyUSB's own CDC read already behaves, so the console task never
+blocks past one 20 ms poll tick on either side of the switch (`firmware/main/console.c`).
+
+### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
+
+Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the
+wake stage can be measured on hardware without the command recogniser confounding it. The
+interesting engineering point for the paper: microWakeWord's accuracy is only reproducible
+on-device if the *feature front-end* matches training bit-for-bit, and that front-end is not
+the librosa MFCC the command model uses — it is TFLite-Micro's fixed-point 40-channel
+microfrontend (30 ms window, 10 ms step, 125–7500 Hz, PCAN on, log scaling), followed by an
+integer requantisation `int8 = (v * 256 + 333) / 666 - 128` that folds training's historical
+÷25.6 float scaling into the model's 0…26 → −128…127 int8 range. Rather than reimplement it,
+we vendored the same C the trainer's Python bindings compile and gated it with a host parity
+test: 98 × 40 int8 feature values against a `pymicro-features` golden vector, **max deviation
+0 LSB (exact)**. The streaming graph itself is stateful (resource variables), so the
+interpreter is created once and invoked every 3 rows (30 ms), with variables reset on mode
+entry. Detection is threshold 0.99 × 2 consecutive steps + 1500 ms refractory, confirmed by a
+green screen flash and a beep — the beep forced a hardware finding worth a footnote: the
+CoreS3's mic and amplifier share one full-duplex I2S channel pair, so the speaker can only be
+opened at the microphone's exact sample rate or capture dies.
+
+Follow-up (same branch): the four modes (Record/Recognise/Wake/USB) were restructured behind
+one selection screen — every mode's back button now returns to it instead of chaining to
+Record — and the guided recorder became a single automatic session (new speaker → sentences
+→ negatives → a "takes saved" summary), removing seven manual set/next/redo buttons from the
+record screen. A serial console (`mode <name>`/`status` over the same USB-serial port) lets a
+host script drive mode switches for unattended data-ingest runs.
+
+**Wake model root cause (2026-09-02, on-device).** First hardware test of the isolated wake mode:
+the model never fired on a real speaker (per-2 s peak probability 0.00–0.13 while saying "Hey
+Bus"), although the front-end is bit-exact. A host probe through the identical int8 feature path
+explains it: the model outputs ≥ 0.99 for *any* Piper sentence in its training voice ("hallo wie
+geht es dir": 62 steps ≥ 0.99, "licht küche an": 73) and ≈ 0.004 for "hey bus" in unseen Piper
+voices. With all positives synthetic and all negatives real recordings, the cheapest separating
+feature was TTS-vs-real, not the phrase — a shortcut the held-out metrics (71.65 % recall on the
+same synthetic distribution) could not reveal. Fix in progress: TTS hard negatives (near-misses,
+the command vocabulary, everyday sentences) generated with the same voices, a wider speaker
+spread, and reverb augmentation; the probe with unseen voices is the acceptance test.
+
+**Real wake positives (2026-09-02).** The synthetic-only wake training is the weak link, so the
+device menu gained a "Hey Bus"-only recording session (5 single-read takes per speaker, stored as
+set `wake`). These real utterances enter the same ingest → QC path as the command recordings and
+give the wake retrain its first in-domain positives and, held out, the first honest recall number
+on real speech — the synthetic held-out metric (71.65 % recall) said nothing about the real-voice
+failure.
+
+**Sentence takes cut after the first word (2026-09-02).** QC of the first real recording session
+with Whisper found sentence takes (prompts like "Licht Küche fünfundsiebzig Prozent", median
+840 ms) rejected 75/102 for missing words, against word takes (median 1020 ms) mostly fine.
+Energy envelopes (RMS per 100 ms) of failing sentence takes showed one ~200 ms burst — the first
+word — followed by ≥ 500 ms below threshold, then the take closing; a good take of "Licht Dach
+heller" showed three bursts with 200–300 ms gaps between them. Cause: the recorder's VAD closed a
+take after a fixed 500 ms of trailing silence, but a natural reading pause between the words of a
+longer on-screen prompt exceeds that. Fix: the trailing hangover is now per prompt set — 500 ms
+for words, 1200 ms for sentences/negatives/wake (`prompt_hangover_ms` in
+`firmware/main/prompts.c`, fed into `vad_reset` in `firmware/main/record.c`) — plus a false-start
+filter (`vad_t.speech_total`, `MIN_SPEECH_MS` = 200 ms) that discards a take opened by a breath or
+click and keeps listening instead of saving a near-empty clip.
+
 **Recording loop (2026-09-02, feat/recording-pipeline).** The device-recording data loop is
 now a repeatable pipeline: `scripts/ingest.sh` pulls a session over SSH into a stamped,
 never-deleted `incoming/<stamp>/`; `kws-qc` runs an audio gate (format/duration/level) then a

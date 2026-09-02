@@ -783,10 +783,10 @@ wheels = [
 
 [[package]]
 name = "cuda-pathfinder"
-version = "1.8.0"
+version = "1.8.1"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/b1/ef21259ec74fe0b265ed201379de1d0ef7c14178313ee03705952f1b7093/cuda_pathfinder-1.8.0-py3-none-any.whl", hash = "sha256:c44e574dc997fae2814721d1ae97d0fd6db76db82decbe9b753bf75de53f515e", size = 62539, upload-time = "2026-08-27T21:33:03.229Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/e6/22df83f82f9bc26cb1c42265cf14d34d4908dba2a0f261bd7b28244acb00/cuda_pathfinder-1.8.1-py3-none-any.whl", hash = "sha256:ae0137ff9e56ea97499bcbf54f5f2778ec25f3266715ac86da192a795af982a8", size = 62552, upload-time = "2026-09-02T16:55:28.64Z" },
 ]
 
 [[package]]
@@ -1331,6 +1331,9 @@ train = [
 tts = [
     { name = "piper-tts" },
 ]
+wake = [
+    { name = "pymicro-features" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1341,6 +1344,7 @@ requires-dist = [
     { name = "mlx-whisper", marker = "extra == 'qc'", specifier = ">=0.4" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "piper-tts", marker = "extra == 'tts'", specifier = ">=1.2" },
+    { name = "pymicro-features", marker = "extra == 'wake'", specifier = ">=2.0.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.5" },
     { name = "soundfile", specifier = ">=0.12" },
@@ -1350,7 +1354,7 @@ requires-dist = [
     { name = "tensorflow-metal", marker = "extra == 'metal'", specifier = ">=1.1" },
     { name = "tqdm", specifier = ">=4.66" },
 ]
-provides-extras = ["dev", "metal", "tts", "train", "docs", "qc"]
+provides-extras = ["dev", "metal", "tts", "train", "docs", "qc", "wake"]
 
 [[package]]
 name = "lazy-loader"

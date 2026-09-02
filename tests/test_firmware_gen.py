@@ -20,13 +20,15 @@ def test_slug_is_ascii_and_stable():
 
 
 def test_prompt_sets_cover_labels_and_catalog():
-    words, sentences, negs = firmware_gen.prompt_sets()
+    words, sentences, negs, wake = firmware_gen.prompt_sets()
     assert [w for w, _ in words] == [
         label for label in config.COMMAND_LABELS if not label.startswith("_")
     ]
     assert len(sentences) == len(firmware_gen.build_catalog())
     assert len(negs) == len(config.NEGATIVE_PROMPTS)
     assert len({s for _, s in words + sentences + negs}) == len(words + sentences + negs)
+    wake_prompt = (config.WAKE_WORD, firmware_gen.slug(config.WAKE_WORD))
+    assert wake == [wake_prompt] * config.WAKE_PROMPT_REPEATS
 
 
 def test_sentence_prompts_say_prozent_for_light_levels():
@@ -90,3 +92,13 @@ def test_check_passes_on_fresh_and_catches_changes(tmp_path):
     labels = tmp_path / "labels.h"
     labels.write_text(labels.read_text().replace("KWS_NUM_LABELS", "KWS_LABEL_COUNT"))
     assert "labels.h" in firmware_gen.check(tmp_path)
+
+
+def test_wake_int8_matches_microwakeword_requantisation():
+    """int8 = (v*256 + 333)/666 - 128, clamped — the firmware's wakefront.c
+    must agree exactly, so pin the formula's edges and a mid value here."""
+    assert firmware_gen.wake_int8(0) == -128  # silence floors at INT8_MIN
+    assert firmware_gen.wake_int8(333) == 0  # half the range lands mid-scale
+    assert firmware_gen.wake_int8(666) == 127  # 26.0 in float terms saturates
+    assert firmware_gen.wake_int8(65535) == 127  # and stays clamped well beyond it
+    assert all(firmware_gen.wake_int8(v) <= firmware_gen.wake_int8(v + 1) for v in range(700))

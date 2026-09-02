@@ -29,16 +29,19 @@ def slug(text: str) -> str:
     return "-".join(w for w in "".join(c if c.isalnum() else " " for c in s).split())
 
 
-def prompt_sets() -> tuple[list, list, list]:
-    """(display, slug) pairs for words, sentences, negatives — in canonical
-    (unshuffled) order; the device shuffles with its on-screen seed."""
+def prompt_sets() -> tuple[list, list, list, list]:
+    """(display, slug) pairs for words, sentences, negatives, and the wake set — in
+    canonical (unshuffled) order; the device shuffles with its on-screen seed. The
+    wake set is config.WAKE_WORD repeated config.WAKE_PROMPT_REPEATS times (a
+    "Hey Bus"-only recording session, not a proper prompt catalog)."""
     words = [(label, slug(label)) for label in config.COMMAND_LABELS if not label.startswith("_")]
     sentences = []
     for it in build_catalog():
         text = intent_text(it)
         sentences.append((text, slug(text)))
     negs = [(p, slug(p)) for p in config.NEGATIVE_PROMPTS]
-    return words, sentences, negs
+    wake = [(config.WAKE_WORD, slug(config.WAKE_WORD))] * config.WAKE_PROMPT_REPEATS
+    return words, sentences, negs, wake
 
 
 def mfcc_tables() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -97,9 +100,9 @@ def generate(out) -> None:
         + _c_strings("KWS_LABELS", labels)
     )
 
-    words, sentences, negs = prompt_sets()
+    words, sentences, negs, wake = prompt_sets()
     p = hdr
-    for tag, items in (("WORD", words), ("SENTENCE", sentences), ("NEG", negs)):
+    for tag, items in (("WORD", words), ("SENTENCE", sentences), ("NEG", negs), ("WAKE", wake)):
         p += f"#define KWS_NUM_{tag}_PROMPTS {len(items)}\n"
         p += _c_strings(f"KWS_{tag}_PROMPTS", [d for d, _ in items])
         p += _c_strings(f"KWS_{tag}_SLUGS", [s for _, s in items])
@@ -137,6 +140,80 @@ def generate(out) -> None:
     tv += _c_float_rows("TV_MFCC", ref)
     (out / "test_vectors.h").write_text(tv)
 
+    # Wake front-end golden vector. pymicro_features is an optional extra
+    # (`--extra wake`); without it we leave the committed header alone rather
+    # than emitting a fabricated one.
+    try:
+        wt_pcm, wt_feat = wake_test_vector()
+    except ImportError:
+        print("WARNING: pymicro-features absent — skipping wake_test_vectors.h")
+        return
+    wt = hdr + "#include <stdint.h>\n"
+    wt += f"#define WT_ROWS {wt_feat.shape[0]}\n"
+    wt_body = ", ".join(map(str, wt_pcm.tolist()))
+    wt += f"static const int16_t WT_PCM[{wt_pcm.size}] = {{{wt_body}}};\n"
+    wt += _c_int_rows("WT_FEATURES", wt_feat, "int8_t")
+    (out / "wake_test_vectors.h").write_text(wt)
+
+
+# --- wake front-end golden vector -------------------------------------------
+# `firmware/main/wakefront.c` wraps the same vendored TFLite-Micro microfrontend
+# that `pymicro_features` compiles, with the same FrontendConfig, so the two must
+# agree bit-for-bit. These constants only describe how the frontend's uint16
+# output becomes the int8 model input; the derivation is documented in
+# `firmware/main/wakefront.h`.
+WAKE_STRIDE = 160  # 10 ms at 16 kHz — one feature row per stride
+WAKE_FEATURES = 40
+# pymicro_features scales the raw uint16 by this before handing it to Python
+# (src/micro_features.cpp: FLOAT32_SCALE). Exactly representable, so the raw
+# integer is recoverable without loss.
+WAKE_FLOAT32_SCALE = 0.0390625
+# ESPHome micro_wake_word.cpp::generate_features_(): int8 = (v*256 + 333)/666 - 128.
+WAKE_VALUE_SCALE = 256
+WAKE_VALUE_DIV = 666
+
+
+def wake_int8(raw: int) -> int:
+    """microWakeWord's uint16-frontend-value -> int8-model-input requantisation."""
+    v = (raw * WAKE_VALUE_SCALE + WAKE_VALUE_DIV // 2) // WAKE_VALUE_DIV - 128
+    return max(-128, min(127, v))
+
+
+def wake_features(pcm: np.ndarray) -> np.ndarray:
+    """Reference int8 feature rows for `pcm`, straight from pymicro_features."""
+    from pymicro_features import MicroFrontend
+
+    fe = MicroFrontend()
+    rows = []
+    for i in range(0, len(pcm) - WAKE_STRIDE + 1, WAKE_STRIDE):
+        out = fe.process_samples(pcm[i : i + WAKE_STRIDE].tobytes())
+        if not out.features:
+            continue
+        rows.append([wake_int8(round(f / WAKE_FLOAT32_SCALE)) for f in out.features])
+    return np.array(rows, dtype=np.int8)
+
+
+def wake_test_vector() -> tuple[np.ndarray, np.ndarray]:
+    """1 s of synthetic tone+noise (same recipe as the MFCC vector) and the int8
+    feature rows the C front-end must reproduce exactly."""
+    rng = np.random.default_rng(1)
+    t = np.arange(config.SAMPLE_RATE) / config.SAMPLE_RATE
+    sig = (
+        0.3 * np.sin(2 * np.pi * 440 * t)
+        + 0.2 * np.sin(2 * np.pi * 1300 * t)
+        + 0.05 * rng.standard_normal(t.size)
+    )
+    sig[: config.SAMPLE_RATE // 4] = 0.0  # silence lead-in exercises the noise estimator
+    pcm = np.clip(np.round(sig * 32767), -32768, 32767).astype(np.int16)
+    return pcm, wake_features(pcm)
+
+
+def _c_int_rows(name, arr, ctype) -> str:
+    arr = np.atleast_2d(arr)
+    rows = ",\n".join("  {" + ", ".join(str(int(v)) for v in row) + "}" for row in arr)
+    dims = "".join(f"[{d}]" for d in arr.shape)
+    return f"static const {ctype} {name}{dims} = {{\n{rows}\n}};\n"
+
 
 _FLOAT_RE = re.compile(r"-?\d+\.\d+e[+-]\d+f")
 
@@ -170,7 +247,13 @@ def check(committed_dir) -> list[str]:
     with tempfile.TemporaryDirectory() as tmp:
         generate(tmp)
         bad = []
-        for f in ("labels.h", "prompts.h", "features_config.h", "test_vectors.h"):
+        # wake_test_vectors.h is int-only and produced by deterministic C, so it
+        # compares byte-exact through _headers_match's (float-free) string path.
+        # It is skipped entirely when pymicro-features is not installed.
+        names = ["labels.h", "prompts.h", "features_config.h", "test_vectors.h"]
+        if (pathlib.Path(tmp) / "wake_test_vectors.h").exists():
+            names.append("wake_test_vectors.h")
+        for f in names:
             if not _headers_match(
                 (committed_dir / f).read_text(), (pathlib.Path(tmp) / f).read_text()
             ):

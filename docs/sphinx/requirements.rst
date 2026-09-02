@@ -50,9 +50,11 @@ Detector
 
    ``vad_push`` (``firmware/main/vad.c``) opens speech when RMS exceeds
    ``max(noise_floor * 4, 300)`` for 2 consecutive 20 ms frames, and closes
-   it after ``VAD_TRAILING_FRAMES`` = 25 consecutive frames below threshold
-   (500 ms). The noise floor tracks RMS exponentially (alpha 0.05) only
-   while not in speech.
+   it after ``v->trailing_frames`` consecutive frames below threshold, set
+   per call by ``vad_reset()`` (``VAD_TRAILING_FRAMES`` = 25 frames / 500 ms
+   is the default). The noise floor tracks RMS exponentially (alpha 0.05)
+   only while not in speech. See :need:`REQ_FW_RECORD_HANGOVER` for the
+   per-prompt-set hangover the recorder feeds in.
 
 Recorder
 --------
@@ -61,19 +63,46 @@ Recorder
    :id: REQ_FW_RECORD_TWO_TAKES
    :status: implemented
 
-   The recorder captures ``TAKES_PER_PROMPT`` = 2 reads of each prompt
-   before advancing, so a bad first read can be reviewed/redone without
-   losing the second.
+   ``prompt_takes_per_prompt`` (``firmware/main/prompts.c``) returns 2 reads
+   per prompt for the word/sentence/negative sets before advancing, so a bad
+   first read can be reviewed/redone without losing the second. (The
+   "Hey Bus" wake set is the one exception — see
+   :need:`REQ_FW_RECORD_WAKE_SET`.)
 
 .. req:: Recording time caps
    :id: REQ_FW_RECORD_CAPS
    :status: implemented
 
    Fixed caps on the record state machine: 300 ms pre-roll pulled from the
-   always-on ring buffer, 500 ms of trailing silence closes a take, 4000 ms
-   maximum word-prompt length, 6000 ms maximum sentence/negative-prompt
-   length, 8000 ms no-speech timeout forces an auto-redo, and a 700 ms hold
-   after a successful save before auto-advancing to the next prompt.
+   always-on ring buffer, trailing silence closes a take per
+   :need:`REQ_FW_RECORD_HANGOVER`, 4000 ms maximum word-prompt length,
+   6000 ms maximum sentence/negative-prompt length, 8000 ms no-speech
+   timeout forces an auto-redo, and a 700 ms hold after a successful save
+   before auto-advancing to the next prompt.
+
+.. req:: Trailing-silence hangover is per prompt set; false starts are discarded
+   :id: REQ_FW_RECORD_HANGOVER
+   :status: implemented
+
+   First real recording session, QC'd with Whisper: sentence takes (median
+   840 ms) were rejected 75/102 for missing words, vs. word takes (median
+   1020 ms) mostly fine. Cause: a natural reading pause between the words
+   of a longer on-screen prompt exceeds the fixed 500 ms trailing-silence
+   hangover, so ``capture_one`` (``firmware/main/record.c``) closed the
+   take after the first word. Fix, two parts:
+
+   1. ``prompt_hangover_ms`` (``firmware/main/prompts.c``) returns 500 ms
+      for ``PROMPT_WORDS`` and 1200 ms for sentences/negatives/wake;
+      ``capture_one`` passes ``prompt_hangover_ms(set) / 20`` as the
+      trailing-frame count to ``vad_reset`` (see :need:`REQ_FW_VAD_ENDPOINT`)
+      instead of the fixed ``VAD_TRAILING_FRAMES``.
+   2. False-start filter: ``vad_t.speech_total`` counts every frame above
+      threshold since the last ``vad_reset``. If a take closes with less
+      than ``MIN_SPEECH_MS`` (200 ms) of total speech frames — a breath or
+      click before the speaker starts — ``capture_one`` discards it and
+      keeps listening in the same call, so the 8 s ``NO_SPEECH_MS`` timeout
+      (:need:`REQ_FW_RECORD_CAPS`) keeps running from the original start
+      instead of restarting.
 
 .. req:: Clipped takes are discarded and redone
    :id: REQ_FW_RECORD_CLIP_REJECT
@@ -127,6 +156,20 @@ Recorder
    screen (``seed 17``); the same seed always reproduces the same order, so
    a session is fully reconstructible from ``session.csv``.
 
+.. req:: Guided recorder can capture a wake-word-only session
+   :id: REQ_FW_RECORD_WAKE_SET
+   :status: implemented
+
+   The generated ``PROMPT_WAKE`` set is ``config.WAKE_WORD`` ("Hey Bus")
+   repeated ``config.WAKE_PROMPT_REPEATS`` (5) times, set name ``wake``
+   (``prompt_set_name``); ``prompt_takes_per_prompt(PROMPT_WAKE)`` returns 1
+   (not 2), so a session prompts exactly 5 single-take "Hey Bus" reads
+   before finishing straight to ``REC_SESSION_DONE`` — no
+   sentence/negative sets chained on, unlike the normal guided session.
+   Takes save under ``spkNN/hey-bus/NNN.wav``, same as the isolated-word
+   set, and each ``session.csv`` row uses the same
+   ``prompt,file,ms,peak_dbfs,set,seed,ts`` shape with ``set`` = ``wake``.
+
 .. req:: Negative prompts contain no command vocabulary
    :id: REQ_FW_NEGATIVE_PROMPTS
    :status: implemented
@@ -179,6 +222,19 @@ Storage / USB
    rsync exited 0, and ejects the volume. Re-running against an
    already-emptied drive is a no-op.
 
+.. req:: The remote console survives USB mode
+   :id: REQ_FW_USB_CDC_CONSOLE
+   :status: implemented
+
+   ``usb_drive_enter``/``usb_drive_exit`` (``firmware/main/usb_drive.c``)
+   bring up TinyUSB as a composite MSC + CDC-ACM device and move stdio onto
+   the CDC-ACM port for the duration of USB mode (``esp_tusb_init_console``/
+   ``esp_tusb_deinit_console``), instead of only the MSC device that used to
+   take the USB PHY and silently drop the console's own port with it.
+   ``console.c``'s stdin is opened ``O_NONBLOCK`` so the console task can
+   never be left blocked in the old port's read call across the switch,
+   whichever task triggers it (see :need:`REQ_FW_REMOTE_MODE`).
+
 Recogniser
 ----------
 
@@ -219,6 +275,101 @@ Recogniser
    needed to replay through ``kws_de.stream.KeywordStream`` on the host
    and compare event-for-event against the on-device detector.
 
+Wake word ("Hey Bus")
+---------------------
+
+.. req:: On-device wake features match microWakeWord's training front-end
+   :id: REQ_FW_WAKE_FRONTEND_PARITY
+   :status: implemented
+
+   ``firmware/main/wakefront.c`` drives the TFLite-Micro audio frontend
+   vendored under ``firmware/main/microfrontend/`` with exactly the
+   ``FrontendConfig`` microWakeWord trains with (16 kHz, 30 ms window,
+   10 ms step, 40 channels, 125-7500 Hz, PCAN on, log scaling), and
+   requantises its uint16 output to int8 with microWakeWord's own integer
+   expression ``(v * 256 + 333) / 666 - 128``. The rows it emits are
+   bit-identical to ``pymicro_features``' for the same PCM.
+
+.. req:: Wake detection fires once per utterance
+   :id: REQ_FW_WAKE_DETECT
+   :status: implemented
+
+   ``wake.cc`` runs the streaming ``models/hey_bus.tflite`` interpreter
+   once per 3 feature rows (30 ms of audio), keeping the interpreter and
+   its resource variables alive between steps and resetting them when the
+   mode is entered. A detection needs ``WAKE_THRESHOLD`` (0.99) on
+   ``WAKE_MIN_CONSECUTIVE`` (2) consecutive steps, after which
+   ``WAKE_REFRACTORY_MS`` (1500) suppresses further fires, so one spoken
+   "Hey Bus" produces exactly one fire. Each fire is logged to
+   ``/rec/wake.log`` as ``[Wake] <ms> <prob>``.
+
+.. req:: A wake detection is confirmed on screen and by ear
+   :id: REQ_FW_WAKE_BEEP
+   :status: implemented
+
+   On a fire the screen background turns green for ``WAKE_FLASH_MS``
+   (600 ms) and ``beep.c`` plays a 150 ms 1 kHz tone through the AW88298
+   amplifier. The speaker shares one full-duplex I2S channel pair with the
+   microphone, so it is opened with the mic's exact format (16 kHz,
+   16-bit, 2 channels); any other rate would be rejected by
+   ``esp_codec_dev`` and take capture down.
+
+.. req:: Wake mode runs the wake model alone
+   :id: REQ_FW_WAKE_ISOLATED
+   :status: implemented
+
+   ``UI_MODE_WAKE`` calls ``recognise_set_active(false)`` on entry and
+   ``wake_set_active(false)`` on exit, so no command-word inference runs
+   while wake mode is active and no wake inference runs outside it. The
+   two tasks share priority 3 on core 1 and only one is ever enabled, so
+   what the wake screen reports is the wake model's behaviour and nothing
+   else's.
+
+Selection menu and remote control
+----------------------------------
+
+.. req:: Every mode is reached from, and returns to, one selection menu
+   :id: REQ_FW_MENU_FLOW
+   :status: implemented
+
+   ``app_main`` boots into ``UI_MODE_MENU`` (``ui_show_menu()``), a column
+   of five buttons — Recognition, Hey Bus, Record, Hey Bus aufnehmen, USB —
+   each a direct ``app_set_mode()`` call. Every other screen's back/abort
+   button (record, record-wake, recognise, wake, USB) calls
+   ``app_set_mode(UI_MODE_MENU)``, so the menu is the only hub: no mode
+   links directly to another mode.
+
+.. req:: Entering Record always starts a fresh guided session
+   :id: REQ_FW_RECORD_SESSION
+   :status: implemented
+
+   ``app_set_mode(UI_MODE_RECORD)`` posts ``REC_CMD_START_SESSION``,
+   which bumps the speaker id (``nvs_bump_speaker``) and starts the
+   sentence set. On ``REC_DONE`` the recorder auto-chains: sentences
+   completing re-seeds the negative set and continues; negatives
+   completing sets ``REC_SESSION_DONE`` (with a running
+   ``saved_takes`` count in ``record_status_t``), which
+   ``ui_record_refresh()`` turns into the success screen
+   (``ui_show_success``). Aborting mid-session (Abbrechen) instead posts
+   ``REC_CMD_PAUSE`` and returns straight to the menu — no success
+   screen. ``PROMPT_WORDS`` remains in the code but is not reachable from
+   this flow. ``app_set_mode(UI_MODE_RECORD_WAKE)`` posts
+   ``REC_CMD_START_WAKE_SESSION`` instead, the "Hey Bus"-only variant — see
+   :need:`REQ_FW_RECORD_WAKE_SET`.
+
+.. req:: The device accepts remote mode/status commands over the serial console
+   :id: REQ_FW_REMOTE_MODE
+   :status: implemented
+
+   ``console.c`` reads newline-terminated commands from ``stdin`` (the
+   UART console) in a low-priority task: ``mode
+   menu|record|recordwake|recognise|wake|usb`` calls ``app_set_mode()``;
+   ``status`` reports the current mode and, in record/record-wake mode,
+   the recorder's phase/index/count/speaker. Every command ends with an
+   ``ok`` or ``err <reason>`` line, so a host script driving the device
+   (e.g. ``echo 'mode usb' > /dev/cu.usbmodemNNN``) can tell when a
+   command finished.
+
 Build / CI
 ----------
 
@@ -245,8 +396,9 @@ Build / CI
    :id: REQ_FW_HOST_TESTS_NO_IDF
    :status: implemented
 
-   ``mfcc.c``, ``stream.c``, ``wav.c``, ``prompts.c``, and ``vad.c`` have
-   no ESP-IDF dependency and build/run as host binaries with plain ``cc``
+   ``mfcc.c``, ``stream.c``, ``wav.c``, ``prompts.c``, ``vad.c``, and
+   ``wakefront.c`` (with the vendored microfrontend) have no ESP-IDF
+   dependency and build/run as host binaries with plain ``cc``/``c++``
    via ``firmware/test/Makefile`` (``make -C firmware/test``), on Mac, the
    Pi, and CI, with no Docker/IDF toolchain needed.
 

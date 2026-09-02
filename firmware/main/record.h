@@ -9,21 +9,16 @@
 
 /** @brief Commands posted to the record task from UI callbacks, via record_post(). */
 typedef enum {
-    REC_CMD_REDO,          /**< Redo the current prompt from take 1. */
-    REC_CMD_SKIP,          /**< Skip the current prompt, advance to the next. */
-    REC_CMD_NEXT,          /**< Same as REC_CMD_SKIP: advance to the next prompt. */
-    REC_CMD_NEW_SPEAKER,   /**< Bump the speaker id in NVS and reshuffle the current prompt set. */
-    REC_CMD_SET_WORDS,     /**< Switch to the word prompt set with a fresh random order. */
-    REC_CMD_SET_SENTENCES, /**< Switch to the sentence prompt set with a fresh random order. */
-    REC_CMD_SET_NEGS,      /**< Switch to the negative prompt set with a fresh random order. */
-    REC_CMD_PAUSE,         /**< Pause the recorder (goes idle, waits for a command). */
-    REC_CMD_RESUME,        /**< Resume recording from take 1 of the current prompt. */
+    REC_CMD_START_SESSION,      /**< Bump the speaker id, start the sentence set; negatives auto-chain on completion. */
+    REC_CMD_START_WAKE_SESSION, /**< Bump the speaker id, start the "Hey Bus"-only wake set (PROMPT_WAKE);
+                                      session ends when it's exhausted, no chaining into negatives. */
+    REC_CMD_PAUSE,               /**< Pause the recorder (goes idle, waits for a command). */
 } record_cmd_t;
 /**
  * @brief Recorder phase, as shown by the UI.
  *
- * REC_GETREADY is appended (not inserted) so existing phase indices — and the
- * UI's phase-label table indexed by them — stay put.
+ * REC_GETREADY and REC_SESSION_DONE are appended (not inserted) so existing
+ * phase indices — and the UI's phase-label table indexed by them — stay put.
  */
 typedef enum {
     REC_IDLE,      /**< Paused, waiting for a command. */
@@ -35,6 +30,7 @@ typedef enum {
     REC_FULL,      /**< Take discarded: storage below STORAGE_MIN_FREE_BYTES. */
     REC_DONE,      /**< All prompts in the current set completed. */
     REC_GETREADY,  /**< "Get ready" beat shown before a take starts capturing. */
+    REC_SESSION_DONE, /**< Sentences + negatives both completed for this speaker; session over. */
 } record_phase_t;
 
 /** @brief Snapshot of recorder state, filled by record_get_status(). */
@@ -44,9 +40,10 @@ typedef struct {
     int take, takes;                       /**< Which read of the prompt (1-based) out of how many. */
     char prompt[96]; char speaker[8];      /**< Display text of the current prompt; speaker id, e.g. "spk03". */
     float level_dbfs;                      /**< Input level for the level bar, updated every 100 ms. */
+    int saved_takes;                       /**< Takes saved since the last REC_CMD_START_SESSION. */
 } record_status_t;
 
-/** @brief Create the record task. Starts paused (REC_IDLE); call record_post(REC_CMD_RESUME) to begin. */
+/** @brief Create the record task. Starts paused (REC_IDLE); call record_post(REC_CMD_START_SESSION) to begin. */
 void record_start(void);
 /** @brief Post a command to the record task from a UI callback. Non-blocking. */
 void record_post(record_cmd_t cmd);

@@ -42,21 +42,42 @@ binary is a small ``assert``-based program built by
 .. test:: Prompt shuffle determinism and coverage
    :id: TEST_PROMPTS_SHUFFLE
    :status: passing
-   :links: REQ_FW_PROMPT_SHUFFLE_SEED
+   :links: REQ_FW_PROMPT_SHUFFLE_SEED, REQ_FW_RECORD_WAKE_SET
 
    ``firmware/test/test_prompts.c``: same seed twice → identical shuffled
    order; different seed → different order; every prompt index appears
-   exactly once.
+   exactly once. Also asserts the wake set: 5 prompts, all "Hey Bus",
+   slug "hey-bus", ``prompt_set_name(PROMPT_WAKE)`` == "wake", and
+   ``prompt_takes_per_prompt`` returns 1 for the wake set vs. 2 for the
+   normal sets. ``prompt_hangover_ms`` returns 500 for ``PROMPT_WORDS`` and
+   1200 for sentences/negatives/wake.
 
 .. test:: Energy VAD open/close thresholds
    :id: TEST_VAD_ENERGY
    :status: passing
-   :links: REQ_FW_VAD_ENDPOINT
+   :links: REQ_FW_VAD_ENDPOINT, REQ_FW_RECORD_HANGOVER
 
    ``firmware/test/test_vad.c``: quiet frames never open speech; loud
    frames open after 2 consecutive frames; speech stays open through
    ``VAD_TRAILING_FRAMES - 1`` silent frames and closes exactly on the
-   next.
+   next. A synthetic 200 ms-burst/800 ms-silence/200 ms-burst signal stays
+   one segment at the 1200 ms sentence/negs/wake hangover but splits into
+   two at the 500 ms word hangover. A 40 ms transient followed by silence
+   leaves ``speech_total`` under 200 ms, the false-start threshold.
+
+.. test:: Wake front-end reproduces microWakeWord's features exactly
+   :id: TEST_WAKE_FRONTEND_PARITY
+   :status: passing
+   :links: REQ_FW_WAKE_FRONTEND_PARITY, REQ_FW_HOST_TESTS_NO_IDF
+
+   ``firmware/test/test_wakefront.c``: pushes ``gen/wake_test_vectors.h``'s
+   1 s of synthetic PCM through ``wakefront_push`` in 10 ms strides and
+   asserts all 98 x 40 int8 feature values equal ``WT_FEATURES`` — the rows
+   ``pymicro_features`` produced for the same PCM under microWakeWord's
+   int8 requantisation. Max deviation must be 0, not a tolerance: both
+   sides run the same vendored integer C, so any difference means the
+   config or the requantisation drifted. Also asserts the 3-row
+   ``wakefront_take`` block the model consumes is oldest-row-first.
 
 Python tests (pytest)
 ----------------------
@@ -297,7 +318,7 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    :links: REQ_FW_RECORD_TWO_TAKES, REQ_FW_RECORD_CAPS,
            REQ_FW_RECORD_SPEAKER_ID, REQ_FW_RECORD_SESSION_CSV,
            REQ_FW_USB_SINGLE_OWNER, REQ_FW_VAD_ENDPOINT,
-           REQ_FW_23_CLASSES, REQ_FW_RECOGNISE_LOG
+           REQ_FW_RECORD_HANGOVER, REQ_FW_23_CLASSES, REQ_FW_RECOGNISE_LOG
 
    ``firmware/README.md`` "Manual test checklist": record 3 words + 1
    sentence + 1 negative → USB → pull →
@@ -305,6 +326,49 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    Recognise → say "Licht" → word appears, inference < 30 ms;
    ``recognise.log`` replays through ``stream.KeywordStream`` with the same
    events. Run by hand on real M5Stack CoreS3 hardware; not automated.
+
+.. test:: On-device "Hey Bus" wake test mode
+   :id: TEST_MANUAL_WAKE_MODE
+   :status: manual
+   :links: REQ_FW_WAKE_DETECT, REQ_FW_WAKE_BEEP, REQ_FW_WAKE_ISOLATED
+
+   ``firmware/README.md`` "Manual test checklist": tap **Wake** on the
+   record screen → the probability updates live and stays low on silence;
+   say "Hey Bus" → the screen flashes green, the speaker beeps once, and
+   the fire count goes up by exactly one per utterance; other words
+   (including command words like "Licht") do not fire, confirming no
+   command recognition is running; tap **Menu** to leave → back in Record
+   mode, ``/rec/wake.log`` carries one ``[Wake] <ms> <prob>`` line per
+   fire. Run by hand on real M5Stack CoreS3 hardware; not automated.
+
+.. test:: Selection-menu flow, guided session auto-chain, and remote control
+   :id: TEST_MANUAL_MENU_FLOW
+   :status: manual
+   :links: REQ_FW_MENU_FLOW, REQ_FW_RECORD_SESSION, REQ_FW_RECORD_WAKE_SET,
+           REQ_FW_REMOTE_MODE, REQ_FW_USB_CDC_CONSOLE
+
+   ``firmware/README.md`` "Manual test checklist": device boots to the
+   5-button menu; each of Recognition/Hey Bus/Record/Hey Bus
+   aufnehmen/USB opens its screen, and that screen's back button
+   (Abbrechen on Record/Hey Bus aufnehmen) returns to the menu; tapping
+   **Record** bumps the speaker id and starts the sentence set, completing
+   it auto-chains into the negative set without any button press, and
+   completing negatives shows "Fertig - danke!" with the speaker id and a
+   saved-take count, whose **Menu** button returns to the selection menu;
+   aborting mid-session instead returns straight to the menu with no
+   success screen. Tapping **Hey Bus aufnehmen** bumps the speaker id and
+   prompts 5 single-take "Hey Bus" reads straight to the same success
+   screen, with no negatives chained on. Separately, over the serial
+   console: ``echo 'mode wake' > /dev/cu.usbmodemNNN`` switches the
+   device to wake mode and ``echo 'status'`` reports it; ``mode
+   recordwake`` then ``status`` reports the wake session's
+   phase/index/speaker. Tapping **USB** (or ``mode usb``) mounts
+   ``KWSREC`` and a new ``/dev/cu.usbmodemNNN`` (the CDC-ACM port) shows
+   up alongside/in place of the original console port; ``echo 'status' >``
+   that new port answers ``mode usb`` / ``ok``, and ``echo 'mode menu' >``
+   it unmounts the drive and returns to the menu, with the original
+   console port working again afterwards. Run by hand on real M5Stack
+   CoreS3 hardware; not automated.
 
 .. note::
 
