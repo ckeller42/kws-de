@@ -33,11 +33,13 @@ uv run kws-export             # -> models/model.tflite + firmware/main/model_dat
 uv run kws-eval               # -> docs/eval-report.md (accuracy, SNR sweep, budgets)
 ```
 
-## ESP32 firmware demo
+## Firmware (M5Stack CoreS3)
 
-`firmware/` is an ESP-IDF app (built/flashed on buspi, which has the toolchain):
-CoreS3 BSP mic -> ESP-SR AFE -> MFCC -> INT8 KWS -> recognised word on the LCD (LVGL).
-Model is embedded as a C array (no SD card — the CoreS3 BSP cannot use SD and LCD at once).
+`firmware/` is an ESP-IDF app with two modes: a guided recorder that
+collects word/sentence/negative takes onto the device's flash (pulled over
+USB with `scripts/pull-recordings.sh`), and an on-device recogniser running
+the int8 model with the same MFCC front-end and detector as `kws_de.stream`.
+Build, flash, and the manual test checklist: [firmware/README.md](firmware/README.md).
 
 ## Development
 
