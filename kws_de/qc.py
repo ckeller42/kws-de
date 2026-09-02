@@ -407,8 +407,13 @@ def whisper_transcriber(
     import mlx_whisper
 
     def transcribe(path: Path) -> Transcript:
+        audio, sr = sf.read(path, dtype="float32", always_2d=True)
+        if sr != config.SAMPLE_RATE:
+            raise ValueError(
+                f"{path}: sample rate {sr} != {config.SAMPLE_RATE} (mono 16 kHz PCM expected)"
+            )
         r = mlx_whisper.transcribe(
-            str(path),
+            audio[:, 0],
             path_or_hf_repo=model_id,
             language="de",
             word_timestamps=True,

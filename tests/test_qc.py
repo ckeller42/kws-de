@@ -1,6 +1,5 @@
 import csv
 import importlib.util
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -314,8 +313,7 @@ def test_cli_dry_run_lists_takes_without_model(tmp_path, capsys, monkeypatch):
 
 
 @pytest.mark.skipif(
-    importlib.util.find_spec("mlx_whisper") is None or shutil.which("ffmpeg") is None,
-    reason="mlx-whisper (and its ffmpeg dependency) not available",
+    importlib.util.find_spec("mlx_whisper") is None, reason="mlx-whisper not installed"
 )
 def test_whisper_transcriber_smoke(tmp_path):
     tr = qc.whisper_transcriber("mlx-community/whisper-tiny-mlx")  # tiny: quick smoke only
