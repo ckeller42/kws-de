@@ -25,13 +25,10 @@ esp_err_t usb_drive_enter(void)
         .cdc_port = TINYUSB_CDC_ACM_0,
     };
     ESP_RETURN_ON_ERROR(tusb_cdc_acm_init(&acm_cfg), TAG, "cdc init");
-    /* The console's normal port rides the same USB PHY TinyUSB just took over
-       (see usb_drive.h), so move stdio onto the new CDC-ACM port for the
-       duration of USB mode. This freopen()s stdin/stdout/stderr; console.c's
-       stdin fd is O_NONBLOCK exactly so a task sitting in fgets() at the
-       moment this runs (e.g. triggered from the UI task, not the console task
-       itself) never blocks past its next poll - see console.c for why that
-       matters. */
+    /* The console's normal port (the S3's USB-Serial-JTAG) rides the same USB
+       PHY TinyUSB just took over (see usb_drive.h), so move stdout onto the
+       new CDC-ACM port for the duration of USB mode. Input is not affected:
+       console.c polls the CDC port directly while this mode is active. */
     ESP_RETURN_ON_ERROR(esp_tusb_init_console(TINYUSB_CDC_ACM_0), TAG, "cdc console");
 
     ESP_LOGI(TAG, "exposed /rec as MSC, console moved to CDC-ACM");

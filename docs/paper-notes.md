@@ -472,6 +472,15 @@ leave it parked forever, deaf to the new CDC port — fixed by making stdin non-
 (`O_NONBLOCK`), matching how TinyUSB's own CDC read already behaves, so the console task never
 blocks past one 20 ms poll tick on either side of the switch (`firmware/main/console.c`).
 
+**Console input root cause (2026-09-03).** The serial console had only ever worked by
+accident: the CoreS3's USB-C is the ESP32-S3's own USB-Serial-JTAG peripheral (no UART bridge),
+IDF mirrors stdout onto it as the *secondary* console, but `stdin` stays on the unconnected
+UART0. Making stdin non-blocking for the CDC hand-over then broke the accidental path
+completely (`fgets` dropped every partial line). The console now reads the USB-Serial-JTAG
+driver with a bounded wait (and the CDC-ACM port in USB mode) and assembles lines itself;
+verified on the device, and a reusable host-side helper that opens the port with DTR/RTS low
+(a careless open resets the chip) replaced the ad-hoc `cat`/`echo` capture.
+
 ### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
 
 Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the
