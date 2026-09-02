@@ -4,11 +4,14 @@
 #include "prompts.h"
 
 typedef enum { REC_CMD_REDO, REC_CMD_SKIP, REC_CMD_NEXT, REC_CMD_NEW_SPEAKER, REC_CMD_SET_WORDS, REC_CMD_SET_SENTENCES, REC_CMD_SET_NEGS, REC_CMD_PAUSE, REC_CMD_RESUME } record_cmd_t;
-typedef enum { REC_IDLE, REC_LISTENING, REC_CAPTURING, REC_SAVED, REC_CLIPPED, REC_TIMEOUT, REC_FULL, REC_DONE } record_phase_t;
+/* REC_GETREADY is appended (not inserted) so existing phase indices — and the
+   UI's phase-label table indexed by them — stay put. */
+typedef enum { REC_IDLE, REC_LISTENING, REC_CAPTURING, REC_SAVED, REC_CLIPPED, REC_TIMEOUT, REC_FULL, REC_DONE, REC_GETREADY } record_phase_t;
 
 typedef struct {
     record_phase_t phase;
     prompt_set_t set; uint32_t seed; int index, count;
+    int take, takes;                       /* which read of the prompt, 1-based */
     char prompt[96]; char speaker[8];      /* "spk03" */
     float level_dbfs;                      /* for the bar, updated every 100 ms */
 } record_status_t;

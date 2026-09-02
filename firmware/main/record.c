@@ -23,6 +23,11 @@ static const char *TAG = "record";
 #define PREROLL_SAMPLES (KWS_SAMPLE_RATE * 300 / 1000)
 #define NO_SPEECH_MS 8000
 #define HOLD_MS 700
+#define TAKES_PER_PROMPT 2            /* two reads per word, for wrong-read review */
+#define GETREADY_MS 1500             /* "get ready" beat before the first take of a word */
+#define BETWEEN_TAKES_MS 500         /* short pause before the second read */
+
+static int s_take_idx;               /* 0-based take of the current prompt */
 
 static QueueHandle_t s_cmds;
 static SemaphoreHandle_t s_lock;
@@ -39,6 +44,7 @@ static void status_set(record_phase_t ph)
     s_st.phase = ph;
     s_st.set = s_prompts.set; s_st.seed = s_prompts.seed;
     s_st.index = s_prompts.index; s_st.count = s_prompts.count;
+    s_st.take = s_take_idx + 1; s_st.takes = TAKES_PER_PROMPT;
     strlcpy(s_st.prompt, prompt_text(&s_prompts), sizeof s_st.prompt);
     snprintf(s_st.speaker, sizeof s_st.speaker, "spk%02lu", (unsigned long)s_speaker);
     record_status_t copy = s_st;
@@ -165,23 +171,31 @@ static void record_task(void *arg)
     for (;;) {
         if (s_paused) { xQueueReceive(s_cmds, &cmd, portMAX_DELAY); }
         else {
+            /* "get ready" beat before each read — a longer one for the first take
+               of a word, a short one before the second read. Paces the session so
+               it no longer flies past; the prompt label stays on screen throughout. */
+            status_set(REC_GETREADY);
+            vTaskDelay(pdMS_TO_TICKS(s_take_idx == 0 ? GETREADY_MS : BETWEEN_TAKES_MS));
             int r = capture_one(&cmd);
-            if (r == 0 || r == 1) {
-                if (r == 0 && !prompt_advance(&s_prompts)) { status_set(REC_DONE); s_paused = 1; }
-                if (r == 1) vTaskDelay(pdMS_TO_TICKS(HOLD_MS));
+            if (r == 0) {                                 /* take saved */
+                if (++s_take_idx >= TAKES_PER_PROMPT) {   /* both reads done → next word */
+                    s_take_idx = 0;
+                    if (!prompt_advance(&s_prompts)) { status_set(REC_DONE); s_paused = 1; }
+                }
                 continue;
             }
+            if (r == 1) { vTaskDelay(pdMS_TO_TICKS(HOLD_MS)); continue; }  /* redo this take */
         }
         switch (cmd) {                                    /* r == -1 or woken while paused */
         case REC_CMD_PAUSE:  s_paused = 1; status_set(REC_IDLE); break;
-        case REC_CMD_RESUME: s_paused = 0; break;
-        case REC_CMD_REDO:   break;                       /* loop re-captures the same prompt */
+        case REC_CMD_RESUME: s_paused = 0; s_take_idx = 0; break;
+        case REC_CMD_REDO:   s_take_idx = 0; break;       /* redo the whole prompt from take 1 */
         case REC_CMD_SKIP:
-        case REC_CMD_NEXT:   if (!prompt_advance(&s_prompts)) { status_set(REC_DONE); s_paused = 1; } break;
-        case REC_CMD_NEW_SPEAKER: nvs_bump_speaker(); prompt_session_init(&s_prompts, s_prompts.set, s_prompts.seed + 1); status_set(REC_IDLE); break;
-        case REC_CMD_SET_WORDS:     prompt_session_init(&s_prompts, PROMPT_WORDS,     (uint32_t)esp_timer_get_time()); status_set(REC_IDLE); break;
-        case REC_CMD_SET_SENTENCES: prompt_session_init(&s_prompts, PROMPT_SENTENCES, (uint32_t)esp_timer_get_time()); status_set(REC_IDLE); break;
-        case REC_CMD_SET_NEGS:      prompt_session_init(&s_prompts, PROMPT_NEGS,      (uint32_t)esp_timer_get_time()); status_set(REC_IDLE); break;
+        case REC_CMD_NEXT:   s_take_idx = 0; if (!prompt_advance(&s_prompts)) { status_set(REC_DONE); s_paused = 1; } break;
+        case REC_CMD_NEW_SPEAKER: s_take_idx = 0; nvs_bump_speaker(); prompt_session_init(&s_prompts, s_prompts.set, s_prompts.seed + 1); status_set(REC_IDLE); break;
+        case REC_CMD_SET_WORDS:     s_take_idx = 0; prompt_session_init(&s_prompts, PROMPT_WORDS,     (uint32_t)esp_timer_get_time()); status_set(REC_IDLE); break;
+        case REC_CMD_SET_SENTENCES: s_take_idx = 0; prompt_session_init(&s_prompts, PROMPT_SENTENCES, (uint32_t)esp_timer_get_time()); status_set(REC_IDLE); break;
+        case REC_CMD_SET_NEGS:      s_take_idx = 0; prompt_session_init(&s_prompts, PROMPT_NEGS,      (uint32_t)esp_timer_get_time()); status_set(REC_IDLE); break;
         }
     }
 }

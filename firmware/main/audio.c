@@ -33,7 +33,10 @@ void audio_start(void)
     assert(s_mic);
     esp_codec_dev_sample_info_t fs = {.bits_per_sample = 16, .channel = 2, .sample_rate = KWS_SAMPLE_RATE};
     ESP_ERROR_CHECK(esp_codec_dev_open(s_mic, &fs));
-    ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(s_mic, 30.0));
+    /* ponytail: mic gain is a calibration knob. First real recordings peaked at
+       ~-18 dBFS (RMS ~-40) at 30 dB — usable but quiet; +6 dB lifts SNR. Retune
+       here if reads clip (the recorder flags clipping and asks for a redo). */
+    ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(s_mic, 36.0));
     xTaskCreatePinnedToCore(audio_task, "audio", 4096, NULL, 10, NULL, 1);
     ESP_LOGI(TAG, "capture running");
 }
