@@ -4,10 +4,13 @@
 
 #define KWS_PI 3.14159265358979323846f
 
-/* 480 is 2^5*3*5 — not a power of two — so we do a plain DFT with a twiddle
-   table. ~116k MACs per frame; a 100 ms inference only adds 5 frames, so this
-   stays far below 1 ms of CPU on the S3. ponytail: swap for esp-dsp mixed
-   radix if the front end ever shows up in the profile. */
+/* 480 is 2^5*3*5 — not a power of two — so we do a plain DFT against a small 1-D
+   twiddle table in fast internal RAM. The naive form indexed it with
+   `(k*n) % KWS_WIN`; that integer modulo ran ~5.7 M times per one-shot inference
+   and cost most of a ~1.2 s frame on the S3. Instead we walk the index
+   incrementally — for fixed k it steps by k each sample, wrapping once — which
+   is a couple of cheap ops and gives the identical index (host MFCC parity test
+   still passes). ponytail: swap for esp-dsp mixed radix if it ever shows up hot. */
 static float s_cos[KWS_WIN], s_sin[KWS_WIN];
 static int s_twiddle_ready;
 
@@ -27,10 +30,12 @@ static void frame_logmel(const int16_t pcm[KWS_WIN], float logmel[KWS_N_MELS])
     for (int n = 0; n < KWS_WIN; n++) x[n] = (pcm[n] / 32768.f) * KWS_WINDOW[n];
     for (int k = 0; k < KWS_N_BINS; k++) {
         float re = 0.f, im = 0.f;
+        int idx = 0;                                   /* (k*n) % KWS_WIN, walked incrementally */
         for (int n = 0; n < KWS_WIN; n++) {
-            int idx = (k * n) % KWS_WIN;
             re += x[n] * s_cos[idx];
             im -= x[n] * s_sin[idx];
+            idx += k;
+            if (idx >= KWS_WIN) idx -= KWS_WIN;         /* k < KWS_WIN so a single subtract suffices */
         }
         power[k] = re * re + im * im;
     }

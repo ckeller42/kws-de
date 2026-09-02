@@ -24,7 +24,6 @@ _Static_assert(KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES,
                "label count (fwgen) must match model output classes (export)");
 
 static const char *TAG = "recognise";
-static constexpr int kStepSamples = KWS_SAMPLE_RATE / 10;      /* inference every 100 ms */
 
 static SemaphoreHandle_t s_lock;
 static recognise_status_t s_st;
@@ -47,9 +46,11 @@ static void recognise_task(void *)
     resolver.AddConv2D(); resolver.AddDepthwiseConv2D(); resolver.AddFullyConnected();
     resolver.AddMean(); resolver.AddSoftmax(); resolver.AddReshape(); resolver.AddAdd();
     const tflite::Model *model = tflite::GetModel(g_model);
-    assert(model->version() == TFLITE_SCHEMA_VERSION);
+    /* Explicit checks, not assert(): the side effects (AllocateTensors/Invoke)
+       must run even if assertions are ever compiled out (e.g. a -O2/NDEBUG build). */
+    if (model->version() != TFLITE_SCHEMA_VERSION) { ESP_LOGE(TAG, "bad model schema"); vTaskDelete(nullptr); return; }
     static tflite::MicroInterpreter interp(model, resolver, s_arena, KWS_MODEL_ARENA_BYTES);
-    assert(interp.AllocateTensors() == kTfLiteOk);
+    if (interp.AllocateTensors() != kTfLiteOk) { ESP_LOGE(TAG, "AllocateTensors failed"); vTaskDelete(nullptr); return; }
     ESP_LOGI(TAG, "arena used %u / %u", (unsigned)interp.arena_used_bytes(), (unsigned)KWS_MODEL_ARENA_BYTES);
     TfLiteTensor *in = interp.input(0), *out = interp.output(0);
 
@@ -57,17 +58,17 @@ static void recognise_task(void *)
     static int16_t pcm[KWS_SAMPLE_RATE];
     static float feats[KWS_N_FRAMES][KWS_N_MFCC];
     static float probs[KWS_NUM_LABELS];
-    uint32_t cursor = audio_write_pos();
 
     for (;;) {
-        if (!s_active) { vTaskDelay(pdMS_TO_TICKS(50)); cursor = audio_write_pos(); stream_reset(&stream); continue; }
-        while (audio_write_pos() < cursor + kStepSamples) vTaskDelay(pdMS_TO_TICKS(5));
-        cursor += kStepSamples;
+        if (!s_active) { vTaskDelay(pdMS_TO_TICKS(50)); stream_reset(&stream); continue; }
+        vTaskDelay(pdMS_TO_TICKS(100));                    /* ~10 Hz cadence */
+        uint32_t end = audio_write_pos();
+        if (end < KWS_SAMPLE_RATE) continue;               /* need a full 1 s window (avoids ring underflow) */
         int64_t t0 = esp_timer_get_time();
-        audio_read(cursor, pcm, KWS_SAMPLE_RATE);          /* trailing 1 s window */
+        audio_read(end, pcm, KWS_SAMPLE_RATE);             /* always the freshest trailing 1 s */
         mfcc_compute(pcm, feats);                          /* one-shot; ponytail: streaming ring is a later optimisation */
         mfcc_quantize(feats, in->data.int8, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
-        assert(interp.Invoke() == kTfLiteOk);
+        if (interp.Invoke() != kTfLiteOk) { ESP_LOGE(TAG, "Invoke failed"); continue; }
         int best = 0;
         for (int i = 0; i < KWS_NUM_LABELS; i++) {
             probs[i] = (out->data.int8[i] - KWS_MODEL_OUTPUT_ZERO_POINT) * KWS_MODEL_OUTPUT_SCALE;
