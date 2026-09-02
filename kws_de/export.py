@@ -97,6 +97,45 @@ def write_metadata(path, labels=None) -> None:
         json.dump(meta, fh, indent=2, ensure_ascii=False)
 
 
+def assert_model_healthy(y_true, y_pred, *, min_accuracy=0.5, min_predicted_classes=10) -> dict:
+    """Refuse to ship a model that classifies at ~random or has collapsed onto a
+    handful of classes. A broken `command.keras` (mode-collapsed — ~random
+    accuracy even on its own training data, every input mapped to ~3 classes) was
+    once exported into the firmware header unnoticed and the on-device recogniser
+    produced near-uniform garbage. This gate turns that into a hard export-time
+    failure. Pure over (y_true, y_pred) so it is trivially testable."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    accuracy = float(np.mean(y_pred == y_true))
+    predicted_classes = int(np.unique(y_pred).size)
+    if accuracy < min_accuracy:
+        raise ValueError(
+            f"model accuracy {accuracy:.1%} is below the {min_accuracy:.0%} floor "
+            "— refusing to export a broken model"
+        )
+    if predicted_classes < min_predicted_classes:
+        raise ValueError(
+            f"model predicted only {predicted_classes} distinct classes (mode collapse) "
+            "— refusing to export"
+        )
+    return {"accuracy": accuracy, "predicted_classes": predicted_classes}
+
+
+def _tflite_predict(tflite: bytes, X) -> np.ndarray:  # pragma: no cover - needs tflite runtime
+    """Argmax class predictions of an INT8 tflite over feature rows `X`."""
+    itp = tf.lite.Interpreter(model_content=tflite)
+    itp.allocate_tensors()
+    inp, out = itp.get_input_details()[0], itp.get_output_details()[0]
+    scale, zp = inp["quantization"]
+    preds = np.empty(len(X), dtype=np.int64)
+    for i in range(len(X)):
+        q = np.round(X[i] / scale + zp).astype(np.int8).reshape(inp["shape"])
+        itp.set_tensor(inp["index"], q)
+        itp.invoke()
+        preds[i] = int(itp.get_tensor(out["index"])[0].argmax())
+    return preds
+
+
 def main() -> None:  # pragma: no cover - I/O wrapper
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(config.MODELS_DIR))
@@ -124,6 +163,15 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     write_metadata(out / ("command_metadata.json" if args.v2 else "metadata.json"), labels=labels)
     write_metadata(out / "metadata.json")
     if args.firmware:
+        # Never bake a broken model into the firmware: validate on held-out data
+        # before writing the device header. Skips only if the test split is absent.
+        test_path = config.DATA_DIR / f"{prefix}_test.npz"
+        if test_path.exists():
+            t = np.load(test_path)
+            h = assert_model_healthy(t["y"], _tflite_predict(blob, t["X"]))
+            print(f"model health: {h['accuracy']:.1%} accuracy, {h['predicted_classes']} classes")
+        else:
+            print(f"WARNING: {test_path.name} absent — skipping model-health gate")
         gen = pathlib.Path("firmware/main/gen")
         gen.mkdir(parents=True, exist_ok=True)
         write_c_array(blob, gen / "model_data.h")
