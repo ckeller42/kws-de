@@ -16,6 +16,9 @@ jobs:
           path: firmware
       - name: merge single flashable image
         run: |
+          # esp-idf-ci-action builds inside a container as root, so firmware/build
+          # comes back root-owned; hand it back before the host esptool step writes here.
+          sudo chown -R "$(id -u):$(id -g)" firmware/build
           pip install esptool
           cd firmware/build
           esptool.py --chip esp32s3 merge_bin -o "kws-de-fw-${GITHUB_SHA::7}.bin" @flash_args
@@ -31,10 +34,15 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5
         with: {python-version: "3.11"}
-      - run: pip install -e ".[dev]"
+      # The headers embed librosa/scipy-computed float tables (mel, DCT, window),
+      # so the check is only deterministic against the *locked* numpy/scipy/librosa
+      # that produced the committed files — pip's fresh resolve drifts in the last
+      # digits. uv sync --frozen replays uv.lock exactly.
+      - run: pip install uv
       - name: committed config-derived headers match kws-fwgen
         run: |
-          kws-fwgen --out /tmp/gen
+          uv sync --frozen
+          uv run kws-fwgen --out /tmp/gen
           for f in labels.h prompts.h features_config.h test_vectors.h; do
             diff -q "/tmp/gen/$f" "firmware/main/gen/$f"
           done
