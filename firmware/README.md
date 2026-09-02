@@ -4,12 +4,12 @@ Dual-mode firmware: guided speech recorder (words / sentences / negatives → WA
 
 ## ESP-IDF version
 
-Pinned to **IDF_TAG**. The same string lives in `CMakeLists.txt` and `.github/workflows/firmware.yml`; change all three together.
+Pinned to **v5.5.5**. The same string lives in `CMakeLists.txt` and `.github/workflows/firmware.yml`; change all three together.
 
 ## Build (no local IDF needed)
 
 ```bash
-docker run --rm -v "$PWD/firmware:/project" -w /project espressif/idf:IDF_TAG \
+docker run --rm -v "$PWD/firmware:/project" -w /project espressif/idf:v5.5.5 \
   bash -c 'idf.py set-target esp32s3 && idf.py build'
 ```
 
