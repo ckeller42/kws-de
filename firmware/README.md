@@ -87,6 +87,7 @@ Tap **USB** in record mode to expose `KWSREC`, then on the host:
 ```bash
 scripts/pull-recordings.sh                      # default: data/recordings
 KWSREC_MOUNT=/path/to/KWSREC scripts/pull-recordings.sh
+KWSREC_NO_EJECT=1 scripts/pull-recordings.sh    # keep the drive mounted
 ```
 
 It rsyncs each `spk*/` directory into `data/recordings/spkNN/...`,
@@ -103,7 +104,7 @@ inference time in ms, TFLite Micro arena bytes used, and a running fired
 count. Every firing is also appended to `/rec/recognise.log` on the
 device as `[Log] <ms> <word> <conf>` (`<ms>` is milliseconds since boot)
 — pulled off with the recordings and replayable through
-`kws_de.stream.StreamDetector` on the host.
+`kws_de.stream.KeywordStream` on the host.
 
 ## Regenerating headers
 
@@ -121,9 +122,9 @@ device as `[Log] <ms> <word> <conf>` (`<ms>` is milliseconds since boot)
 ## Manual test checklist
 
 On-device manual checklist: record 3 words + 1 sentence + 1 negative →
-USB → pull → `kws-recordings --list` shows them; toggle to Recognise →
-say "Licht" → word appears, inference < 30 ms; `recognise.log` replays
-through `stream.StreamDetector` with the same events.
+USB → pull → `column -s, -t < data/recordings/sessions.csv` lists them;
+toggle to Recognise → say "Licht" → word appears, inference < 30 ms;
+`recognise.log` replays through `stream.KeywordStream` with the same events.
 
 ## Pi note
 
