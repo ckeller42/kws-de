@@ -2,7 +2,7 @@
 
 ## What it does
 
-Dual-mode ESP-IDF app on the M5Stack CoreS3:
+Multi-mode ESP-IDF app on the M5Stack CoreS3:
 
 - **Record mode** — a guided speech recorder. It walks through a prompt set
   (word / sentence / negative), captures each take onto the device's flash
@@ -10,6 +10,9 @@ Dual-mode ESP-IDF app on the M5Stack CoreS3:
 - **Recognise mode** — an on-device keyword recogniser: mic → MFCC → the
   int8 TFLite Micro model → the same streaming detector logic as
   `kws_de.stream`, shown live on the LCD and logged to flash.
+- **Wake mode** — a "Hey Bus" wake-word test mode. It runs *only* the
+  microWakeWord streaming model, showing its live probability and flashing
+  the screen green plus a beep on every detection.
 - **USB mode** — exposes the on-flash recordings and the recognise log as a
   `KWSREC` FAT drive over USB so a host can pull them off.
 
@@ -29,8 +32,8 @@ idf.py set-target esp32s3
 idf.py build
 ```
 
-Host-only unit tests (`mfcc`, `stream`, `wav`, `prompts`; needs `cc` and
-nothing else): `make -C firmware/test`.
+Host-only unit tests (`mfcc`, `stream`, `wav`, `prompts`, `vad`,
+`wakefront`; needs `cc`/`c++` and nothing else): `make -C firmware/test`.
 
 The firmware is pinned to **ESP-IDF v5.5.5** (a newer esp_tinyusb needs an
 `esp_vfs_fat_register` signature that only lands in v6.x — untested here).
@@ -106,6 +109,30 @@ device as `[Log] <ms> <word> <conf>` (`<ms>` is milliseconds since boot)
 — pulled off with the recordings and replayable through
 `kws_de.stream.KeywordStream` on the host.
 
+## Wake test mode
+
+Tap **Wake** on the record screen. The screen shows "Hey Bus?", the live
+wake probability, and a fire counter; the command recogniser is switched
+off while this mode is active, so what you see is the wake model alone.
+
+- Audio path: mic → the TFLite-Micro audio front-end vendored under
+  `firmware/main/microfrontend/` (`wakefront.c`) → 40 int8 features per
+  10 ms → `models/hey_bus.tflite`, a *streaming* model invoked once per 3
+  feature rows (every 30 ms) with its state kept alive between calls.
+- The front-end parameters and the int8 requantisation are microWakeWord's
+  own; `firmware/test/test_wakefront.c` asserts the C rows are bit-identical
+  to `pymicro_features`' for a golden PCM vector.
+- Detection: probability ≥ 0.99 on 2 consecutive steps, then 1500 ms of
+  refractory so one spoken "Hey Bus" fires exactly once. All three are
+  `#define`d tunables at the top of `firmware/main/wake.h`.
+- On a fire the background goes green for 600 ms, the speaker plays a
+  150 ms 1 kHz tone, and a line `[Wake] <ms> <prob>` is appended to
+  `/rec/wake.log` (pulled off with the recordings in USB mode).
+- The speaker and the microphone share one full-duplex I2S channel pair, so
+  `beep.c` opens the speaker with the mic's exact format (16 kHz, 16-bit,
+  2 channels). A different rate would be rejected by `esp_codec_dev` and
+  would take capture down with it.
+
 ## Regenerating headers
 
 - After changing labels, prompts, MFCC config, or test vectors:
@@ -116,8 +143,15 @@ device as `[Log] <ms> <word> <conf>` (`<ms>` is milliseconds since boot)
   change.
 - After retraining or re-exporting the model:
   `uv run kws-export --v2 --firmware` — regenerates
-  `firmware/main/gen/{model_data,model_config}.h`. These are committed
-  as-is (not diff-gated) since they carry the trained weights.
+  `firmware/main/gen/{model_data,model_config}.h` and, when
+  `models/hey_bus.tflite` is present,
+  `firmware/main/gen/{wake_model_data,wake_model_config}.h`. These are
+  committed as-is (not diff-gated) since they carry the trained weights.
+- The wake front-end golden vector (`gen/wake_test_vectors.h`) comes from
+  `kws-fwgen` and needs the `wake` extra
+  (`uv sync --extra dev --extra tts --extra docs --extra wake`); without
+  `pymicro-features` installed the generator leaves the committed header
+  alone and `--check` skips it.
 
 ## Manual test checklist
 
@@ -125,6 +159,12 @@ On-device manual checklist: record 3 words + 1 sentence + 1 negative →
 USB → pull → `column -s, -t < data/recordings/sessions.csv` lists them;
 toggle to Recognise → say "Licht" → word appears, inference < 30 ms;
 `recognise.log` replays through `stream.KeywordStream` with the same events.
+
+Wake mode: tap **Wake** → the probability updates live and stays low on
+silence; say "Hey Bus" → the screen flashes green, the speaker beeps once,
+and the fire count rises by exactly one per utterance; say "Licht" and a
+few other words → no fire (nothing but the wake model is running); tap
+**Record** → `/rec/wake.log` has one `[Wake] <ms> <prob>` line per fire.
 
 ## Pi note
 

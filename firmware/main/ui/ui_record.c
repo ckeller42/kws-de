@@ -15,6 +15,7 @@ static lv_obj_t *scr, *l_set, *l_counter, *l_speaker, *l_prompt, *bar, *l_phase,
 
 static void on_cmd(lv_event_t *e) { record_post((record_cmd_t)(intptr_t)lv_event_get_user_data(e)); }
 static void on_mode_recognise(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_RECOGNISE); }
+static void on_mode_wake(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_WAKE); }
 static void on_mode_usb(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_USB); }
 
 static lv_obj_t *button(lv_obj_t *parent, const char *txt, lv_event_cb_t cb, void *ud, int x, int y, int w)
@@ -122,9 +123,12 @@ void ui_show_record(void)
     lv_obj_set_style_radius(l_phase, 8, 0);
     lv_obj_set_style_pad_all(l_phase, 6, 0);
     lv_obj_set_style_bg_opa(l_phase, LV_OPA_COVER, 0);
-    button(scr, "Redo", on_cmd, (void *)REC_CMD_REDO, 8, 152, 86);
-    button(scr, "Skip", on_cmd, (void *)REC_CMD_SKIP, 100, 152, 86);
-    b_next = button(scr, "Next", on_cmd, (void *)REC_CMD_NEXT, 226, 152, 86);
+    /* Row 1 re-laid to make room for Wake and still end at x=312 (the 320 px
+       screen minus the 8 px margin): 8+72 84+72 160+68 232+80. */
+    button(scr, "Redo", on_cmd, (void *)REC_CMD_REDO, 8, 152, 72);
+    button(scr, "Skip", on_cmd, (void *)REC_CMD_SKIP, 84, 152, 72);
+    button(scr, "Wake", on_mode_wake, NULL, 160, 152, 68);
+    b_next = button(scr, "Next", on_cmd, (void *)REC_CMD_NEXT, 232, 152, 80);
     button(scr, "Recog", on_mode_recognise, NULL, 8, 200, 60);
     button(scr, "USB", on_mode_usb, NULL, 72, 200, 48);
     button(scr, "+Spk", on_cmd, (void *)REC_CMD_NEW_SPEAKER, 124, 200, 54);

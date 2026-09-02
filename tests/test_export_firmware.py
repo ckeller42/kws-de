@@ -2,7 +2,12 @@ import numpy as np
 import pytest
 
 from kws_de import config
-from kws_de.export import assert_model_healthy, to_int8_tflite, write_model_config
+from kws_de.export import (
+    assert_model_healthy,
+    to_int8_tflite,
+    write_model_config,
+    write_wake_headers,
+)
 from kws_de.model import build_dscnn
 
 
@@ -43,3 +48,34 @@ def test_model_health_gate_catches_broken_models():
     # ~Random accuracy across all classes: fails the accuracy floor.
     with pytest.raises(ValueError, match="below"):
         assert_model_healthy(y, rng.integers(0, n, size=800))
+
+
+def test_write_wake_headers_emits_model_contract(tmp_path):
+    """The wake headers must carry the exact quantisation contract the firmware
+    compiles against. Uses the real microWakeWord export (it is not retrained
+    here, only read); skipped when the artifact is absent."""
+    model = config.MODELS_DIR / "hey_bus.tflite"
+    if not model.exists():
+        pytest.skip("models/hey_bus.tflite absent")
+    info = write_wake_headers(model, tmp_path)
+    assert info is not None
+
+    data = (tmp_path / "wake_model_data.h").read_text()
+    assert "g_wake_model[]" in data
+    assert f"g_wake_model_len = {model.stat().st_size}" in data
+
+    cfg = (tmp_path / "wake_model_config.h").read_text()
+    # [1, 3, 40] int8 spectrogram rows in, one uint8 probability out.
+    assert "#define KWS_WAKE_FRAMES 3" in cfg
+    assert "#define KWS_WAKE_FEATURES 40" in cfg
+    assert "#define KWS_WAKE_INPUT_ZERO_POINT -128" in cfg
+    # uint8 output quantised as q/256, so prob = q * 1/256 with zero_point 0.
+    assert "#define KWS_WAKE_OUTPUT_SCALE 3.90625000e-03f" in cfg
+    assert "#define KWS_WAKE_OUTPUT_ZERO_POINT 0" in cfg
+    assert info["arena_bytes"] % 4096 == 0
+    assert f"#define KWS_WAKE_ARENA_BYTES {info['arena_bytes']}" in cfg
+
+
+def test_write_wake_headers_skips_a_missing_model(tmp_path):
+    assert write_wake_headers(tmp_path / "nope.tflite", tmp_path) is None
+    assert not list(tmp_path.iterdir())

@@ -445,6 +445,25 @@ the recogniser was moved below the LVGL task priority so touch stays responsive 
 inference. Firmware headers now carry Doxygen docs; requirements are traced to tests with
 sphinx-needs (see `docs/sphinx`).
 
+### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
+
+Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the
+wake stage can be measured on hardware without the command recogniser confounding it. The
+interesting engineering point for the paper: microWakeWord's accuracy is only reproducible
+on-device if the *feature front-end* matches training bit-for-bit, and that front-end is not
+the librosa MFCC the command model uses — it is TFLite-Micro's fixed-point 40-channel
+microfrontend (30 ms window, 10 ms step, 125–7500 Hz, PCAN on, log scaling), followed by an
+integer requantisation `int8 = (v * 256 + 333) / 666 - 128` that folds training's historical
+÷25.6 float scaling into the model's 0…26 → −128…127 int8 range. Rather than reimplement it,
+we vendored the same C the trainer's Python bindings compile and gated it with a host parity
+test: 98 × 40 int8 feature values against a `pymicro-features` golden vector, **max deviation
+0 LSB (exact)**. The streaming graph itself is stateful (resource variables), so the
+interpreter is created once and invoked every 3 rows (30 ms), with variables reset on mode
+entry. Detection is threshold 0.99 × 2 consecutive steps + 1500 ms refractory, confirmed by a
+green screen flash and a beep — the beep forced a hardware finding worth a footnote: the
+CoreS3's mic and amplifier share one full-duplex I2S channel pair, so the speaker can only be
+opened at the microphone's exact sample rate or capture dies.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

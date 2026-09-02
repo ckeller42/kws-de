@@ -1251,6 +1251,9 @@ train = [
 tts = [
     { name = "piper-tts" },
 ]
+wake = [
+    { name = "pymicro-features" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1260,6 +1263,7 @@ requires-dist = [
     { name = "microwakeword", marker = "extra == 'train'", git = "https://github.com/kahrendt/microWakeWord" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "piper-tts", marker = "extra == 'tts'", specifier = ">=1.2" },
+    { name = "pymicro-features", marker = "extra == 'wake'", specifier = ">=2.0.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.5" },
     { name = "soundfile", specifier = ">=0.12" },
@@ -1269,7 +1273,7 @@ requires-dist = [
     { name = "tensorflow-metal", marker = "extra == 'metal'", specifier = ">=1.1" },
     { name = "tqdm", specifier = ">=4.66" },
 ]
-provides-extras = ["dev", "metal", "tts", "train", "docs"]
+provides-extras = ["dev", "metal", "tts", "train", "docs", "wake"]
 
 [[package]]
 name = "lazy-loader"
