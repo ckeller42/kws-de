@@ -61,9 +61,11 @@ Recorder
    :id: REQ_FW_RECORD_TWO_TAKES
    :status: implemented
 
-   The recorder captures ``TAKES_PER_PROMPT`` = 2 reads of each prompt
-   before advancing, so a bad first read can be reviewed/redone without
-   losing the second.
+   ``prompt_takes_per_prompt`` (``firmware/main/prompts.c``) returns 2 reads
+   per prompt for the word/sentence/negative sets before advancing, so a bad
+   first read can be reviewed/redone without losing the second. (The
+   "Hey Bus" wake set is the one exception — see
+   :need:`REQ_FW_RECORD_WAKE_SET`.)
 
 .. req:: Recording time caps
    :id: REQ_FW_RECORD_CAPS
@@ -126,6 +128,20 @@ Recorder
    set with a 32-bit xorshift PRNG seeded from a per-session seed shown on
    screen (``seed 17``); the same seed always reproduces the same order, so
    a session is fully reconstructible from ``session.csv``.
+
+.. req:: Guided recorder can capture a wake-word-only session
+   :id: REQ_FW_RECORD_WAKE_SET
+   :status: implemented
+
+   The generated ``PROMPT_WAKE`` set is ``config.WAKE_WORD`` ("Hey Bus")
+   repeated ``config.WAKE_PROMPT_REPEATS`` (5) times, set name ``wake``
+   (``prompt_set_name``); ``prompt_takes_per_prompt(PROMPT_WAKE)`` returns 1
+   (not 2), so a session prompts exactly 5 single-take "Hey Bus" reads
+   before finishing straight to ``REC_SESSION_DONE`` — no
+   sentence/negative sets chained on, unlike the normal guided session.
+   Takes save under ``spkNN/hey-bus/NNN.wav``, same as the isolated-word
+   set, and each ``session.csv`` row uses the same
+   ``prompt,file,ms,peak_dbfs,set,seed,ts`` shape with ``set`` = ``wake``.
 
 .. req:: Negative prompts contain no command vocabulary
    :id: REQ_FW_NEGATIVE_PROMPTS
@@ -276,11 +292,12 @@ Selection menu and remote control
    :id: REQ_FW_MENU_FLOW
    :status: implemented
 
-   ``app_main`` boots into ``UI_MODE_MENU`` (``ui_show_menu()``), a 2x2
-   grid of four buttons — Recognition, Hey Bus, Record, USB — each a
-   direct ``app_set_mode()`` call. Every other screen's back/abort button
-   (record, recognise, wake, USB) calls ``app_set_mode(UI_MODE_MENU)``,
-   so the menu is the only hub: no mode links directly to another mode.
+   ``app_main`` boots into ``UI_MODE_MENU`` (``ui_show_menu()``), a column
+   of five buttons — Recognition, Hey Bus, Record, Hey Bus aufnehmen, USB —
+   each a direct ``app_set_mode()`` call. Every other screen's back/abort
+   button (record, record-wake, recognise, wake, USB) calls
+   ``app_set_mode(UI_MODE_MENU)``, so the menu is the only hub: no mode
+   links directly to another mode.
 
 .. req:: Entering Record always starts a fresh guided session
    :id: REQ_FW_RECORD_SESSION
@@ -296,7 +313,9 @@ Selection menu and remote control
    (``ui_show_success``). Aborting mid-session (Abbrechen) instead posts
    ``REC_CMD_PAUSE`` and returns straight to the menu — no success
    screen. ``PROMPT_WORDS`` remains in the code but is not reachable from
-   this flow.
+   this flow. ``app_set_mode(UI_MODE_RECORD_WAKE)`` posts
+   ``REC_CMD_START_WAKE_SESSION`` instead, the "Hey Bus"-only variant — see
+   :need:`REQ_FW_RECORD_WAKE_SET`.
 
 .. req:: The device accepts remote mode/status commands over the serial console
    :id: REQ_FW_REMOTE_MODE
@@ -304,11 +323,12 @@ Selection menu and remote control
 
    ``console.c`` reads newline-terminated commands from ``stdin`` (the
    UART console) in a low-priority task: ``mode
-   menu|record|recognise|wake|usb`` calls ``app_set_mode()``; ``status``
-   reports the current mode and, in record mode, the recorder's
-   phase/index/count/speaker. Every command ends with an ``ok`` or ``err
-   <reason>`` line, so a host script driving the device (e.g. ``echo
-   'mode usb' > /dev/cu.usbmodemNNN``) can tell when a command finished.
+   menu|record|recordwake|recognise|wake|usb`` calls ``app_set_mode()``;
+   ``status`` reports the current mode and, in record/record-wake mode,
+   the recorder's phase/index/count/speaker. Every command ends with an
+   ``ok`` or ``err <reason>`` line, so a host script driving the device
+   (e.g. ``echo 'mode usb' > /dev/cu.usbmodemNNN``) can tell when a
+   command finished.
 
 Build / CI
 ----------
