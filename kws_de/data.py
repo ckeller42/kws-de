@@ -24,7 +24,43 @@ def recordings_root() -> Path:
     return approved if approved.is_dir() else config.DATA_DIR / "recordings"
 
 
-def negative_windows(root: Path, rng) -> list[tuple[np.ndarray, str]]:
+def merge_recordings(clips_ws: dict, root: Path | None = None) -> dict[str, int]:
+    """Fold the QC-approved device recordings into a cached clip dict — on EVERY
+    build, not just the one that created the cache. QC output changes between
+    builds (a new session is ingested and approved); the cached MSWC/TTS clips do
+    not, so the recordings are re-read here instead of being baked into the
+    pickle. Previous ``rec:`` entries are dropped first, so a re-build replaces
+    them rather than duplicating them.
+
+    `root` is the recordings directory (default ``config.DATA_DIR/"recordings"``);
+    approved word clips under ``approved/words/<label>/`` become clips of speaker
+    ``rec:<spk>`` for that label, approved negatives become ``_unknown_`` material
+    via `negative_windows`. No-op returning ``{}`` when the approved tree is
+    absent, which keeps v1/v2 builds byte-identical. Returns {label: n merged}."""
+    from kws_de.recordings import load_recordings
+
+    root = Path(root) if root is not None else config.DATA_DIR / "recordings"
+    words_dir = root / "approved" / "words"
+    if not words_dir.is_dir():
+        return {}
+    for lbl, items in clips_ws.items():
+        clips_ws[lbl] = [(c, s) for c, s in items if not s.startswith("rec:")]
+    labels = sorted(d.name for d in words_dir.iterdir() if d.is_dir())
+    merged: dict[str, int] = {}
+    for w, items in load_recordings(words_dir, labels).items():
+        if items:
+            clips_ws.setdefault(w, []).extend(items)
+            merged[w] = len(items)
+    neg_root = root / "approved" / "negatives"
+    if neg_root.is_dir():
+        wins = negative_windows(neg_root)
+        if wins:
+            clips_ws.setdefault("_unknown_", []).extend(wins)
+            merged["_unknown_"] = len(wins)
+    return merged
+
+
+def negative_windows(root: Path) -> list[tuple[np.ndarray, str]]:
     """1 s windows at 1 s hops from every approved negative phrase -> `_unknown_` material,
     speaker id `rec:<spk>` so speaker-disjoint splitting treats them like other real clips.
     A file at the wrong sample rate, or shorter than one window, is skipped with a warning
@@ -379,13 +415,11 @@ def _fetch_and_cache(
             from kws_de.recordings import load_recordings
 
             clips = mine(mswc_root, words, n_per_word=n_per_word, n_unknown=n_unknown)
-            for w, items in load_recordings(recordings_root(), words).items():
-                clips[w].extend(items)
-            neg_root = config.DATA_DIR / "recordings" / "approved" / "negatives"
-            if neg_root.is_dir():
-                clips.setdefault("_unknown_", []).extend(
-                    negative_windows(neg_root, np.random.default_rng(0))
-                )
+            # legacy hand-dropped layout only; the QC-approved tree is merged on every
+            # build by `merge_recordings`, never baked into the cache.
+            if not (config.DATA_DIR / "recordings" / "approved" / "words").is_dir():
+                for w, items in load_recordings(recordings_root(), words).items():
+                    clips[w].extend(items)
             scanned = "mswc-tarball"
         else:
             clips, scanned = _fetch_mswc(words, n_per_word, n_unknown, safety_cap)
@@ -644,6 +678,10 @@ def _build_and_split(
         with open(config.DATA_DIR / cache_name, "wb") as fh:
             pickle.dump(cached, fh)
         print(f"[tts] added: {tts_added}")
+    # after the cache is persisted: device recordings are re-read every build, never cached
+    merged = merge_recordings(clips_with_speakers)
+    if merged:
+        print(f"[recordings] merged: {merged}")
 
     snrs = (20, 10, 0)
     train_ws, test_ws = split_by_speaker(clips_with_speakers, rng, test_frac, keep_speaker=True)
