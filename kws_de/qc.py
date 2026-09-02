@@ -229,11 +229,6 @@ def segment_word(sig: np.ndarray, sr: int, start_s: float, end_s: float) -> np.n
     return out
 
 
-def _take_no(path: Path) -> str:
-    m = re.search(r"(\d{3})\.wav$", path.name)
-    return m.group(1) if m else "001"
-
-
 def _slug_of(path: Path) -> str:
     return re.sub(r"_\d{3}\.wav$", "", path.name)
 
@@ -259,17 +254,18 @@ def _clear_stamp(approved: Path, qc_dir: Path) -> None:
                 _append_index(idx, r)
 
 
-def _next_word_no(approved: Path, label: str, speaker: str) -> str:
-    """Next-free <NNN> for approved/words/<label>/<speaker>_<NNN>.wav, scanning
-    the label dir for this speaker's existing takes. Independent of the source
-    take number, so a bare word take and a phrase-segmented word can never
-    collide on the same output path.
-    ponytail: rescans the dir on every call (O(files-in-dir) per word write);
-    fine at recording-pipeline volumes — cache per (label, speaker) within a
-    run if this shows up in profiling."""
-    d = approved / "words" / label
-    pat = re.compile(rf"{re.escape(speaker)}_(\d+)\.wav$")
-    nums = [int(m.group(1)) for f in d.glob(f"{speaker}_*.wav") if (m := pat.match(f.name))]
+def _next_no(d: Path, prefix: str) -> str:
+    """Next-free <NNN> for '<prefix>_<NNN>.wav' inside dir d, scanning what's
+    already there. Independent of the source take number, so different write
+    sources (bare word vs. phrase-segmented word) or different sessions
+    (stamps) for the same speaker/slug/label can never collide on one path.
+    Used for approved/words/<label>/<speaker>_<NNN>.wav (prefix=speaker) and
+    approved/{phrases,negatives}/<speaker>/<slug>_<NNN>.wav (prefix=slug).
+    ponytail: rescans the dir on every call (O(files-in-dir) per write); fine
+    at recording-pipeline volumes — cache per (d, prefix) within a run if this
+    shows up in profiling."""
+    pat = re.compile(rf"{re.escape(prefix)}_(\d+)\.wav$")
+    nums = [int(m.group(1)) for f in d.glob(f"{prefix}_*.wav") if (m := pat.match(f.name))]
     return f"{(max(nums) + 1) if nums else 1:03d}"
 
 
@@ -295,19 +291,14 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         rows.append(row)
         if row.verdict != "approve":
             continue
-        no = _take_no(t.file)
         if t.set == "words":
             tok = required_tokens(t.prompt, "words")[0]
             lab = label_for_token(tok)
             if lab is None:  # unmapped token: reject filing, don't mislabel
                 n_skipped += 1
                 continue
-            dst = (
-                approved
-                / "words"
-                / lab
-                / f"{t.speaker}_{_next_word_no(approved, lab, t.speaker)}.wav"
-            )
+            d = approved / "words" / lab
+            dst = d / f"{t.speaker}_{_next_no(d, t.speaker)}.wav"
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(t.file.read_bytes())
             written.append(str(dst.relative_to(approved)))
@@ -315,7 +306,9 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         elif t.set == "sentences":
             sig, sr = sf.read(t.file, dtype="float32", always_2d=True)
             sig = sig[:, 0]
-            dst = approved / "phrases" / t.speaker / f"{_slug_of(t.file)}_{no}.wav"
+            slug = _slug_of(t.file)
+            d = approved / "phrases" / t.speaker
+            dst = d / f"{slug}_{_next_no(d, slug)}.wav"
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(t.file.read_bytes())
             written.append(str(dst.relative_to(approved)))
@@ -343,12 +336,8 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 if lab is None:  # unmapped token: skip this clip, don't mislabel
                     n_skipped += 1
                     continue
-                out = (
-                    approved
-                    / "words"
-                    / lab
-                    / f"{t.speaker}_{_next_word_no(approved, lab, t.speaker)}.wav"
-                )
+                wd = approved / "words" / lab
+                out = wd / f"{t.speaker}_{_next_no(wd, t.speaker)}.wav"
                 out.parent.mkdir(parents=True, exist_ok=True)
                 sf.write(out, segment_word(sig, sr, s, e), sr, subtype="PCM_16")
                 written.append(str(out.relative_to(approved)))
@@ -364,7 +353,9 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 )
                 n_words += 1
         else:
-            dst = approved / "negatives" / t.speaker / f"{_slug_of(t.file)}_{no}.wav"
+            slug = _slug_of(t.file)
+            d = approved / "negatives" / t.speaker
+            dst = d / f"{slug}_{_next_no(d, slug)}.wav"
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(t.file.read_bytes())
             written.append(str(dst.relative_to(approved)))

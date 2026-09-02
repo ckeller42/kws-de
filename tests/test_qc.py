@@ -191,11 +191,16 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
 
 
 def test_run_qc_two_stamps_same_speaker_dont_alias_or_duplicate(tmp_path):
+    # each stamp also records the SAME phrase (same prompt/slug, same take number) ->
+    # phrases/negatives must be as collision-proof across stamps as words are.
     def sessions(inc: Path, take_no: str):
         _wav(inc / "spk02" / "licht" / f"{take_no}.wav", _tone())
+        _wav(inc / "spk02" / "_phrase_" / f"licht-kueche-an_{take_no}.wav", _tone(ms=1500))
         (inc / "sessions.csv").write_text(
             "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
             f"spk02,t,Licht,spk02/licht/{take_no}.wav,800,-10,words,1,1\n"
+            f"spk02,t,Licht Küche an,spk02/_phrase_/licht-kueche-an_{take_no}.wav,"
+            "1500,-10,sentences,1,2\n"
         )
 
     inc1, inc2 = tmp_path / "incoming" / "s1", tmp_path / "incoming" / "s2"
@@ -204,22 +209,41 @@ def test_run_qc_two_stamps_same_speaker_dont_alias_or_duplicate(tmp_path):
     qcd1, qcd2, appr = tmp_path / "qc" / "s1", tmp_path / "qc" / "s2", tmp_path / "approved"
 
     def transcriber(p: Path):
+        # empty word spans -> content gate still approves the phrase (text matches),
+        # but no word segmentation happens; keeps this test focused on the phrase
+        # copy + index row, not on word-clip segmentation (covered elsewhere).
+        if "_phrase_" in str(p):
+            return {"text": "Licht Küche an", "words": []}
         return {"text": "Licht", "words": []}
 
     c1 = qc.run_qc(inc1, qcd1, appr, transcriber)
     c2 = qc.run_qc(inc2, qcd2, appr, transcriber)
     assert c1["words_written"] == c2["words_written"] == 1
     licht = appr / "words" / "Licht"
-    assert len(list(licht.glob("*.wav"))) == 2  # both stamps' clips coexist
+    assert len(list(licht.glob("*.wav"))) == 2  # both stamps' word clips coexist
+    phrases = appr / "phrases" / "spk02"
+    assert len(list(phrases.glob("*.wav"))) == 2  # both stamps' phrase clips coexist
+    idx_path = appr / "phrases" / "index.csv"
+    assert len(list(csv.DictReader(idx_path.open()))) == 2
 
     # re-running stamp s1 alone must not touch s2's approved output
     before_s2 = {f.name: f.read_bytes() for f in licht.glob("spk02_*.wav")}
+    before_phrase_s2 = {f.name: f.read_bytes() for f in phrases.glob("*.wav")}
+    idx_before = {r["file"] for r in csv.DictReader(idx_path.open())}
+
     c1_again = qc.run_qc(inc1, qcd1, appr, transcriber)
     assert c1_again["words_written"] == 1
     assert len(list(licht.glob("*.wav"))) == 2  # s1's old clip replaced, not added
     survivors = {f.name: f.read_bytes() for f in licht.glob("spk02_*.wav")}
     # at least one file from before the re-run is untouched (s2's)
     assert set(before_s2.items()) & set(survivors.items())
+
+    assert len(list(phrases.glob("*.wav"))) == 2  # s1's old phrase replaced, not added
+    survivors_phrase = {f.name: f.read_bytes() for f in phrases.glob("*.wav")}
+    assert set(before_phrase_s2.items()) & set(survivors_phrase.items())  # s2's phrase intact
+    idx_after = {r["file"] for r in csv.DictReader(idx_path.open())}
+    assert len(idx_after) == 2
+    assert idx_before & idx_after  # s2's index row survived unchanged
 
 
 def test_run_qc_unmapped_word_token_is_skipped_not_mislabelled(tmp_path):
