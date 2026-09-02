@@ -13,7 +13,7 @@ static lv_obj_t *scr, *l_prob, *l_stats;
 static uint32_t s_last_fire;      /* fired_at_ms of the fire we are already showing */
 static uint32_t s_flash_until;    /* lv_tick when the green flash ends, 0 = not flashing */
 
-static void on_back(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_RECORD); }
+static void on_back(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_MENU); }
 
 void ui_show_wake(void)
 {
@@ -45,7 +45,7 @@ void ui_show_wake(void)
     lv_obj_align(b, LV_ALIGN_BOTTOM_MID, 0, -16);
     lv_obj_add_event_cb(b, on_back, LV_EVENT_CLICKED, NULL);
     lv_obj_t *bl = lv_label_create(b);
-    lv_label_set_text(bl, "Record");
+    lv_label_set_text(bl, "Menu");
     lv_obj_center(bl);
 
     lv_screen_load(scr);

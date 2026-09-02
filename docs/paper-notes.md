@@ -464,6 +464,13 @@ green screen flash and a beep — the beep forced a hardware finding worth a foo
 CoreS3's mic and amplifier share one full-duplex I2S channel pair, so the speaker can only be
 opened at the microphone's exact sample rate or capture dies.
 
+Follow-up (same branch): the four modes (Record/Recognise/Wake/USB) were restructured behind
+one selection screen — every mode's back button now returns to it instead of chaining to
+Record — and the guided recorder became a single automatic session (new speaker → sentences
+→ negatives → a "takes saved" summary), removing seven manual set/next/redo buttons from the
+record screen. A serial console (`mode <name>`/`status` over the same USB-serial port) lets a
+host script drive mode switches for unattended data-ingest runs.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

@@ -9,7 +9,7 @@
 LV_FONT_DECLARE(font_prompt_28);
 
 static lv_obj_t *l_word, *l_stats;
-static void on_back(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_RECORD); }
+static void on_back(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_MENU); }
 
 void ui_show_recognise(void)
 {
@@ -24,7 +24,7 @@ void ui_show_recognise(void)
     lv_obj_t *b = lv_button_create(scr);
     lv_obj_set_size(b, 120, 44); lv_obj_align(b, LV_ALIGN_BOTTOM_MID, 0, -16);
     lv_obj_add_event_cb(b, on_back, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *bl = lv_label_create(b); lv_label_set_text(bl, "Record"); lv_obj_center(bl);
+    lv_obj_t *bl = lv_label_create(b); lv_label_set_text(bl, "Menu"); lv_obj_center(bl);
     lv_screen_load(scr);
     bsp_display_unlock();
 }

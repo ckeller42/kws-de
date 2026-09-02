@@ -1,6 +1,6 @@
 /**
  * @file ui.h
- * @brief LVGL-based UI: record / USB-drive / recognise / wake screens.
+ * @brief LVGL-based UI: selection menu / record / USB-drive / recognise / wake screens.
  */
 #pragma once
 #include "record.h"
@@ -13,10 +13,15 @@ extern "C" {
 
 /** @brief Build the UI. Call after bsp_display_start(). */
 void ui_init(void);
+/** @brief Switch the display to the mode-selection menu (the app's home screen). */
+void ui_show_menu(void);
 /** @brief Switch the display to the record screen. */
 void ui_show_record(void);
-/** @brief Refresh the record screen from a status snapshot. Called from the record task; takes bsp_display_lock. */
+/** @brief Refresh the record screen from a status snapshot. Called from the record task; takes bsp_display_lock.
+ * When @p st reports REC_SESSION_DONE this shows the success screen instead (see ui_show_success()). */
 void ui_record_refresh(const record_status_t *st);
+/** @brief Switch the display to the session-complete success screen. Called by ui_record_refresh(). */
+void ui_show_success(const char *speaker, int saved_takes);
 /** @brief Switch the display to the USB-drive screen. */
 void ui_show_usb(void);
 /** @brief Switch the display to the recognise screen. */
@@ -29,9 +34,11 @@ void ui_show_wake(void);
 void ui_wake_refresh(const wake_status_t *st);
 
 /** @brief Top-level app mode, one screen/consumer task active at a time. */
-typedef enum { UI_MODE_RECORD, UI_MODE_USB, UI_MODE_RECOGNISE, UI_MODE_WAKE } ui_mode_t;
+typedef enum { UI_MODE_RECORD, UI_MODE_USB, UI_MODE_RECOGNISE, UI_MODE_WAKE, UI_MODE_MENU } ui_mode_t;
 /** @brief Switch app mode. Defined in main.c; the only place that suspends/resumes consumer tasks. */
 void app_set_mode(ui_mode_t m);
+/** @brief Current app mode. Defined in main.c; used by the serial console's `status` command. */
+ui_mode_t app_get_mode(void);
 
 #ifdef __cplusplus
 }

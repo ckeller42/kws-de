@@ -269,6 +269,47 @@ Wake word ("Hey Bus")
    what the wake screen reports is the wake model's behaviour and nothing
    else's.
 
+Selection menu and remote control
+----------------------------------
+
+.. req:: Every mode is reached from, and returns to, one selection menu
+   :id: REQ_FW_MENU_FLOW
+   :status: implemented
+
+   ``app_main`` boots into ``UI_MODE_MENU`` (``ui_show_menu()``), a 2x2
+   grid of four buttons — Recognition, Hey Bus, Record, USB — each a
+   direct ``app_set_mode()`` call. Every other screen's back/abort button
+   (record, recognise, wake, USB) calls ``app_set_mode(UI_MODE_MENU)``,
+   so the menu is the only hub: no mode links directly to another mode.
+
+.. req:: Entering Record always starts a fresh guided session
+   :id: REQ_FW_RECORD_SESSION
+   :status: implemented
+
+   ``app_set_mode(UI_MODE_RECORD)`` posts ``REC_CMD_START_SESSION``,
+   which bumps the speaker id (``nvs_bump_speaker``) and starts the
+   sentence set. On ``REC_DONE`` the recorder auto-chains: sentences
+   completing re-seeds the negative set and continues; negatives
+   completing sets ``REC_SESSION_DONE`` (with a running
+   ``saved_takes`` count in ``record_status_t``), which
+   ``ui_record_refresh()`` turns into the success screen
+   (``ui_show_success``). Aborting mid-session (Abbrechen) instead posts
+   ``REC_CMD_PAUSE`` and returns straight to the menu — no success
+   screen. ``PROMPT_WORDS`` remains in the code but is not reachable from
+   this flow.
+
+.. req:: The device accepts remote mode/status commands over the serial console
+   :id: REQ_FW_REMOTE_MODE
+   :status: implemented
+
+   ``console.c`` reads newline-terminated commands from ``stdin`` (the
+   UART console) in a low-priority task: ``mode
+   menu|record|recognise|wake|usb`` calls ``app_set_mode()``; ``status``
+   reports the current mode and, in record mode, the recorder's
+   phase/index/count/speaker. Every command ends with an ``ok`` or ``err
+   <reason>`` line, so a host script driving the device (e.g. ``echo
+   'mode usb' > /dev/cu.usbmodemNNN``) can tell when a command finished.
+
 Build / CI
 ----------
 

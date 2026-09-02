@@ -235,9 +235,28 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    say "Hey Bus" → the screen flashes green, the speaker beeps once, and
    the fire count goes up by exactly one per utterance; other words
    (including command words like "Licht") do not fire, confirming no
-   command recognition is running; tap **Record** to leave → ``/rec/wake.log``
-   carries one ``[Wake] <ms> <prob>`` line per fire. Run by hand on real
-   M5Stack CoreS3 hardware; not automated.
+   command recognition is running; tap **Menu** to leave → back in Record
+   mode, ``/rec/wake.log`` carries one ``[Wake] <ms> <prob>`` line per
+   fire. Run by hand on real M5Stack CoreS3 hardware; not automated.
+
+.. test:: Selection-menu flow, guided session auto-chain, and remote control
+   :id: TEST_MANUAL_MENU_FLOW
+   :status: manual
+   :links: REQ_FW_MENU_FLOW, REQ_FW_RECORD_SESSION, REQ_FW_REMOTE_MODE
+
+   ``firmware/README.md`` "Manual test checklist": device boots to the
+   4-button menu; each of Recognition/Hey Bus/Record/USB opens its
+   screen, and that screen's back button (Abbrechen on Record) returns to
+   the menu; tapping **Record** bumps the speaker id and starts the
+   sentence set, completing it auto-chains into the negative set without
+   any button press, and completing negatives shows "Fertig - danke!"
+   with the speaker id and a saved-take count, whose **Menu** button
+   returns to the selection menu; aborting mid-session instead returns
+   straight to the menu with no success screen. Separately, over the
+   serial console: ``echo 'mode wake' > /dev/cu.usbmodemNNN`` switches
+   the device to wake mode and ``echo 'status'`` reports it; ``mode
+   record`` then ``status`` reports the recorder's phase/index/speaker.
+   Run by hand on real M5Stack CoreS3 hardware; not automated.
 
 .. note::
 
