@@ -445,6 +445,20 @@ the recogniser was moved below the LVGL task priority so touch stays responsive 
 inference. Firmware headers now carry Doxygen docs; requirements are traced to tests with
 sphinx-needs (see `docs/sphinx`).
 
+**Streaming front-end (2026-09-02, perf/streaming-mfcc).** The recogniser recomputed all 49
+MFCC frames of the trailing second every step; it now keeps a persistent 49-frame log-mel ring
+and pushes only the frames that arrived since the last step. Measured on the CoreS3 (`-O2`):
+**1001 ms → 173 ms per step** (5.8×). The residual is the naive 480-point DFT at ~12 ms per
+frame — with a ~270 ms loop period that is still ~14 new frames per step — so the next lever is
+an exact 480-point mixed-radix FFT (kissfft, being vendored for the wake-word front-end), which
+should bring a step to ~10 ms and make the on-device recogniser genuinely real-time.
+
+**Data provenance housekeeping (2026-09-02).** All datasets and models now live under one
+`KWS_DATA_ROOT` on the external SSD, shared by every worktree, with immutable per-version
+snapshots in `archive/<version>/` (v2 = the frozen 20 116 / 4 101 / 4 042 set + manifest +
+the models and E9/E10 report). The paper's provenance table regenerates from a snapshot, and
+the device-recording ingest gets a canonical home (`data/recordings/`) for the v3 build.
+
 ### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
 
 Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the
@@ -470,6 +484,17 @@ Record — and the guided recorder became a single automatic session (new speake
 → negatives → a "takes saved" summary), removing seven manual set/next/redo buttons from the
 record screen. A serial console (`mode <name>`/`status` over the same USB-serial port) lets a
 host script drive mode switches for unattended data-ingest runs.
+
+**Wake model root cause (2026-09-02, on-device).** First hardware test of the isolated wake mode:
+the model never fired on a real speaker (per-2 s peak probability 0.00–0.13 while saying "Hey
+Bus"), although the front-end is bit-exact. A host probe through the identical int8 feature path
+explains it: the model outputs ≥ 0.99 for *any* Piper sentence in its training voice ("hallo wie
+geht es dir": 62 steps ≥ 0.99, "licht küche an": 73) and ≈ 0.004 for "hey bus" in unseen Piper
+voices. With all positives synthetic and all negatives real recordings, the cheapest separating
+feature was TTS-vs-real, not the phrase — a shortcut the held-out metrics (71.65 % recall on the
+same synthetic distribution) could not reveal. Fix in progress: TTS hard negatives (near-misses,
+the command vocabulary, everyday sentences) generated with the same voices, a wider speaker
+spread, and reverb augmentation; the probe with unseen voices is the acceptance test.
 
 ## Open questions
 
