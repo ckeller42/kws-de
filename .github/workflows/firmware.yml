@@ -38,3 +38,8 @@ jobs:
           for f in labels.h prompts.h features_config.h test_vectors.h; do
             diff -q "/tmp/gen/$f" "firmware/main/gen/$f"
           done
+  host-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - run: make -C firmware/test
