@@ -127,6 +127,16 @@ static void wake_task(void *)
             }
 
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            /* Tuning trace: the peak probability of the last 2 s, so the serial
+               log alone shows whether the model *hears* the phrase (peak near 1)
+               or the threshold/consecutive gate is what stops it firing. */
+            static float peak = 0; static uint32_t nsteps = 0, last_trace = 0;
+            if (prob > peak) peak = prob;
+            nsteps++;
+            if (now_ms - last_trace >= 2000) {
+                ESP_LOGI(TAG, "peak %.3f over %lu steps, %lu ms/step", (double)peak, (unsigned long)nsteps, (unsigned long)ms);
+                peak = 0; nsteps = 0; last_trace = now_ms;
+            }
             xSemaphoreTake(s_lock, portMAX_DELAY);
             s_st.prob = prob;
             s_st.infer_ms = ms;
