@@ -1,7 +1,10 @@
 import csv
+import importlib.util
+import shutil
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from kws_de import config, qc
@@ -295,3 +298,26 @@ def test_run_qc_segmentation_gap_reported_when_word_spans_miss_a_token(tmp_path)
     report = (qcd / "report.md").read_text()
     assert "## Segmentation gaps" in report
     assert "licht-kueche-an_001.wav" in report.split("## Segmentation gaps")[1]
+
+
+def test_cli_dry_run_lists_takes_without_model(tmp_path, capsys, monkeypatch):
+    inc = tmp_path / "incoming" / "s2"
+    _wav(inc / "spk03" / "licht" / "001.wav", _tone())
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        "spk03,t,Licht,spk03/licht/001.wav,800,-10,words,1,1\n"
+    )
+    monkeypatch.setattr("sys.argv", ["kws-qc", str(inc), "--dry-run"])
+    qc.main()
+    out = capsys.readouterr().out
+    assert "1 takes" in out and "licht/001.wav" in out
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("mlx_whisper") is None or shutil.which("ffmpeg") is None,
+    reason="mlx-whisper (and its ffmpeg dependency) not available",
+)
+def test_whisper_transcriber_smoke(tmp_path):
+    tr = qc.whisper_transcriber("mlx-community/whisper-tiny-mlx")  # tiny: quick smoke only
+    out = tr(_wav(tmp_path / "t.wav", _tone(ms=1200)))
+    assert set(out) >= {"text", "words"}

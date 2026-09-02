@@ -399,3 +399,62 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         "words_written": n_words,
         "words_skipped": n_skipped,
     }
+
+
+def whisper_transcriber(
+    model_id: str = "mlx-community/whisper-large-v3-mlx",
+) -> Transcriber:  # pragma: no cover - model
+    import mlx_whisper
+
+    def transcribe(path: Path) -> Transcript:
+        r = mlx_whisper.transcribe(
+            str(path),
+            path_or_hf_repo=model_id,
+            language="de",
+            word_timestamps=True,
+            temperature=0.0,
+        )
+        words = [
+            {"word": w["word"].strip(), "start": float(w["start"]), "end": float(w["end"])}
+            for seg in r.get("segments", [])
+            for w in seg.get("words", [])
+        ]
+        return {"text": r.get("text", ""), "words": words}
+
+    return transcribe
+
+
+def main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="kws-qc", description="quality-control a pulled recording session"
+    )
+    ap.add_argument("incoming")
+    ap.add_argument("--model", default="mlx-community/whisper-large-v3-mlx")
+    ap.add_argument(
+        "--out", default=None, help="qc dir (default data/recordings/qc/<incoming name>)"
+    )
+    ap.add_argument(
+        "--approved", default=None, help="approved tree (default data/recordings/approved)"
+    )
+    ap.add_argument("--dry-run", action="store_true", help="list takes; no model, no writes")
+    a = ap.parse_args()
+    inc = Path(a.incoming)
+    if not (inc / "sessions.csv").exists():
+        raise SystemExit(f"{inc}: no sessions.csv (exit 2)")
+    takes = read_sessions(inc)
+    if a.dry_run:
+        print(f"{len(takes)} takes in {inc}")
+        for t in takes:
+            print(f"  {t.set:9s} {t.speaker} {t.file.relative_to(inc)}  '{t.prompt}'")
+        return
+    qc_dir = Path(a.out) if a.out else config.DATA_DIR / "recordings" / "qc" / inc.name
+    approved = Path(a.approved) if a.approved else config.DATA_DIR / "recordings" / "approved"
+    try:
+        tr = whisper_transcriber(a.model)
+    except Exception as e:  # noqa: BLE001 - model download/import failure is a user-facing exit
+        raise SystemExit(f"could not load {a.model}: {e} (exit 4)") from e
+    counts = run_qc(inc, qc_dir, approved, tr)
+    (qc_dir / "report.md").open("a").write(f"\nModel: `{a.model}`\n")
+    print(f"qc: {counts} -> {qc_dir}")
