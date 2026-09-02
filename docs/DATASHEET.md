@@ -89,13 +89,13 @@ manifest also records a sha256 content hash of each split's feature tensor,
 so a rebuild from the same seed can be checked byte-for-byte against a
 previously committed manifest.
 
-**Self-recorded speech:** numeric speaker ids only (`spkNN`), never a name.
+**Self-recorded speech:** anonymous `spkNN` speaker ids only, never a name.
 Each take passed an audio gate (format, duration, level) and a Whisper
 large-v3 content check against its prompt — the model id is recorded in
 the QC session's `report.md`. Sentence takes are further segmented into
 1 s word clips by Whisper's word timestamps. `manifest_v3.json` (produced
 by `kws-dataset build --prefix features_v3`) records, per split, the
-numeric speaker ids whose device recordings were mixed in
+anonymous `spkNN` ids whose device recordings were mixed in
 (`kws_de/manifest.py`). Full pipeline: `docs/sphinx/pipeline.rst`.
 
 ## Licensing

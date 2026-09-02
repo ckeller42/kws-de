@@ -306,10 +306,10 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
 
    ``kws_de.qc.audio_gate`` rejects a take unless it is 16000 Hz mono
    16-bit PCM, at least 300 ms long, no longer than its set's cap (4000 ms
-   for words, 6000 ms for sentences/negatives), peak level below
-   -0.5 dBFS (not clipped), and RMS at or above -45 dBFS. A corrupt or
-   unreadable WAV is rejected (``unreadable: <exception>``), never a
-   crash.
+   for a ``words`` or ``wake`` take, 6000 ms for a ``sentences`` or
+   ``negatives`` take), peak level below -0.5 dBFS (not clipped), and RMS
+   at or above -45 dBFS. A corrupt or unreadable WAV is rejected
+   (``unreadable: <exception>``), never a crash.
 
 .. req:: QC content gate rules and text normalisation
    :id: REQ_PIPE_QC_CONTENT
@@ -317,13 +317,24 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
 
    Whisper's transcript is normalised (``kws_de.qc.normalise``: NFC,
    lower-cased, ``ß`` -> ``ss``, punctuation stripped, the filler word
-   "prozent" dropped) before matching. A word take approves if the single
-   keyword is heard, exact match required at 5 letters or fewer and
-   edit-distance-1 forgiving above 5 letters (so "Licht" never matches
-   "nicht"). A sentence take approves if every required command token
-   (device/zone/action) appears in order, filler in between allowed. A
-   negative take approves only if **no** command-vocabulary word is heard;
-   the first one found is reported as ``contains_command:<word>``.
+   "prozent" dropped, and the numerals Whisper writes for the light levels
+   — ``25``/``50``/``75``/``100`` — mapped back onto the German number
+   words) before matching. A word take approves if the single keyword is
+   heard, exact match required at 5 letters or fewer and edit-distance-1
+   forgiving above 5 letters (so "Licht" never matches "nicht"), and a
+   short keyword never matches merely because it is a substring of a longer
+   heard word. A sentence take approves if every required command token
+   (device/zone/action) appears in order, filler in between allowed; a
+   heard word may also be the exact concatenation of two or more
+   *consecutive required* tokens Whisper glued together ("Lichtdach" for
+   "Licht Dach"), which stays order-sensitive. A negative take approves
+   unless a command-vocabulary word is heard as a whole token, with one
+   refinement: a 2-letter keyword ("an", "zu") rejects only if it occurs at
+   least twice — a keyword of 3 letters or more rejects on a single
+   occurrence — because one hallucinated 2-letter token was a false reject
+   on real audio. The word found is reported as ``contains_command:<word>``.
+   A ``wake`` take ("Hey Bus") approves if the whitespace-free transcript
+   matches ``(hey|hej|he|hei)(bus|buss|bos|boss)``.
 
 .. req:: Word segmentation window
    :id: REQ_PIPE_SEGMENT
@@ -339,14 +350,36 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
 
    Approved clips land at ``approved/words/<label>/<spkNN>_<NNN>.wav``,
    ``approved/phrases/<spkNN>/<slug>_<NNN>.wav`` (+ ``phrases/index.csv``),
-   and ``approved/negatives/<spkNN>/<slug>_<NNN>.wav`` (+
-   ``negatives/index.csv``); ``<NNN>`` is the next-free number in that
-   directory, independent of the source take number. Speaker ids are
-   numeric (``spkNN``) only, never a name. Re-running QC on the same
+   ``approved/negatives/<spkNN>/<slug>_<NNN>.wav`` (+
+   ``negatives/index.csv``), and ``approved/wake/<spkNN>/<spkNN>_<NNN>.wav``
+   (+ ``wake/index.csv``); ``<NNN>`` is the next-free number in that
+   directory, independent of the source take number. Every ``index.csv``
+   holds ``file,prompt,speaker`` with ``file`` relative to ``approved/``
+   (it carries its own ``phrases/``/``negatives/``/``wake/`` segment), which
+   is what ``kws_de.eval.eval_recordings`` reads back. Speaker ids are
+   anonymous ``spkNN`` ids, never a name. Re-running QC on the same
    ``incoming/<stamp>`` first undoes exactly what that stamp wrote last
    time (via ``qc/<stamp>/written.txt``), so the approved tree is fully
    regenerable from ``incoming/`` + the QC rules, and never touches another
    stamp's or another speaker's files.
+
+.. req:: Approved recordings enter every dataset build
+   :id: REQ_PIPE_RECORDINGS_IN_BUILD
+   :status: implemented
+
+   ``kws_de.data.merge_recordings`` folds the QC-approved tree into the
+   cached clip dict on every ``kws-dataset build`` (and every
+   ``kws-data --build``), not only on the build that created the cache:
+   approved word clips become clips of speaker ``rec:<spkNN>`` for their
+   label, approved negatives become ``_unknown_`` material via
+   ``negative_windows``. Previous ``rec:`` entries are dropped first, so a
+   rebuild replaces rather than duplicates them, and the recordings are
+   never written into the cache pickle. ``--recordings-split train`` (the
+   default) then forces every ``rec:`` speaker into the train split — the
+   personalised, user-customised model — while ``auto`` leaves them to the
+   global speaker-disjoint draw. The manifest records the outcome per split
+   (``sources`` counts by origin plus the device ``speakers``), which is
+   what the eval's labelling reads.
 
 .. req:: Recordings-based eval never mixes held-out and in-training figures
    :id: REQ_PIPE_EVAL_LABELS

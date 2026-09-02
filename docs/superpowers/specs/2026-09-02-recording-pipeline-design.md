@@ -124,7 +124,7 @@ given model version, which is recorded in `report.md`.
 and, for `_unknown_`, windows cut from `approved/negatives/` (1 s hops, same SNR mixes as
 other classes). `manifest_v3.json` records per clip: source (`mswc`/`tts`/`recording`),
 speaker id, the QC session dir, and sha256 — the provenance table in the paper regenerates
-from it. Speaker ids are numeric only.
+from it. Speaker ids are anonymous `spkNN` ids only.
 
 ### 3.5 Train / test
 
@@ -190,7 +190,7 @@ skip with a warning (the v2 path keeps working).
 
 - Sphinx page `docs/sphinx/pipeline.rst` (this flow, the layout, the two eval figures and
   why the in-training one is legitimate for a personalised device), linked from the index.
-- `DATASHEET.md`: recordings provenance (numeric speaker ids, QC model + version, counts).
+- `DATASHEET.md`: recordings provenance (anonymous `spkNN` ids, QC model + version, counts).
 - `docs/paper-notes.md`: the loop as a method paragraph + the first real numbers.
 
 ## 8. Open items (deliberately not in scope)

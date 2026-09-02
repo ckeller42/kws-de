@@ -20,11 +20,17 @@ Seven stages, from the device to a retrained model:
    gate judge every take, and approved sentence takes are segmented into
    word clips.
 4. **Data prep** (``kws-dataset build --prefix features_v3``) — folds the
-   approved recordings into the v3 dataset build alongside MSWC/TTS. The
-   split is speaker-disjoint by assigning each speaker to exactly one of
-   train/val/test *across all labels*, so a label recorded by only one or
-   two speakers can end up with no train rows, no test rows, or both —
-   the fix is more speakers, not a different split.
+   approved recordings into the v3 dataset build alongside MSWC/TTS. This
+   happens on **every** build (``kws_de.data.merge_recordings``), not just
+   the one that created the clip cache: QC output changes between builds,
+   the cached MSWC/TTS clips do not, so each build re-reads ``approved/``
+   and replaces the previous ``rec:`` clips instead of duplicating them.
+   The split is speaker-disjoint by assigning each speaker to exactly one
+   of train/val/test *across all labels*, so a label recorded by only one
+   or two speakers can end up with no train rows, no test rows, or both —
+   the fix is more speakers, not a different split. Device speakers are
+   the exception: by default they all go to train (see
+   `Which split the device recordings land in`_).
 5. **Train / export** (``kws-train --v2``, ``kws-export --firmware``) — the
    usual path, unchanged except for the ``--prefix``/``--out``/``--model``
    flags that point it at the v3 build.
@@ -125,7 +131,9 @@ text; the numbers:
   mishearings, tight enough that ordinary German sentences don't
   accidentally match. Approved takes are written to
   ``approved/wake/<spkNN>/<spkNN>_<NNN>.wav`` plus a ``wake/index.csv`` row,
-  idempotently per stamp like the other sets.
+  idempotently per stamp like the other sets, and counted in ``report.md``.
+  Wake takes are QC'd but not folded into the command dataset — the
+  wake-word model is trained separately (``kws_de.wake``).
 
 A corrupt or unreadable WAV, or an exception from the transcriber, rejects
 that one row (``unreadable: …`` / ``error: …``) — it never aborts the
@@ -208,15 +216,41 @@ Step by step, the same flow by hand:
    $ uv run --no-sync kws-eval --recordings "$KWS_DATA_ROOT/data/recordings/approved" \
        --prefix features_v3 --out docs/eval-report-v3.md
 
-The ``kws-dataset build`` cache (``raw_clips_v3.pkl``) must already exist —
-run ``uv run --no-sync kws-data --fetch --mswc-root <mswc-de-dir>`` once
-first to mine MSWC and build it; the data loop itself never fetches MSWC.
+The ``kws-dataset build`` cache (``raw_clips_v3.pkl``) holds the MSWC/TTS
+material only — the approved recordings are merged in by *every* build, never
+baked into it. ``scripts/data-loop.sh`` therefore seeds it by copying
+``raw_clips_merged.pkl`` (the full real+TTS cache) when it is absent; with
+neither present, mine MSWC once with ``uv run --no-sync kws-data --fetch --v3
+--mswc-root <mswc-de-dir>`` (the ``--v3`` flag is what selects the v3
+vocabulary and the ``raw_clips_v3.pkl`` name). Never seed it from
+``raw_clips_v2.pkl``: that is a 25-word subset with empty clip lists, so the
+build re-synthesises ~300 TTS clips per word and the INT8 export then fails
+the model-health gate.
+
+The eval report lands at ``$KWS_DATA_ROOT/docs/eval-report-v3.md`` (paths in
+the reports are always data-root-relative, never machine-local), alongside a
+``.recordings.json`` sidecar carrying the same run's numbers; each run
+rewrites its recordings section in place rather than appending a second copy.
 Flashing the exported model back onto the device is a manual step, covered
 by the remote flashing helper for the device host, not by this pipeline.
 
-A firmware ``wake`` set (five "Hey Bus" takes per speaker,
-``spkNN/hey-bus/NNN.wav``) is already recorded by the device; QC support
-for it is a follow-up task, not implemented here.
+Which split the device recordings land in
+-----------------------------------------
+
+``kws-dataset build --recordings-split train|auto`` (default ``train``):
+
+- ``train`` — every ``rec:`` speaker is forced into the train split. This is
+  the personalised-device model the recorder exists for: a speaker records
+  their own voice so the model learns it. With only one or two device
+  speakers the global speaker-disjoint draw can otherwise put all of them in
+  val/test, training on none of them.
+- ``auto`` — device speakers are left to the same global speaker-disjoint
+  draw as MSWC speakers, i.e. treated as ordinary held-out candidates.
+
+Either way the eval's labelling is manifest-driven and stays honest: with
+``train`` the manifest lists those speakers under ``train``, so
+``kws-eval --recordings`` reports their clips as
+``user-customised, in-training`` — which is exactly what they now are.
 
 Requirements
 ------------

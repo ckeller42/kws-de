@@ -468,14 +468,28 @@ idempotent `approved/` tree; `kws-dataset build --prefix features_v3` folds it i
 build; `kws-eval --recordings` reports two figures that are never mixed — `held-out` and
 `user-customised, in-training` (speaker-level match against the training manifest). First
 real run, over an early two-speaker bring-up session (208 takes, `spk01`+`spk02`, full
-command vocabulary): **48/208 approved (23%), 41 word clips written**. Rejection breakdown:
-75 `missing` (sentence token not found/out of order), 48 `wrong_word`, 34 `too_quiet`, 2
-`clipped`, 1 `contains_command`. Most rejects were content mismatches, not audio-quality
-failures — several transcripts ("Vielen Dank.", "Test.") show these were early/placeholder
-takes rather than genuine misreads, so the low approval rate here is not yet a QC-strictness
-signal; a clean recording session is needed before this loop's numbers say anything about
-QC threshold tuning. `scripts/data-loop.sh` chains ingest → QC → build → train → export
-(model-health gate) → evals behind one command, stopping at the first failing stage.
+command vocabulary): **65/208 approved (31%), 51 word clips written, 12 word clips skipped**
+(51 approved word takes, 4 sentences, 10 negatives). Rejection breakdown: 72 `missing`
+(sentence token not found/out of order), 35 `wrong_word`, 34 `too_quiet`, 2 `clipped`. The
+first pass over the same session approved only **48/208 (23%)** — the difference is three QC
+fixes, not a looser gate: Whisper writes the light levels as numerals ("50" for "fünfzig"),
+it glues keywords into one token ("Lichtdach" for "Licht Dach"), and a single hallucinated
+2-letter keyword ("An den fahren wir los" heard for "wann fahren wir los") was rejecting
+clean negatives. A fourth fix — requiring a short keyword to match as a whole token — moved
+the count back down from 69 to 65 by removing false approvals. Most remaining rejects are
+content mismatches, not audio-quality failures — several transcripts ("Vielen Dank.",
+"Test.") show these were early/placeholder takes rather than genuine misreads, so the
+approval rate here is not yet a QC-strictness signal; a clean recording session is needed
+before this loop's numbers say anything about QC threshold tuning. `scripts/data-loop.sh`
+chains ingest → QC → build → train → export (model-health gate) → evals behind one command,
+stopping at the first failing stage.
+
+The domain gap this loop exists to close, in one number: the **stock v2 command model**
+(TTS-dominated training set, no device recordings) measured on this session's real voices as
+held-out data — **isolated-word accuracy 0.19** (`spk01`, 16 clips) and **0.27** (`spk02`,
+45 clips), **0 of 5 phrases** correct end to end, and **0 false accepts on 6 negatives**. A
+model reporting ~0.9 on its own held-out MSWC/TTS split recognises roughly a quarter of what
+the real microphone hears.
 
 ## Open questions
 
