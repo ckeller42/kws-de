@@ -22,7 +22,10 @@ selection screen" below).
   microWakeWord streaming model, showing its live probability and flashing
   the screen green plus a beep on every detection.
 - **USB mode** — exposes the on-flash recordings and the recognise log as a
-  `KWSREC` FAT drive over USB so a host can pull them off.
+  `KWSREC` FAT drive over USB so a host can pull them off. The device
+  presents as a composite USB device in this mode: the `KWSREC` MSC drive
+  plus a second serial port (CDC-ACM) that keeps the console reachable - see
+  "Serial commands" below.
 
 A device on the same USB serial port also accepts a small set of remote
 commands (mode switching, status) — see "Serial commands" below.
@@ -205,6 +208,20 @@ echo 'status'   > /dev/cu.usbmodemNNN
 Every command ends with `ok` or `err <reason>` on its own line so a host
 script can tell when it finished. Implemented in `firmware/main/console.c`.
 
+**During USB mode**, the console moves to a second, CDC-ACM serial port
+that TinyUSB adds alongside the `KWSREC` mass-storage device
+(`firmware/main/usb_drive.c`) - the normal console port disappears for as
+long as TinyUSB owns the USB PHY, same as it always has, but this new port
+takes over so `mode`/`status` still work while the drive is mounted. It
+enumerates as a *different* device node from the normal console port (a new
+`/dev/cu.usbmodemNNN`, not the one flashing/monitor uses) once the device
+is in USB mode; watch `ls /dev/cu.usbmodem*` before/after tapping **USB** or
+sending `mode usb` to see it appear. `echo 'mode menu' >
+/dev/cu.usbmodemNNN` (the CDC port) leaves USB mode and remounts the drive
+for the app - the normal console port returns once that command completes.
+Flashing still needs the original JTAG/console port, not the CDC one (it
+only exists while USB mode is active).
+
 ## Manual test checklist
 
 On-device manual checklist: from the menu, tap **Record** → the session
@@ -229,6 +246,14 @@ Serial commands: with the device connected over USB serial,
 and `echo 'status' > /dev/cu.usbmodemNNN` reports `mode wake` followed by
 `ok`; `echo 'mode record' > ...` then `status` reports the recorder's
 phase/index/speaker.
+
+USB mode's CDC console: tap **USB** on the menu (or send `mode usb`) → the
+`KWSREC` drive mounts on the host and a new `/dev/cu.usbmodemNNN` appears
+alongside (or in place of) the original console port; `echo 'status' >
+<the new port>` answers `mode usb` / `ok`; `echo 'mode menu' > <the new
+port>` unmounts the drive and returns the device to the selection menu, and
+the original console port comes back (`echo 'status' > <original port>`
+answers again).
 
 ## Pi note
 

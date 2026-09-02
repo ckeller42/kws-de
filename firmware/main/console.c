@@ -1,4 +1,5 @@
 #include "console.h"
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include "driver/uart.h"
@@ -71,7 +72,14 @@ static void console_task(void *arg)
     (void)arg;
     char line[64];
     for (;;) {
-        if (fgets(line, sizeof line, stdin)) handle_line(line);
+        if (fgets(line, sizeof line, stdin)) {
+            handle_line(line);
+        } else {
+            /* No line ready (stdin is non-blocking - see console_start()) or a
+               transient read error; clearerr() so a stuck error indicator
+               can't wedge every future fgets() on this stream. */
+            clearerr(stdin);
+        }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
@@ -80,10 +88,25 @@ void console_start(void)
 {
     /* The console UART starts in the ROM's polling driver (busy-waits on
        every byte, no FreeRTOS yield). Installing the interrupt-driven UART
-       driver and switching the VFS to it makes fgets() a normal blocking
-       read that sleeps the task instead of spinning the CPU. */
+       driver and switching the VFS to it makes fgets() a normal read that
+       sleeps the task instead of spinning the CPU. */
     uart_driver_install((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, 256, 0, 0, NULL, 0);
     uart_vfs_dev_use_driver(CONFIG_ESP_CONSOLE_UART_NUM);
     setvbuf(stdin, NULL, _IONBF, 0);
+    /* Non-blocking stdin, not blocking: usb_drive.c's usb_drive_enter()/exit()
+       can freopen() stdin/stdout out from under this task (moving the console
+       onto/off the CDC-ACM port for USB mode) from a different task (e.g. the
+       UI task, when USB mode is entered by tapping the menu rather than over
+       a serial 'mode usb' command). The UART VFS driver's blocking read
+       parks the caller in a FreeRTOS queue wait with no timeout
+       (uart_read_bytes(..., portMAX_DELAY) - see esp-idf's uart_vfs.c); if
+       this task were blocked in that wait when the redirect happens, it
+       would never return (no more bytes ever arrive on the old fd), and USB
+       mode's CDC console would never get read. The CDC-ACM VFS read
+       (esp_tinyusb's vfs_tinyusb.c) is already always non-blocking, so
+       matching that here means this loop's fgets() call can never block past
+       one vTaskDelay(20ms) tick on either port, on either side of the
+       switch. */
+    fcntl(fileno(stdin), F_SETFL, O_NONBLOCK);
     xTaskCreatePinnedToCore(console_task, "console", 4096, NULL, 1, NULL, 0);
 }

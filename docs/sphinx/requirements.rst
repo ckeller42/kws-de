@@ -222,6 +222,19 @@ Storage / USB
    rsync exited 0, and ejects the volume. Re-running against an
    already-emptied drive is a no-op.
 
+.. req:: The remote console survives USB mode
+   :id: REQ_FW_USB_CDC_CONSOLE
+   :status: implemented
+
+   ``usb_drive_enter``/``usb_drive_exit`` (``firmware/main/usb_drive.c``)
+   bring up TinyUSB as a composite MSC + CDC-ACM device and move stdio onto
+   the CDC-ACM port for the duration of USB mode (``esp_tusb_init_console``/
+   ``esp_tusb_deinit_console``), instead of only the MSC device that used to
+   take the USB PHY and silently drop the console's own port with it.
+   ``console.c``'s stdin is opened ``O_NONBLOCK`` so the console task can
+   never be left blocked in the old port's read call across the switch,
+   whichever task triggers it (see :need:`REQ_FW_REMOTE_MODE`).
+
 Recogniser
 ----------
 
