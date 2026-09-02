@@ -28,6 +28,36 @@ def test_negative_windows_hop_one_second(tmp_path):
     )
 
 
+def test_negative_windows_warns_and_skips_wrong_sample_rate(tmp_path, caplog):
+    neg = tmp_path / "negatives" / "spk03"
+    neg.mkdir(parents=True)
+    sf.write(
+        neg / "hallo_001.wav",
+        np.random.default_rng(0).standard_normal(8000 * 3).astype(np.float32) * 0.1,
+        8000,  # not config.SAMPLE_RATE
+        subtype="PCM_16",
+    )
+    with caplog.at_level("WARNING"):
+        wins = data.negative_windows(tmp_path / "negatives", np.random.default_rng(0))
+    assert wins == []
+    assert "sample rate" in caplog.text
+
+
+def test_negative_windows_warns_and_skips_too_short_file(tmp_path, caplog):
+    neg = tmp_path / "negatives" / "spk04"
+    neg.mkdir(parents=True)
+    sf.write(
+        neg / "hallo_001.wav",
+        np.random.default_rng(0).standard_normal(8000).astype(np.float32) * 0.1,  # 0.5 s < 1 window
+        16000,
+        subtype="PCM_16",
+    )
+    with caplog.at_level("WARNING"):
+        wins = data.negative_windows(tmp_path / "negatives", np.random.default_rng(0))
+    assert wins == []  # no all-zero window emitted
+    assert "shorter than one window" in caplog.text
+
+
 def test_manifest_records_sources_and_speakers():
     from kws_de.dataset import build_manifest
 

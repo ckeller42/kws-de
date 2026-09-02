@@ -3,6 +3,7 @@
 # input — so the arbitrary-code-execution risk on unpickling doesn't apply here.
 import argparse
 import io
+import logging
 import os
 import pickle
 import subprocess
@@ -25,21 +26,32 @@ def recordings_root() -> Path:
 
 def negative_windows(root: Path, rng) -> list[tuple[np.ndarray, str]]:
     """1 s windows at 1 s hops from every approved negative phrase -> `_unknown_` material,
-    speaker id `rec:<spk>` so speaker-disjoint splitting treats them like other real clips."""
+    speaker id `rec:<spk>` so speaker-disjoint splitting treats them like other real clips.
+    A file at the wrong sample rate, or shorter than one window, is skipped with a warning
+    (QC already rejects both before a take reaches `approved/`, so this only fires on a
+    file dropped into `approved/negatives` by hand)."""
     import soundfile as sf
 
     out = []
+    n = config.CLIP_SAMPLES
     for f in sorted(Path(root).glob("*/*.wav")):
         sig, sr = sf.read(f, dtype="float32", always_2d=True)
         sig = sig[:, 0]
         if sr != config.SAMPLE_RATE:
+            logging.warning(
+                "negative_windows: %s sample rate %d != %d, skipping", f, sr, config.SAMPLE_RATE
+            )
             continue
-        n = config.CLIP_SAMPLES
-        for start in range(0, max(len(sig) - n + 1, 1), n):
-            win = sig[start : start + n]
-            if len(win) < n:
-                win = np.pad(win, (0, n - len(win)))
-            out.append((win.astype(np.float32), f"rec:{f.parent.name}"))
+        if len(sig) < n:
+            logging.warning(
+                "negative_windows: %s shorter than one window (%d < %d samples), skipping",
+                f,
+                len(sig),
+                n,
+            )
+            continue
+        for start in range(0, len(sig) - n + 1, n):
+            out.append((sig[start : start + n].astype(np.float32), f"rec:{f.parent.name}"))
     return out
 
 
@@ -58,19 +70,23 @@ _TTS_PHRASINGS = ["{w}", "{w}.", "{w}!", "{w}?"]
 def split_by_speaker(clips_with_speakers: dict, rng, test_frac: float = 0.2, *, keep_speaker=False):
     """Split each label's (clip, speaker_id) list into train/test by speaker.
 
-    No speaker appears in both splits. Returns (train_clips, test_clips). By
-    default each is a ``dict[label] -> list[np.ndarray]`` (speaker id dropped)
-    suitable for ``build_dataset``; with ``keep_speaker=True`` the speaker id is
-    kept (``dict[label] -> list[(np.ndarray, speaker_id)]``), e.g. to later tell
-    real MSWC clips from TTS-synthesized ones (speaker id prefixed ``"tts:"``).
+    No speaker appears in both splits -- across ALL labels, not just within one: the
+    speaker->split assignment is drawn once over the union of every label's speaker ids,
+    then applied to filter each label (a speaker recorded under two different labels, e.g.
+    a device speaker's word clips and their `_unknown_` negatives sharing one `rec:<spk>`
+    id, still lands in exactly one split). Returns (train_clips, test_clips). By default
+    each is a ``dict[label] -> list[np.ndarray]`` (speaker id dropped) suitable for
+    ``build_dataset``; with ``keep_speaker=True`` the speaker id is kept (``dict[label] ->
+    list[(np.ndarray, speaker_id)]``), e.g. to later tell real MSWC clips from
+    TTS-synthesized ones (speaker id prefixed ``"tts:"``).
     """
+    all_speakers = sorted({spk for items in clips_with_speakers.values() for _, spk in items})
+    order = rng.permutation(len(all_speakers))
+    n_test = max(1, round(len(all_speakers) * test_frac)) if all_speakers else 0
+    test_speakers = {all_speakers[i] for i in order[:n_test]}
     train_clips: dict = {}
     test_clips: dict = {}
     for label, items in clips_with_speakers.items():
-        speakers = sorted({spk for _, spk in items})
-        order = rng.permutation(len(speakers))
-        n_test = max(1, round(len(speakers) * test_frac)) if speakers else 0
-        test_speakers = {speakers[i] for i in order[:n_test]}
         if keep_speaker:
             train_clips[label] = [(c, spk) for c, spk in items if spk not in test_speakers]
             test_clips[label] = [(c, spk) for c, spk in items if spk in test_speakers]
@@ -89,30 +105,36 @@ def split_three_way(
     keep_speaker=False,
 ):
     """Speaker-disjoint train/val/test split. No speaker appears in more than one
-    split. Fractions are of the speaker set (val_frac, test_frac; the rest is
-    train). Val exists alongside `split_by_speaker`'s train/test so model
-    selection never touches test. See `split_by_speaker` for the two-way version
-    and the `keep_speaker` semantics this mirrors."""
+    split -- across ALL labels, not just within one: the speaker->split assignment is
+    drawn once over the union of every label's speaker ids, then applied to filter each
+    label (a speaker recorded under two different labels, e.g. a device speaker's word
+    clips and their `_unknown_` negatives sharing one `rec:<spk>` id, still lands in
+    exactly one split). Fractions are of the speaker set (val_frac, test_frac; the rest
+    is train). Val exists alongside `split_by_speaker`'s train/test so model selection
+    never touches test. See `split_by_speaker` for the two-way version and the
+    `keep_speaker` semantics this mirrors."""
+    all_speakers = sorted({spk for items in clips_with_speakers.values() for _, spk in items})
+    order = rng.permutation(len(all_speakers))
+    n = len(all_speakers)
+    n_val = round(n * val_frac) if n else 0
+    n_test = round(n * test_frac) if n else 0
+    # guarantee non-empty val/test when there are enough speakers
+    if n >= 3:
+        n_val = max(1, n_val)
+        n_test = max(1, n_test)
+    val_s = {all_speakers[i] for i in order[:n_val]}
+    test_s = {all_speakers[i] for i in order[n_val : n_val + n_test]}
+    train_s = set(all_speakers) - val_s - test_s
+
     train, val, test = {}, {}, {}
     for label, items in clips_with_speakers.items():
-        speakers = sorted({spk for _, spk in items})
-        order = rng.permutation(len(speakers))
-        n = len(speakers)
-        n_val = round(n * val_frac) if n else 0
-        n_test = round(n * test_frac) if n else 0
-        # guarantee non-empty val/test when there are enough speakers
-        if n >= 3:
-            n_val = max(1, n_val)
-            n_test = max(1, n_test)
-        val_s = {speakers[i] for i in order[:n_val]}
-        test_s = {speakers[i] for i in order[n_val : n_val + n_test]}
 
         def pick(keep, items=items):
             return [(c, s) if keep_speaker else c for c, s in items if s in keep]
 
         val[label] = pick(val_s)
         test[label] = pick(test_s)
-        train[label] = pick(set(speakers) - val_s - test_s)
+        train[label] = pick(train_s)
     return train, val, test
 
 
