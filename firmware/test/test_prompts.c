@@ -27,6 +27,20 @@ int main(void)
     prompt_session_init(&a, PROMPT_NEGS, 1);      assert(a.count == KWS_NUM_NEG_PROMPTS);
     assert(strlen(prompt_text(&a)) > 0 && strlen(prompt_slug(&a)) > 0);
     assert(prompt_cap_ms(PROMPT_WORDS) == 4000 && prompt_cap_ms(PROMPT_NEGS) == 6000);
+
+    /* wake set: KWS_NUM_WAKE_PROMPTS reads, all "Hey Bus", set name "wake",
+       exactly one take per prompt (real positives, no doubled reads). */
+    prompt_session_init(&a, PROMPT_WAKE, 1);
+    assert(a.count == KWS_NUM_WAKE_PROMPTS && a.count == 5);
+    for (int i = 0; i < a.count; i++) {
+        assert(!strcmp(prompt_text(&a), "Hey Bus"));
+        assert(!strcmp(prompt_slug(&a), "hey-bus"));
+        prompt_advance(&a);
+    }
+    assert(!strcmp(prompt_set_name(PROMPT_WAKE), "wake"));
+    assert(prompt_takes_per_prompt(PROMPT_WAKE) == 1);
+    assert(prompt_takes_per_prompt(PROMPT_SENTENCES) == 2);
+
     puts("test_prompts OK");
     return 0;
 }

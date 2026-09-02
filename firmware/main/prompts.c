@@ -10,6 +10,7 @@ static void set_tables(prompt_set_t set, const char *const **text, const char *c
     switch (set) {
     case PROMPT_SENTENCES: *text = KWS_SENTENCE_PROMPTS; *slug = KWS_SENTENCE_SLUGS; *n = KWS_NUM_SENTENCE_PROMPTS; break;
     case PROMPT_NEGS:      *text = KWS_NEG_PROMPTS;      *slug = KWS_NEG_SLUGS;      *n = KWS_NUM_NEG_PROMPTS;      break;
+    case PROMPT_WAKE:      *text = KWS_WAKE_PROMPTS;     *slug = KWS_WAKE_SLUGS;     *n = KWS_NUM_WAKE_PROMPTS;     break;
     default:               *text = KWS_WORD_PROMPTS;     *slug = KWS_WORD_SLUGS;     *n = KWS_NUM_WORD_PROMPTS;     break;
     }
 }
@@ -47,3 +48,11 @@ int prompt_advance(prompt_session_t *p)
 }
 
 uint32_t prompt_cap_ms(prompt_set_t set) { return set == PROMPT_WORDS ? 4000 : 6000; }
+
+int prompt_takes_per_prompt(prompt_set_t set) { return set == PROMPT_WAKE ? 1 : 2; }
+
+const char *prompt_set_name(prompt_set_t set)
+{
+    static const char *names[] = {"words", "sentences", "negatives", "wake"};
+    return names[set];
+}

@@ -11,11 +11,12 @@
 static const char *mode_name(ui_mode_t m)
 {
     switch (m) {
-    case UI_MODE_MENU:      return "menu";
-    case UI_MODE_RECORD:    return "record";
-    case UI_MODE_USB:       return "usb";
-    case UI_MODE_RECOGNISE: return "recognise";
-    case UI_MODE_WAKE:      return "wake";
+    case UI_MODE_MENU:        return "menu";
+    case UI_MODE_RECORD:      return "record";
+    case UI_MODE_RECORD_WAKE: return "recordwake";
+    case UI_MODE_USB:         return "usb";
+    case UI_MODE_RECOGNISE:   return "recognise";
+    case UI_MODE_WAKE:        return "wake";
     }
     return "?";
 }
@@ -43,6 +44,7 @@ static void handle_line(char *line)
         if (!arg) { printf("err missing mode\n"); return; }
         if (strcmp(arg, "menu") == 0) m = UI_MODE_MENU;
         else if (strcmp(arg, "record") == 0) m = UI_MODE_RECORD;
+        else if (strcmp(arg, "recordwake") == 0) m = UI_MODE_RECORD_WAKE;
         else if (strcmp(arg, "recognise") == 0) m = UI_MODE_RECOGNISE;
         else if (strcmp(arg, "wake") == 0) m = UI_MODE_WAKE;
         else if (strcmp(arg, "usb") == 0) m = UI_MODE_USB;
@@ -52,7 +54,7 @@ static void handle_line(char *line)
     } else if (strcmp(cmd, "status") == 0) {
         ui_mode_t m = app_get_mode();
         printf("mode %s\n", mode_name(m));
-        if (m == UI_MODE_RECORD) {
+        if (m == UI_MODE_RECORD || m == UI_MODE_RECORD_WAKE) {
             record_status_t st;
             record_get_status(&st);
             printf("phase %s index %d count %d speaker %s\n",

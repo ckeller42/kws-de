@@ -42,11 +42,14 @@ binary is a small ``assert``-based program built by
 .. test:: Prompt shuffle determinism and coverage
    :id: TEST_PROMPTS_SHUFFLE
    :status: passing
-   :links: REQ_FW_PROMPT_SHUFFLE_SEED
+   :links: REQ_FW_PROMPT_SHUFFLE_SEED, REQ_FW_RECORD_WAKE_SET
 
    ``firmware/test/test_prompts.c``: same seed twice → identical shuffled
    order; different seed → different order; every prompt index appears
-   exactly once.
+   exactly once. Also asserts the wake set: 5 prompts, all "Hey Bus",
+   slug "hey-bus", ``prompt_set_name(PROMPT_WAKE)`` == "wake", and
+   ``prompt_takes_per_prompt`` returns 1 for the wake set vs. 2 for the
+   normal sets.
 
 .. test:: Energy VAD open/close thresholds
    :id: TEST_VAD_ENERGY
@@ -242,21 +245,26 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
 .. test:: Selection-menu flow, guided session auto-chain, and remote control
    :id: TEST_MANUAL_MENU_FLOW
    :status: manual
-   :links: REQ_FW_MENU_FLOW, REQ_FW_RECORD_SESSION, REQ_FW_REMOTE_MODE
+   :links: REQ_FW_MENU_FLOW, REQ_FW_RECORD_SESSION, REQ_FW_RECORD_WAKE_SET,
+           REQ_FW_REMOTE_MODE
 
    ``firmware/README.md`` "Manual test checklist": device boots to the
-   4-button menu; each of Recognition/Hey Bus/Record/USB opens its
-   screen, and that screen's back button (Abbrechen on Record) returns to
-   the menu; tapping **Record** bumps the speaker id and starts the
-   sentence set, completing it auto-chains into the negative set without
-   any button press, and completing negatives shows "Fertig - danke!"
-   with the speaker id and a saved-take count, whose **Menu** button
-   returns to the selection menu; aborting mid-session instead returns
-   straight to the menu with no success screen. Separately, over the
-   serial console: ``echo 'mode wake' > /dev/cu.usbmodemNNN`` switches
-   the device to wake mode and ``echo 'status'`` reports it; ``mode
-   record`` then ``status`` reports the recorder's phase/index/speaker.
-   Run by hand on real M5Stack CoreS3 hardware; not automated.
+   5-button menu; each of Recognition/Hey Bus/Record/Hey Bus
+   aufnehmen/USB opens its screen, and that screen's back button
+   (Abbrechen on Record/Hey Bus aufnehmen) returns to the menu; tapping
+   **Record** bumps the speaker id and starts the sentence set, completing
+   it auto-chains into the negative set without any button press, and
+   completing negatives shows "Fertig - danke!" with the speaker id and a
+   saved-take count, whose **Menu** button returns to the selection menu;
+   aborting mid-session instead returns straight to the menu with no
+   success screen. Tapping **Hey Bus aufnehmen** bumps the speaker id and
+   prompts 5 single-take "Hey Bus" reads straight to the same success
+   screen, with no negatives chained on. Separately, over the serial
+   console: ``echo 'mode wake' > /dev/cu.usbmodemNNN`` switches the
+   device to wake mode and ``echo 'status'`` reports it; ``mode
+   recordwake`` then ``status`` reports the wake session's
+   phase/index/speaker. Run by hand on real M5Stack CoreS3 hardware; not
+   automated.
 
 .. note::
 

@@ -2,7 +2,7 @@
 
 ## What it does
 
-Multi-mode ESP-IDF app on the M5Stack CoreS3. It boots to a 4-button
+Multi-mode ESP-IDF app on the M5Stack CoreS3. It boots to a 5-button
 selection menu; every mode's back button returns to it (see "Modes and the
 selection screen" below).
 
@@ -10,6 +10,11 @@ selection screen" below).
   session for a new speaker id: the sentence set, then the negative set,
   captured onto the device's flash with the built-in VAD and logged to a
   `session.csv` alongside the WAVs.
+- **Record-wake mode** ("Hey Bus aufnehmen") — a "Hey Bus"-only guided
+  session: same recorder, same speaker-id bump and `session.csv` row shape,
+  but it prompts `WAKE_PROMPT_REPEATS` (5) single-take reads of the wake
+  word and finishes straight to the success screen — no sentence/negative
+  sets chained on. Collects real wake-word positives for `models/hey_bus.tflite`.
 - **Recognise mode** — an on-device keyword recogniser: mic → MFCC → the
   int8 TFLite Micro model → the same streaming detector logic as
   `kws_de.stream`, shown live on the LCD and logged to flash.
@@ -71,11 +76,12 @@ docker run --rm -v "$PWD/firmware:/project" -w /project --device=/dev/ttyACM0 \
 ## Modes and the selection screen
 
 The device boots into a dark-theme selection menu: a small "kws-de" title
-over a 2x2 grid of big buttons — **Recognition**, **Hey Bus**, **Record**,
-**USB** — each switching straight to that mode. Every mode's own
-back/abort button returns to this menu; no mode links directly to another
-mode. `app_set_mode()` (`firmware/main/main.c`) is the only place that
-suspends/resumes the consumer task for the mode being left/entered.
+over a column of five big buttons — **Recognition**, **Hey Bus**,
+**Record**, **Hey Bus aufnehmen**, **USB** — each switching straight to
+that mode. Every mode's own back/abort button returns to this menu; no mode
+links directly to another mode. `app_set_mode()` (`firmware/main/main.c`)
+is the only place that suspends/resumes the consumer task for the mode
+being left/entered.
 
 ## Record-mode walkthrough
 
@@ -101,6 +107,13 @@ but are not part of this flow).
   danke!", the speaker id, and how many takes were saved this session; its
   **Menu** button returns to the selection menu. Aborting instead returns
   straight to the menu — no success screen.
+
+**Hey Bus aufnehmen** on the menu runs the same guided-recorder machinery
+in a "Hey Bus"-only variant: it bumps the speaker id the same way, then
+prompts 5 single-take (not doubled) reads of the wake word straight to the
+success screen — no sentence/negative sets chained on. Takes land under
+`spkNN/hey-bus/NNN.wav`, and each `session.csv` row has `set` = `wake`
+(same `prompt,file,ms,peak_dbfs,set,seed,ts` shape as every other row).
 
 ## Pull recordings
 
@@ -184,10 +197,10 @@ echo 'mode usb' > /dev/cu.usbmodemNNN
 echo 'status'   > /dev/cu.usbmodemNNN
 ```
 
-- `mode menu|record|recognise|wake|usb` — switches the app mode, same as
-  tapping the matching menu/back button.
-- `status` — prints the current mode, and in record mode also the
-  recorder's phase/index/count/speaker.
+- `mode menu|record|recordwake|recognise|wake|usb` — switches the app
+  mode, same as tapping the matching menu/back button.
+- `status` — prints the current mode, and in record/record-wake mode also
+  the recorder's phase/index/count/speaker.
 
 Every command ends with `ok` or `err <reason>` on its own line so a host
 script can tell when it finished. Implemented in `firmware/main/console.c`.

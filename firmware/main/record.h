@@ -9,8 +9,10 @@
 
 /** @brief Commands posted to the record task from UI callbacks, via record_post(). */
 typedef enum {
-    REC_CMD_START_SESSION, /**< Bump the speaker id, start the sentence set; negatives auto-chain on completion. */
-    REC_CMD_PAUSE,         /**< Pause the recorder (goes idle, waits for a command). */
+    REC_CMD_START_SESSION,      /**< Bump the speaker id, start the sentence set; negatives auto-chain on completion. */
+    REC_CMD_START_WAKE_SESSION, /**< Bump the speaker id, start the "Hey Bus"-only wake set (PROMPT_WAKE);
+                                      session ends when it's exhausted, no chaining into negatives. */
+    REC_CMD_PAUSE,               /**< Pause the recorder (goes idle, waits for a command). */
 } record_cmd_t;
 /**
  * @brief Recorder phase, as shown by the UI.

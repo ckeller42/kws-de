@@ -29,16 +29,19 @@ def slug(text: str) -> str:
     return "-".join(w for w in "".join(c if c.isalnum() else " " for c in s).split())
 
 
-def prompt_sets() -> tuple[list, list, list]:
-    """(display, slug) pairs for words, sentences, negatives — in canonical
-    (unshuffled) order; the device shuffles with its on-screen seed."""
+def prompt_sets() -> tuple[list, list, list, list]:
+    """(display, slug) pairs for words, sentences, negatives, and the wake set — in
+    canonical (unshuffled) order; the device shuffles with its on-screen seed. The
+    wake set is config.WAKE_WORD repeated config.WAKE_PROMPT_REPEATS times (a
+    "Hey Bus"-only recording session, not a proper prompt catalog)."""
     words = [(label, slug(label)) for label in config.COMMAND_LABELS if not label.startswith("_")]
     sentences = []
     for it in build_catalog():
         text = intent_text(it)
         sentences.append((text, slug(text)))
     negs = [(p, slug(p)) for p in config.NEGATIVE_PROMPTS]
-    return words, sentences, negs
+    wake = [(config.WAKE_WORD, slug(config.WAKE_WORD))] * config.WAKE_PROMPT_REPEATS
+    return words, sentences, negs, wake
 
 
 def mfcc_tables() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -97,9 +100,9 @@ def generate(out) -> None:
         + _c_strings("KWS_LABELS", labels)
     )
 
-    words, sentences, negs = prompt_sets()
+    words, sentences, negs, wake = prompt_sets()
     p = hdr
-    for tag, items in (("WORD", words), ("SENTENCE", sentences), ("NEG", negs)):
+    for tag, items in (("WORD", words), ("SENTENCE", sentences), ("NEG", negs), ("WAKE", wake)):
         p += f"#define KWS_NUM_{tag}_PROMPTS {len(items)}\n"
         p += _c_strings(f"KWS_{tag}_PROMPTS", [d for d, _ in items])
         p += _c_strings(f"KWS_{tag}_SLUGS", [s for _, s in items])
