@@ -30,8 +30,10 @@ def _build_approved(tmp_path):
         16000,
         subtype="PCM_16",
     )
+    # `file` is relative to approved/ — exactly what qc.run_qc writes
+    # (`str(dst.relative_to(approved))`, see test_eval_recordings_on_a_run_qc_tree).
     (root / "phrases" / "index.csv").write_text(
-        "file,prompt,speaker\nspk02/licht-an_001.wav,Licht an,spk02\n"
+        "file,prompt,speaker\nphrases/spk02/licht-an_001.wav,Licht an,spk02\n"
     )
     (root / "negatives" / "spk02").mkdir(parents=True)
     sf.write(
@@ -41,7 +43,7 @@ def _build_approved(tmp_path):
         subtype="PCM_16",
     )
     (root / "negatives" / "index.csv").write_text(
-        "file,prompt,speaker\nspk02/hallo_001.wav,hallo,spk02\n"
+        "file,prompt,speaker\nnegatives/spk02/hallo_001.wav,hallo,spk02\n"
     )
 
     def predict_fn(window):
@@ -123,6 +125,78 @@ def test_eval_recordings_manifest_path_is_data_root_relative(tmp_path, monkeypat
         assert str(tmp_path) not in text
     assert "data/manifest.json" in md
     assert "2026-09-02T12:00:00+00:00" in md
+
+
+def test_render_names_the_model_it_measured(tmp_path, monkeypatch):
+    """SF-5: the report must name the model file actually measured, data-root-relative."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", data_dir)
+    monkeypatch.setattr(config, "MODELS_DIR", tmp_path / "models")
+    root, predict_fn = _build_approved(tmp_path)
+    res = ev.eval_recordings(root, predict_fn)
+    res["model_path"] = ev._relative_to_data_root(tmp_path / "models" / "command_v3.tflite")
+    res["model_sha256"] = "abc123def456789"
+    res["evaluated_at"] = "2026-09-02T18:00:00+00:00"
+
+    md = ev.render_recordings_section(res)
+    assert "models/command_v3.tflite" in md and "abc123def456" in md
+    assert "/Users" not in md and str(tmp_path) not in md
+
+
+def test_replace_recordings_section_rewrites_in_place():
+    """SF-6: a second run replaces the section instead of appending a second copy,
+    so the markdown can never disagree with the (always overwritten) JSON sidecar."""
+    report = ev.replace_recordings_section("# v3 report\n", "## held-out\nfirst\n")
+    assert report.startswith("# v3 report\n")
+    again = ev.replace_recordings_section(report, "## held-out\nsecond\n")
+    assert again.count("## held-out") == 1
+    assert "first" not in again and "second" in again
+    assert again.count(ev.RECORDINGS_SECTION_START) == 1
+
+
+def test_eval_recordings_on_a_run_qc_tree(tmp_path):
+    """Producer and consumer in one test: `qc.run_qc` writes the approved tree
+    (index `file` column relative to `approved/`), `eval_recordings` reads it.
+    Any drift between the two — a changed index convention, a changed directory
+    layout — fails here instead of only on a real run."""
+    from kws_de import qc
+
+    inc = tmp_path / "incoming" / "s1"
+    sr = 16000
+    tone = (0.3 * np.sin(2 * np.pi * 440 * np.arange(int(sr * 0.8)) / sr)).astype(np.float32)
+    takes = ("spk02/licht/001.wav", "spk02/_phrase_/licht-an_001.wav", "spk02/_neg_/hallo_001.wav")
+    for rel in takes:
+        p = inc / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(p, tone, sr, subtype="PCM_16")
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        "spk02,t,Licht,spk02/licht/001.wav,800,-10,words,1,1\n"
+        "spk02,t,Licht an,spk02/_phrase_/licht-an_001.wav,800,-10,sentences,1,2\n"
+        "spk02,t,hallo welt,spk02/_neg_/hallo_001.wav,800,-10,negatives,1,3\n"
+    )
+
+    def transcriber(p):
+        if "_phrase_" in str(p):
+            return {"text": "Licht an", "words": []}
+        return {"text": "Licht" if "licht" in str(p) else "hallo welt", "words": []}
+
+    approved = tmp_path / "approved"
+    qc.run_qc(inc, tmp_path / "qc" / "s1", approved, transcriber)
+
+    licht = config.COMMAND_LABELS.index("Licht")
+
+    def predict_fn(window):
+        p = np.zeros(len(config.COMMAND_LABELS), np.float32)
+        p[licht] = 0.9
+        return p
+
+    res = ev.eval_recordings(approved, predict_fn)
+    held = res["figures"][ev.HELD_OUT]
+    assert held["isolated"]["spk02"]["n"] == 1
+    assert held["e2e"]["spk02"]["n"] == 1  # the phrase clip was actually read
+    assert held["false_accepts"]["spk02"]["n"] == 1  # so was the negative
 
 
 def test_eval_recordings_no_manifest_all_held_out(tmp_path):

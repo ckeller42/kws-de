@@ -298,7 +298,8 @@ def _clear_stamp(approved: Path, qc_dir: Path) -> None:
     for sub in ("phrases", "negatives", "wake"):
         idx = approved / sub / "index.csv"
         if idx.exists():
-            keep = [r for r in csv.DictReader(idx.open()) if r["file"] not in prev]
+            with idx.open() as fh:
+                keep = [r for r in csv.DictReader(fh) if r["file"] not in prev]
             idx.unlink()
             for r in keep:
                 _append_index(idx, r)

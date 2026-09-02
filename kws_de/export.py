@@ -154,15 +154,26 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     out.mkdir(parents=True, exist_ok=True)
     model_name = args.model or ("command.keras" if args.v2 else "kws.keras")
     prefix = args.prefix or ("features_v2" if args.v2 else "features")
-    tflite_name = "command.tflite" if args.v2 else "model.tflite"
-    header_name = "command_data.h" if args.v2 else "model_data.h"
+    # A v3 export must not overwrite the shipped v2 artefacts: the prefix's suffix
+    # names them too (features_v3 -> command_v3.tflite / command_v3_data.h /
+    # command_v3_metadata.json), and `kws-eval --prefix` loads the same name back.
+    # Stock names are unchanged when --prefix is omitted (suffix ""), and the
+    # firmware header path below stays fixed on purpose.
+    suffix = prefix.removeprefix("features")
+    if suffix == "_v2" or not args.v2:  # v2 IS the stock command model: no suffix
+        suffix = ""
+    tflite_name = f"command{suffix}.tflite" if args.v2 else "model.tflite"
+    header_name = f"command{suffix}_data.h" if args.v2 else "model_data.h"
     labels = config.COMMAND_LABELS if args.v2 else config.LABELS
     model = tf.keras.models.load_model(config.MODELS_DIR / model_name)
     d = np.load(config.DATA_DIR / f"{prefix}_train.npz")
     blob = to_int8_tflite(model, balanced_calibration(d["X"], d["y"]))
     (out / tflite_name).write_bytes(blob)
     write_c_array(blob, out / header_name)
-    write_metadata(out / ("command_metadata.json" if args.v2 else "metadata.json"), labels=labels)
+    print(f"[export] wrote {tflite_name} + {header_name} from {model_name} ({prefix})")
+    write_metadata(
+        out / (f"command{suffix}_metadata.json" if args.v2 else "metadata.json"), labels=labels
+    )
     write_metadata(out / "metadata.json")
     if args.firmware:
         # Never bake a broken model into the firmware: validate on held-out data

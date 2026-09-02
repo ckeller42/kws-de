@@ -102,18 +102,20 @@ IN_TRAINING = "user-customised, in-training"
 
 def _relative_to_data_root(p) -> str:
     """Portable display form of a path under the data root (`data/manifest.json`,
-    `data/recordings/approved`, ...) for reports/sidecars that get git-committed —
-    NEVER the absolute resolution, which embeds the local `KWS_DATA_ROOT` and
-    username (`config.py`: "Never commit a machine path here"). Falls back to
-    just the basename for a path outside the data root (e.g. a test's tmp_path),
-    which is still safe (no machine-local directory structure leaked)."""
+    `models/command_v3.tflite`, `data/recordings/approved`, ...) for reports/sidecars
+    that get git-committed — NEVER the absolute resolution, which embeds the local
+    `KWS_DATA_ROOT` and username (`config.py`: "Never commit a machine path here").
+    Falls back to just the basename for a path outside the data root (e.g. a test's
+    tmp_path), which is still safe (no machine-local directory structure leaked)."""
     from pathlib import Path
 
     p = Path(p)
-    try:
-        return str(Path("data") / p.relative_to(config.DATA_DIR))
-    except ValueError:
-        return p.name
+    for name, base in (("data", config.DATA_DIR), ("models", config.MODELS_DIR)):
+        try:
+            return str(Path(name) / p.relative_to(base))
+        except ValueError:
+            continue
+    return p.name
 
 
 def _trained_speakers(manifest_path) -> tuple[set[str], bool, str | None]:
@@ -199,11 +201,14 @@ def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=N
     e2e = defaultdict(lambda: defaultdict(lambda: {"n": 0, "ok": 0}))
     idx = approved / "phrases" / "index.csv"
     if idx.exists():
-        for r in csv.DictReader(idx.open()):
-            got = parse(_events(approved / "phrases" / r["file"]))
-            e = e2e[figure_for("phrases", r["speaker"])][r["speaker"]]
-            e["n"] += 1
-            e["ok"] += isinstance(got, Intent) and got == prompt_intent(r["prompt"])
+        # index `file` is already relative to approved/ — qc.run_qc writes
+        # `str(dst.relative_to(approved))`, so it carries the "phrases/" segment itself.
+        with idx.open() as fh:
+            for r in csv.DictReader(fh):
+                got = parse(_events(approved / r["file"]))
+                e = e2e[figure_for("phrases", r["speaker"])][r["speaker"]]
+                e["n"] += 1
+                e["ok"] += isinstance(got, Intent) and got == prompt_intent(r["prompt"])
     for label, per_spk in e2e.items():
         figures[label]["e2e"] = {
             s: {"n": v["n"], "acc": v["ok"] / v["n"]} for s, v in per_spk.items()
@@ -212,11 +217,12 @@ def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=N
     fa = defaultdict(lambda: defaultdict(lambda: {"n": 0, "fired": 0}))
     nidx = approved / "negatives" / "index.csv"
     if nidx.exists():
-        for r in csv.DictReader(nidx.open()):
-            got = parse(_events(approved / "negatives" / r["file"]))
-            n = fa[figure_for("negatives", r["speaker"])][r["speaker"]]
-            n["n"] += 1
-            n["fired"] += isinstance(got, Intent)
+        with nidx.open() as fh:  # `file` relative to approved/, as for phrases
+            for r in csv.DictReader(fh):
+                got = parse(_events(approved / r["file"]))
+                n = fa[figure_for("negatives", r["speaker"])][r["speaker"]]
+                n["n"] += 1
+                n["fired"] += isinstance(got, Intent)
     for label, per_spk in fa.items():
         figures[label]["false_accepts"] = {
             s: {"n": v["n"], "rate": v["fired"] / v["n"]} for s, v in per_spk.items()
@@ -240,13 +246,30 @@ def _figure_totals(fig: dict) -> tuple[int, set[str]]:
     return n_clips, speakers
 
 
+RECORDINGS_SECTION_START = "<!-- kws-eval:recordings:start -->"
+RECORDINGS_SECTION_END = "<!-- kws-eval:recordings:end -->"
+
+
+def replace_recordings_section(report: str, section: str) -> str:
+    """Put `section` into `report` between the marker comments, replacing whatever
+    was there — one run of `kws-eval --recordings` leaves exactly ONE recordings
+    section, so the markdown can never disagree with the JSON sidecar (which is
+    overwritten every run). Appends the marked block if the report has none yet."""
+    body = f"{RECORDINGS_SECTION_START}\n\n{section}\n{RECORDINGS_SECTION_END}\n"
+    start = report.find(RECORDINGS_SECTION_START)
+    end = report.find(RECORDINGS_SECTION_END)
+    if start != -1 and end > start:
+        return report[:start] + body + report[end + len(RECORDINGS_SECTION_END) + 1 :]
+    return (report.rstrip("\n") + "\n\n" if report.strip() else "") + body
+
+
 def render_recordings_section(res: dict) -> str:
     """Markdown for the recordings-based eval: two figures, labelled verbatim
     `IN_TRAINING` (`"user-customised, in-training"`) and `HELD_OUT` (`"held-out"`),
     each stating its clip count, speaker count, and (once, up top) the
-    data-root-relative manifest path checked (never an absolute, machine-local
-    path -- see `_relative_to_data_root`) -- or that none was found, in which
-    case every clip is held-out."""
+    data-root-relative manifest path checked and the model file actually measured
+    (never an absolute, machine-local path -- see `_relative_to_data_root`) -- or
+    that no manifest was found, in which case every clip is held-out."""
     if res["manifest_found"]:
         built = f", built {res['manifest_built_at']}" if res.get("manifest_built_at") else ""
         out = [f"Training manifest checked: `{res['manifest_path']}`{built}.\n"]
@@ -263,6 +286,14 @@ def render_recordings_section(res: dict) -> str:
         out = [f"No training manifest found at `{res['manifest_path']}`; all clips held-out.\n"]
     else:
         out = ["No training manifest given; all clips held-out.\n"]
+
+    if res.get("model_path"):
+        sha = res.get("model_sha256", "")
+        out.insert(
+            0,
+            f"Model measured: `{res['model_path']}` (sha256 `{sha[:12]}`)"
+            f"{', evaluated ' + res['evaluated_at'] if res.get('evaluated_at') else ''}.\n",
+        )
 
     for label in (IN_TRAINING, HELD_OUT):
         fig = res["figures"][label]
@@ -730,30 +761,41 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         _write_catalog_report(out)
         return
     if args.recordings:
+        import hashlib
         import json
+        from datetime import UTC, datetime
         from pathlib import Path
 
-        out = args.out if args.out != "docs/eval-report.md" else "docs/eval-report-v2.md"
+        # `--prefix P` selects P's manifest, P's model artefact AND P's report:
+        # v3 recordings figures must never land in the v2 catalog report.
+        suffix = (args.prefix or "features").removeprefix("features")
+        if args.out != "docs/eval-report.md":
+            out = args.out
+        else:
+            out = f"docs/eval-report{suffix.replace('_', '-') or '-v2'}.md"
         out_path = config.DATA_DIR.parent / out
         out_path.parent.mkdir(parents=True, exist_ok=True)
         approved_dir = Path(args.recordings)
         if not approved_dir.is_dir():
             note = f"no approved recordings found under {_relative_to_data_root(approved_dir)}\n"
-            with out_path.open("a") as fh:
-                fh.write("\n" + note)
+            report = out_path.read_text() if out_path.exists() else ""
+            out_path.write_text(replace_recordings_section(report, note))
             print(note.strip())
             return
+        model_path = config.MODELS_DIR / (f"command{suffix}.tflite" if suffix else "command.tflite")
         try:
-            tflite_bytes = (config.MODELS_DIR / "command.tflite").read_bytes()
+            tflite_bytes = model_path.read_bytes()
             predict_fn = make_command_predict_fn(tflite_bytes)
         except Exception as e:  # noqa: BLE001 - re-raised with context, not swallowed
             raise SystemExit(f"could not load command model for --recordings: {e}") from e
-        suffix = (args.prefix or "features").removeprefix("features")
         manifest_path = config.DATA_DIR / f"manifest{suffix}.json"
         res = eval_recordings(approved_dir, predict_fn, manifest_path=manifest_path)
+        res["model_path"] = _relative_to_data_root(model_path)
+        res["model_sha256"] = hashlib.sha256(tflite_bytes).hexdigest()
+        res["evaluated_at"] = datetime.now(UTC).isoformat()
         section = render_recordings_section(res)
-        with out_path.open("a") as fh:
-            fh.write("\n" + section)
+        report = out_path.read_text() if out_path.exists() else ""
+        out_path.write_text(replace_recordings_section(report, section))
         json_path = Path(f"{out_path}.recordings.json")
         json_path.write_text(json.dumps(res, indent=2))
         print(f"wrote recordings section to {out_path}, data to {json_path}")
