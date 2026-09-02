@@ -1,9 +1,10 @@
 #include "console.h"
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include "driver/uart.h"
-#include "driver/uart_vfs.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#include "esp_log.h"
+#include "tusb_cdc_acm.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "record.h"
@@ -67,46 +68,52 @@ static void handle_line(char *line)
     }
 }
 
+/* Pull whatever bytes are waiting on the active input. The CoreS3 has no
+   UART bridge: its USB-C is the ESP32-S3's own USB-Serial-JTAG peripheral, so
+   host bytes arrive there (IDF only *mirrors* stdout onto it as the secondary
+   console; stdin stays on the unconnected UART0 - reading stdin never sees a
+   host command). In USB-drive mode TinyUSB owns the PHY and the JTAG port is
+   gone, so the CDC-ACM port is read instead. Both reads are bounded, so this
+   task never parks across the mode switch and never drops a partial line. */
+static size_t console_read(uint8_t *buf, size_t cap)
+{
+    if (app_get_mode() == UI_MODE_USB) {
+        size_t n = 0;
+        if (tinyusb_cdcacm_read(TINYUSB_CDC_ACM_0, buf, cap, &n) != ESP_OK) n = 0;
+        if (n == 0) vTaskDelay(pdMS_TO_TICKS(20));
+        return n;
+    }
+    int n = usb_serial_jtag_read_bytes(buf, cap, pdMS_TO_TICKS(50));
+    return n > 0 ? (size_t)n : 0;
+}
+
 static void console_task(void *arg)
 {
     (void)arg;
-    char line[64];
+    static char line[64];
+    size_t len = 0;
+    uint8_t buf[32];
     for (;;) {
-        if (fgets(line, sizeof line, stdin)) {
-            handle_line(line);
-        } else {
-            /* No line ready (stdin is non-blocking - see console_start()) or a
-               transient read error; clearerr() so a stuck error indicator
-               can't wedge every future fgets() on this stream. */
-            clearerr(stdin);
+        size_t n = console_read(buf, sizeof buf);
+        for (size_t i = 0; i < n; i++) {
+            char c = (char)buf[i];
+            if (c == '\n' || c == '\r') {
+                if (len) { line[len] = 0; handle_line(line); len = 0; }
+                continue;
+            }
+            if (len < sizeof line - 1) line[len++] = c;   /* overlong line: keep the tail */
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
 void console_start(void)
 {
-    /* The console UART starts in the ROM's polling driver (busy-waits on
-       every byte, no FreeRTOS yield). Installing the interrupt-driven UART
-       driver and switching the VFS to it makes fgets() a normal read that
-       sleeps the task instead of spinning the CPU. */
-    uart_driver_install((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, 256, 0, 0, NULL, 0);
-    uart_vfs_dev_use_driver(CONFIG_ESP_CONSOLE_UART_NUM);
-    setvbuf(stdin, NULL, _IONBF, 0);
-    /* Non-blocking stdin, not blocking: usb_drive.c's usb_drive_enter()/exit()
-       can freopen() stdin/stdout out from under this task (moving the console
-       onto/off the CDC-ACM port for USB mode) from a different task (e.g. the
-       UI task, when USB mode is entered by tapping the menu rather than over
-       a serial 'mode usb' command). The UART VFS driver's blocking read
-       parks the caller in a FreeRTOS queue wait with no timeout
-       (uart_read_bytes(..., portMAX_DELAY) - see esp-idf's uart_vfs.c); if
-       this task were blocked in that wait when the redirect happens, it
-       would never return (no more bytes ever arrive on the old fd), and USB
-       mode's CDC console would never get read. The CDC-ACM VFS read
-       (esp_tinyusb's vfs_tinyusb.c) is already always non-blocking, so
-       matching that here means this loop's fgets() call can never block past
-       one vTaskDelay(20ms) tick on either port, on either side of the
-       switch. */
-    fcntl(fileno(stdin), F_SETFL, O_NONBLOCK);
+    /* Interrupt-driven USB-Serial-JTAG driver: console_read() polls its ring
+       with a bounded wait, and the VFS switch keeps stdout (logs, the replies
+       printed by handle_line()) flowing through the same driver. In USB-drive
+       mode usb_drive.c redirects stdout onto the CDC port instead. */
+    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
+    usb_serial_jtag_vfs_use_driver();
     xTaskCreatePinnedToCore(console_task, "console", 4096, NULL, 1, NULL, 0);
 }

@@ -190,14 +190,20 @@ while this mode is active, so what you see is the wake model alone.
 
 ## Serial commands
 
-The console UART (the same USB-serial port used for flashing/monitor,
+The console port (the same USB-serial port used for flashing/monitor,
 e.g. `/dev/cu.usbmodemNNN`) also accepts newline-terminated commands,
 letting a laptop drive the device — the automated data-ingest workflow
-uses this to switch the device into USB mode without touching the screen:
+uses this to switch the device into USB mode without touching the screen.
+That port is the ESP32-S3's own USB-Serial-JTAG peripheral (the CoreS3 has
+no UART bridge; UART0 is not connected), so the firmware reads commands
+from the USB-Serial-JTAG driver, not from `stdin`. Opening the port toggles
+DTR/RTS, which resets the chip: use a serial tool that holds both lines low
+(e.g. pyserial with `dtr = rts = False` before `open()`), wait for the boot
+log to pass, then send:
 
-```bash
-echo 'mode usb' > /dev/cu.usbmodemNNN
-echo 'status'   > /dev/cu.usbmodemNNN
+```text
+mode usb
+status
 ```
 
 - `mode menu|record|recordwake|recognise|wake|usb` — switches the app
