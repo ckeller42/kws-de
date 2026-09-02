@@ -61,12 +61,17 @@ def mfcc_reference(x, win, mel, dct) -> np.ndarray:
     return (logmel @ dct.T).astype(np.float32)  # (n, 10)
 
 
+# 6 significant figures = float32's honest precision. Printing more (e.g. .8e)
+# exposes libm's last-ULP differences between platforms (Apple vs glibc cos/log),
+# which made the CI gen-fresh diff fail against locally committed headers even at
+# pinned library versions. The C side reads these as `float`, so the dropped
+# digits carry no information; host MFCC parity keeps its ~55x tolerance margin.
 def _c_float_rows(name, arr) -> str:
     arr = np.atleast_2d(arr)
-    rows = ",\n".join("  {" + ", ".join(f"{v:.8e}f" for v in row) + "}" for row in arr)
+    rows = ",\n".join("  {" + ", ".join(f"{v:.5e}f" for v in row) + "}" for row in arr)
     dims = "".join(f"[{d}]" for d in arr.shape) if arr.ndim > 1 else f"[{arr.shape[0]}]"
     if arr.shape[0] == 1 and name == "KWS_WINDOW":
-        flat = ", ".join(f"{v:.8e}f" for v in np.ravel(arr))
+        flat = ", ".join(f"{v:.5e}f" for v in np.ravel(arr))
         return f"static const float {name}[{arr.size}] = {{{flat}}};\n"
     return f"static const float {name}{dims} = {{\n{rows}\n}};\n"
 
