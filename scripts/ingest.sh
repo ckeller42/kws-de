@@ -69,6 +69,10 @@ if [[ $local_wavs != "$remote_wavs" ]]; then
   echo "wav count mismatch: local=$local_wavs remote=$remote_wavs — host copy kept at $host:$hostdir" >&2
   exit 1
 fi
+[[ -f "$dest/sessions.csv" ]] || {
+  echo "no sessions.csv in $dest — host copy kept at $host:$hostdir" >&2
+  exit 1
+}
 session_rows=$(($(wc -l < "$dest/sessions.csv") - 1))
 if [[ $session_rows != "$local_wavs" ]]; then
   echo "sessions.csv has $session_rows rows but $local_wavs wavs — host copy kept at $host:$hostdir" >&2
@@ -76,7 +80,11 @@ if [[ $session_rows != "$local_wavs" ]]; then
 fi
 (( local_wavs > 0 )) || { echo "nothing pulled into $dest" >&2; exit 1; }
 # 5. device back to the selection screen (port is back once the drive is ejected)
-wait_for 'ls /dev/cu.usbmodem* 2>/dev/null | head -1' && port=$reply
+if wait_for 'ls /dev/cu.usbmodem* 2>/dev/null | head -1'; then
+  port=$reply
+else
+  echo "warning: no /dev/cu.usbmodem* on $host within 20 s — still using '$port'" >&2
+fi
 # shellcheck disable=SC2029 # $port must expand client-side: it names the file on the remote we write to
 run ssh "$host" "printf 'mode menu\n' > '$port'" || echo "warning: could not send 'mode menu' — tap Menu on the device" >&2
 echo "ingested $local_wavs takes -> $dest"

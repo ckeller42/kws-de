@@ -13,6 +13,7 @@
 #   --prefix P     npz/model/manifest prefix (default: features_v3)
 #   -n             dry run: print the commands each stage would run, run none
 set -euo pipefail
+cd "$(dirname "$0")/.."   # scripts/ingest.sh and `uv run` resolve against the repo root
 
 host=${KWSREC_HOST:-}
 prefix=features_v3
@@ -64,6 +65,22 @@ stage "QC $incoming"
 run uv run --no-sync kws-qc "$incoming"
 
 stage "dataset build ($prefix)"
+# The v3 cache holds the MSWC/TTS material only; the approved recordings are merged in
+# by every build (kws_de.data.merge_recordings), so seeding it from the full real+TTS
+# cache is enough. NEVER seed from raw_clips_v2.pkl: it is a 25-word subset with empty
+# lists, which makes the build re-synthesise ~300 TTS clips per word (87% TTS) and the
+# INT8 model then fails the export health gate.
+cache="$KWS_DATA_ROOT/data/raw_clips_v3.pkl"
+if [[ ! -f $cache ]]; then
+  seed="$KWS_DATA_ROOT/data/raw_clips_merged.pkl"
+  [[ -f $seed ]] || {
+    echo "no $cache and no $seed to seed it from — mine MSWC once first:" >&2
+    echo "  uv run --no-sync kws-data --fetch --v3 --mswc-root <mswc-de-dir>" >&2
+    exit 1
+  }
+  echo "seeding $(basename "$cache") from $(basename "$seed") (full real+TTS cache)"
+  run cp "$seed" "$cache"
+fi
 run uv run --no-sync kws-dataset build --cache raw_clips_v3.pkl --prefix "$prefix"
 
 if (( ! skip_train )); then
@@ -76,4 +93,4 @@ fi
 stage "evals"
 run uv run --no-sync kws-eval --recordings "$rec/approved" --prefix "$prefix" --out docs/eval-report-v3.md
 
-echo "done: held-out figures + user-customised section in docs/eval-report-v3.md. Flash with your flash script for the device host."
+echo "done: held-out + user-customised figures in \$KWS_DATA_ROOT/docs/eval-report-v3.md. Flash with your flash script for the device host."
