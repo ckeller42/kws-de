@@ -215,3 +215,156 @@ def write_qc_csv(rows: list[QcRow], path: Path) -> None:
         w.writeheader()
         for r in rows:
             w.writerow(asdict(r))
+
+
+def segment_word(sig: np.ndarray, sr: int, start_s: float, end_s: float) -> np.ndarray:
+    """1 s window (config.CLIP_SAMPLES) centred on the word span, zero-padded at edges."""
+    n = config.CLIP_SAMPLES
+    centre = int(round((start_s + end_s) / 2 * sr))
+    lo = centre - n // 2
+    out = np.zeros(n, dtype=np.float32)
+    src_lo, src_hi = max(lo, 0), min(lo + n, len(sig))
+    if src_hi > src_lo:
+        out[src_lo - lo : src_hi - lo] = sig[src_lo:src_hi]
+    return out
+
+
+def _take_no(path: Path) -> str:
+    m = re.search(r"(\d{3})\.wav$", path.name)
+    return m.group(1) if m else "001"
+
+
+def _slug_of(path: Path) -> str:
+    return re.sub(r"_\d{3}\.wav$", "", path.name)
+
+
+def _clear_session(approved: Path, speaker: str) -> None:
+    """Remove this speaker's previous outputs so re-runs are idempotent."""
+    for sub in ("phrases", "negatives"):
+        d = approved / sub / speaker
+        if d.is_dir():
+            for f in d.glob("*.wav"):
+                f.unlink()
+    for f in (approved / "words").glob(f"*/{speaker}_*.wav"):
+        f.unlink()
+
+
+def _append_index(path: Path, row: dict) -> None:
+    new = not path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["file", "prompt", "speaker"])
+        if new:
+            w.writeheader()
+        w.writerow(row)
+
+
+def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcriber) -> dict:
+    incoming, qc_dir, approved = Path(incoming), Path(qc_dir), Path(approved)
+    takes = read_sessions(incoming)
+    speakers = {t.speaker for t in takes}
+    for spk in speakers:
+        _clear_session(approved, spk)
+    for sub in ("phrases", "negatives"):
+        idx = approved / sub / "index.csv"
+        if idx.exists():  # drop this session's rows, keep other sessions'
+            keep = [r for r in csv.DictReader(idx.open()) if r["speaker"] not in speakers]
+            idx.unlink()
+            for r in keep:
+                _append_index(idx, r)
+
+    rows, words_rows, n_words = [], [], 0
+    for t in takes:
+        row, tr = judge(t, transcriber)
+        rows.append(row)
+        if row.verdict != "approve":
+            continue
+        no = _take_no(t.file)
+        if t.set == "words":
+            # ponytail: word-set prompts are always canonical command words in
+            # practice; `or tok` is a defensive fallback, not a real code path.
+            tok = required_tokens(t.prompt, "words")[0]
+            lab = label_for_token(tok) or tok
+            dst = approved / "words" / lab / f"{t.speaker}_{no}.wav"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(t.file.read_bytes())
+            n_words += 1
+        elif t.set == "sentences":
+            sig, sr = sf.read(t.file, dtype="float32", always_2d=True)
+            sig = sig[:, 0]
+            dst = approved / "phrases" / t.speaker / f"{_slug_of(t.file)}_{no}.wav"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(t.file.read_bytes())
+            _append_index(
+                approved / "phrases" / "index.csv",
+                {
+                    "file": str(dst.relative_to(approved)),
+                    "prompt": t.prompt,
+                    "speaker": t.speaker,
+                },
+            )
+            need = required_tokens(t.prompt, "sentences")
+            spans = [(normalise(w["word"]), w["start"], w["end"]) for w in tr.get("words", [])]
+            pos = 0
+            for tok in need:
+                while pos < len(spans) and not (spans[pos][0] and _matches(tok, spans[pos][0][0])):
+                    pos += 1
+                if pos >= len(spans):
+                    break
+                _, s, e = spans[pos]
+                pos += 1
+                lab = label_for_token(tok) or tok
+                out = approved / "words" / lab / f"{t.speaker}_{no}.wav"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                sf.write(out, segment_word(sig, sr, s, e), sr, subtype="PCM_16")
+                words_rows.append(
+                    {
+                        "src": str(t.file),
+                        "word": lab,
+                        "speaker": t.speaker,
+                        "start_ms": int(s * 1000),
+                        "end_ms": int(e * 1000),
+                        "out_file": str(out),
+                    }
+                )
+                n_words += 1
+        else:
+            dst = approved / "negatives" / t.speaker / f"{_slug_of(t.file)}_{no}.wav"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(t.file.read_bytes())
+            _append_index(
+                approved / "negatives" / "index.csv",
+                {
+                    "file": str(dst.relative_to(approved)),
+                    "prompt": t.prompt,
+                    "speaker": t.speaker,
+                },
+            )
+
+    qc_dir.mkdir(parents=True, exist_ok=True)
+    write_qc_csv(rows, qc_dir / "qc.csv")
+    with (qc_dir / "words.csv").open("w", newline="") as fh:
+        w = csv.DictWriter(
+            fh, fieldnames=["src", "word", "speaker", "start_ms", "end_ms", "out_file"]
+        )
+        w.writeheader()
+        w.writerows(words_rows)
+
+    approved_n = sum(r.verdict == "approve" for r in rows)
+    rejects = [r for r in rows if r.verdict != "approve"]
+    (qc_dir / "report.md").write_text(
+        f"# QC {incoming.name}\n\n{len(rows)} takes, {approved_n} approved, "
+        f"{len(rejects)} rejected, {n_words} word clips written.\n\n## Rejects\n\n"
+        + "".join(
+            f"- `{Path(r.file).relative_to(incoming)}` — reject: {r.reason} "
+            f'(heard: "{r.transcript}")\n'
+            for r in rejects
+        )
+        + "\n"
+    )
+    return {
+        "takes": len(rows),
+        "approved": approved_n,
+        "rejected": len(rejects),
+        "words_written": n_words,
+    }

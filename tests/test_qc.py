@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from kws_de import qc
+from kws_de import config, qc
 
 
 def _wav(path: Path, sig: np.ndarray, sr: int = 16000):
@@ -110,3 +110,65 @@ def test_label_for_token_maps_normalised_token_back_to_config_label():
     assert qc.label_for_token("an") == "an"
     assert qc.label_for_token("hundert") == "hundert"
     assert qc.label_for_token("nonexistent") is None
+
+
+def test_segment_word_centres_and_pads():
+    sr = 16000
+    sig = np.zeros(sr * 2, dtype=np.float32)
+    sig[sr : sr + 1600] = 0.5  # 100 ms burst at 1.0 s
+    seg = qc.segment_word(sig, sr, 1.0, 1.1)
+    assert seg.shape == (config.CLIP_SAMPLES,)
+    assert np.argmax(np.abs(seg)) in range(
+        config.CLIP_SAMPLES // 2 - 1000, config.CLIP_SAMPLES // 2 + 1000
+    )
+    edge = qc.segment_word(sig, sr, 0.0, 0.1)  # window would start before 0
+    assert edge.shape == (config.CLIP_SAMPLES,) and np.all(edge[:4000] == 0)
+
+
+def test_label_for_token():
+    assert qc.label_for_token("küche") == "Küche" and qc.label_for_token("licht") == "Licht"
+    assert qc.label_for_token("fünfzig") == "fünfzig"
+
+
+def test_run_qc_writes_approved_tree_and_is_idempotent(tmp_path):
+    inc = tmp_path / "incoming" / "s1"
+    _wav(inc / "spk02" / "licht" / "001.wav", _tone())
+    _wav(inc / "spk02" / "_phrase_" / "licht-kueche-an_001.wav", _tone(ms=1500))
+    _wav(inc / "spk02" / "_neg_" / "hallo-welt_001.wav", _tone())
+    _wav(inc / "spk02" / "_neg_" / "hallo-welt_002.wav", np.clip(_tone(amp=3.0), -1, 1))  # clipped
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        "spk02,t,Licht,spk02/licht/001.wav,800,-10,words,1,1\n"
+        "spk02,t,Licht Küche an,spk02/_phrase_/licht-kueche-an_001.wav,1500,-10,sentences,1,2\n"
+        "spk02,t,hallo welt,spk02/_neg_/hallo-welt_001.wav,800,-10,negatives,1,3\n"
+        "spk02,t,hallo welt,spk02/_neg_/hallo-welt_002.wav,800,-1,negatives,1,4\n"
+    )
+
+    def transcriber(p: Path):
+        if "_phrase_" in str(p):
+            return {
+                "text": "Licht Küche an",
+                "words": [
+                    {"word": "Licht", "start": 0.2, "end": 0.5},
+                    {"word": "Küche", "start": 0.6, "end": 0.9},
+                    {"word": "an", "start": 1.0, "end": 1.2},
+                ],
+            }
+        return {"text": "Licht" if "licht" in str(p) else "hallo welt", "words": []}
+
+    qcd, appr = tmp_path / "qc" / "s1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts == {"takes": 4, "approved": 3, "rejected": 1, "words_written": 4}
+    assert (appr / "words" / "Licht" / "spk02_001.wav").exists()  # bare word take
+    assert (appr / "words" / "Küche" / "spk02_001.wav").exists()  # segmented from the phrase
+    assert (appr / "words" / "an" / "spk02_001.wav").exists()
+    assert (appr / "phrases" / "spk02" / "licht-kueche-an_001.wav").exists()
+    assert (appr / "negatives" / "spk02" / "hallo-welt_001.wav").exists()
+    assert not (appr / "negatives" / "spk02" / "hallo-welt_002.wav").exists()
+    idx = list(csv.DictReader((appr / "phrases" / "index.csv").open()))
+    assert idx[0]["prompt"] == "Licht Küche an" and idx[0]["speaker"] == "spk02"
+    assert (qcd / "report.md").read_text().count("reject") >= 1
+    words = list(csv.DictReader((qcd / "words.csv").open()))
+    assert {w["word"] for w in words} == {"Licht", "Küche", "an"}
+    # idempotent: a second run produces the same tree and counts
+    assert qc.run_qc(inc, qcd, appr, transcriber) == counts
