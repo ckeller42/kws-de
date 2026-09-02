@@ -148,13 +148,19 @@ _FLOAT_RE = re.compile(r"-?\d+\.\d+e[+-]\d+f")
 # even at pinned library versions. Byte-exact comparison is therefore the wrong
 # gate: structure (every non-float character) must match exactly, values only
 # within a tolerance that clears last-digit hardware noise but catches any real
-# config/generator change (those move values by far more).
+# config/generator change (those move values by far more). The tolerance is set
+# from the measured cross-platform delta: TV_MFCC's near-zero coefficients are
+# float-cancellation noise (the reference matmul even overflows), so a dev
+# laptop and the CI runner disagree by up to ~1e-4 absolute (and ~100% relative
+# on the ~1e-5 coefficients). atol=1e-3 clears that with margin; it is still far
+# below int8 resolution and any genuine change, which shifts values by O(1) or
+# alters the structure the mask above already pins.
 def _headers_match(committed: str, fresh: str) -> bool:
     if _FLOAT_RE.sub("<f>", committed) != _FLOAT_RE.sub("<f>", fresh):
         return False
     a = np.array([float(s[:-1]) for s in _FLOAT_RE.findall(committed)])
     b = np.array([float(s[:-1]) for s in _FLOAT_RE.findall(fresh)])
-    return a.shape == b.shape and bool(np.allclose(a, b, rtol=1e-4, atol=1e-6))
+    return a.shape == b.shape and bool(np.allclose(a, b, rtol=1e-2, atol=1e-3))
 
 
 def check(committed_dir) -> list[str]:

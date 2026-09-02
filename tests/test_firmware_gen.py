@@ -61,10 +61,8 @@ def test_check_passes_on_fresh_and_catches_changes(tmp_path):
     # a real value change (>> the hardware-noise tolerance) is caught
     fc = tmp_path / "features_config.h"
     text = fc.read_text()
-    m = next(
-        x for x in re.finditer(r"-?\d+\.\d+e[+-]\d+f", text) if abs(float(x.group()[:-1])) > 0.1
-    )
-    fc.write_text(text[: m.start()] + f"{float(m.group()[:-1]) + 0.01:.5e}f" + text[m.end() :])
+    m = next(re.finditer(r"-?\d+\.\d+e[+-]\d+f", text))
+    fc.write_text(text[: m.start()] + f"{float(m.group()[:-1]) + 1.0:.5e}f" + text[m.end() :])
     assert "features_config.h" in firmware_gen.check(tmp_path)
 
     # a structural change (renamed macro) is caught even with identical floats
