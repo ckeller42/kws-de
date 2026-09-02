@@ -111,6 +111,22 @@ def test_split_by_speaker_keep_speaker_preserves_speaker_id():
     assert train_spk.isdisjoint(test_spk)
 
 
+def test_split_by_speaker_no_leak_across_labels():
+    # A speaker recorded under two labels (mirrors a device speaker whose word takes and
+    # `_unknown_` negative windows share one `rec:<spk>` id) must land in exactly one
+    # split -- the speaker->split draw must be global, not independent per label.
+    rng = np.random.default_rng(9)
+    clips = {
+        "Licht": [(np.full(config.CLIP_SAMPLES, i, np.float32), f"spk{i}") for i in range(10)],
+        "_unknown_": [(np.full(config.CLIP_SAMPLES, i, np.float32), f"spk{i}") for i in range(10)],
+    }
+    train, test = split_by_speaker(clips, rng, test_frac=0.3, keep_speaker=True)
+    train_spk = {s for label in clips for _, s in train[label]}
+    test_spk = {s for label in clips for _, s in test[label]}
+    assert train_spk.isdisjoint(test_spk)
+    assert test_spk  # some speakers actually held out
+
+
 def test_origin_flags_marks_tts_rows_and_mirrors_build_dataset_order():
     clips_ws = {
         "Licht": [(np.zeros(1), "tts:Anna:180"), (np.zeros(1), "real_speaker_1")],
@@ -255,6 +271,23 @@ def test_split_three_way_is_speaker_disjoint_and_covers_all():
     assert tr.isdisjoint(va) and tr.isdisjoint(te) and va.isdisjoint(te)  # disjoint speakers
     assert tr | va | te == set(float(s) for s in range(20))  # all speakers covered
     assert len(train["Licht"]) + len(val["Licht"]) + len(test["Licht"]) == 40
+
+
+def test_split_three_way_no_leak_across_labels():
+    # Same cross-label leak guard as split_by_speaker's, for the three-way split.
+    rng = np.random.default_rng(11)
+    clips = {
+        "Licht": [(np.full(config.CLIP_SAMPLES, i, np.float32), f"spk{i}") for i in range(20)],
+        "_unknown_": [(np.full(config.CLIP_SAMPLES, i, np.float32), f"spk{i}") for i in range(20)],
+    }
+    train, val, test = split_three_way(clips, rng, val_frac=0.2, test_frac=0.2, keep_speaker=True)
+    train_spk = {s for label in clips for _, s in train[label]}
+    val_spk = {s for label in clips for _, s in val[label]}
+    test_spk = {s for label in clips for _, s in test[label]}
+    assert train_spk.isdisjoint(val_spk)
+    assert train_spk.isdisjoint(test_spk)
+    assert val_spk.isdisjoint(test_spk)
+    assert val_spk and test_spk
 
 
 def test_build_dataset_includes_transition_windows():

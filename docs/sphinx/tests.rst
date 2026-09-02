@@ -173,6 +173,101 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
    ``data/recordings/``, ``sessions.csv`` is appended, and the source is
    emptied.
 
+.. test:: QC audio/content gates, segmentation, and approved-tree layout
+   :id: TEST_QC_RULES
+   :status: passing
+   :links: REQ_PIPE_QC_AUDIO, REQ_PIPE_QC_CONTENT, REQ_PIPE_SEGMENT,
+           REQ_PIPE_APPROVED_LAYOUT
+
+   ``tests/test_qc.py``: the audio gate against synthetic clipped/quiet/
+   short/long/unreadable WAVs; the content gate's word/sentence/negative
+   rules with a stubbed transcriber, including umlaut/ß/"Prozent"
+   normalisation and the >5-letter edit-distance-1 cutoff; word
+   segmentation centres the 1 s window on the word span and zero-pads at
+   the edges; ``run_qc`` end to end writes the approved tree with
+   collision-proof numbering and is idempotent across re-runs of the same
+   stamp and across separate stamps for the same speaker.
+
+.. test:: QC numerals, glued tokens, and short-keyword boundaries
+   :id: TEST_QC_NUMERALS_GLUED
+   :status: passing
+   :links: REQ_PIPE_QC_CONTENT
+
+   ``tests/test_qc.py``:
+   ``test_content_gate_numerals_heard_as_digits`` (Whisper's "50" matches a
+   prompt's "fünfzig"),
+   ``test_content_gate_glued_keywords_still_order_sensitive_and_short_word_exact``
+   ("Lichtdach" matches "Licht Dach", "Licht heller Dach" does not), and
+   ``test_content_gate_short_keyword_boundary_check`` (a short keyword never
+   matches inside an unrelated longer word — "an" not in "dank").
+
+.. test:: QC negative rule for 2-letter keywords
+   :id: TEST_QC_NEGATIVE_KEYWORD
+   :status: passing
+   :links: REQ_PIPE_QC_CONTENT
+
+   ``tests/test_qc.py``:
+   ``test_content_gate_negatives_two_letter_keyword_needs_whole_token_or_repeat``
+   — one hallucinated 2-letter keyword does not reject a negative, a keyword
+   of 3 letters or more does, and a 2-letter keyword heard twice does.
+
+.. test:: QC wake set — rule, duration cap, and approved tree
+   :id: TEST_QC_WAKE
+   :status: passing
+   :links: REQ_PIPE_QC_AUDIO, REQ_PIPE_QC_CONTENT, REQ_PIPE_APPROVED_LAYOUT
+
+   ``tests/test_qc.py``:
+   ``test_required_tokens_and_content_gate_wake`` (the
+   ``(hey|hej|he|hei)(bus|buss|bos|boss)`` rule accepts "Hej Boss" and
+   rejects "Hallo") and
+   ``test_run_qc_writes_approved_wake_set_and_is_idempotent``
+   (``approved/wake/<spkNN>/<spkNN>_<NNN>.wav`` + ``wake/index.csv``,
+   counted in ``report.md``, no duplication on a re-run of the same stamp).
+   The 4000 ms wake cap rides on
+   ``test_audio_gate_ok_clipped_quiet_short``'s per-set cap checks.
+
+.. test:: ingest.sh pulls a session without deleting on the remote host
+   :id: TEST_INGEST
+   :status: passing
+   :links: REQ_PIPE_INGEST
+
+   ``tests/test_ingest.py``: runs the script against fake ``ssh``/``scp``/
+   ``rsync`` on ``PATH``, asserting the serial commands fire in order
+   (usb -> pull -> rsync -> menu), the local pull is count-verified against
+   the remote, and an unreachable host (ssh exit 255) exits 3.
+
+.. test:: Recordings-based eval figures and labels
+   :id: TEST_EVAL_RECORDINGS
+   :status: passing
+   :links: REQ_PIPE_EVAL_LABELS
+
+   ``tests/test_eval_recordings.py``: builds a tiny approved tree with a
+   stub predict function and asserts the isolated/e2e/false-accept figures
+   are computed and reported under the correct ``"held-out"`` /
+   ``"user-customised, in-training"`` label depending on whether the
+   clip's speaker appears in a given training manifest's ``train`` split.
+   ``test_eval_recordings_on_a_run_qc_tree`` runs the eval over a tree
+   ``qc.run_qc`` itself produced (stub transcriber), so the index-file
+   convention cannot drift between producer and consumer; the report names
+   the model file it measured, data-root-relative, and a second run rewrites
+   its section in place instead of appending a second copy.
+
+.. test:: v3 dataset build reads the approved tree and records provenance
+   :id: TEST_V3_PROVENANCE
+   :status: passing
+   :links: REQ_PIPE_APPROVED_LAYOUT, REQ_PIPE_RECORDINGS_IN_BUILD
+
+   ``tests/test_data_v3_provenance.py``: ``recordings_root`` prefers
+   ``approved/`` over the legacy layout when it exists; negative windows
+   are cut at 1 s hops tagged ``rec:<spkNN>`` (and a wrong-sample-rate file
+   is warned about and skipped, not silently included);
+   ``merge_recordings`` folds an approved tree written after the cache into
+   a cached build and does not duplicate it on a second build;
+   ``force_rec_to_train`` moves device clips out of val/test; and
+   ``dataset.build`` over a cache with no ``rec:`` clips produces a manifest
+   whose *train* split carries the device speaker and counts it as a
+   recording.
+
 CI build/gate jobs
 -------------------
 

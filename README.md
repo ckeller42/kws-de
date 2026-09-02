@@ -80,6 +80,25 @@ USB with `scripts/pull-recordings.sh`), and an on-device recogniser running
 the int8 model with the same MFCC front-end and detector as `kws_de.stream`.
 Build, flash, and the manual test checklist: [firmware/README.md](firmware/README.md).
 
+## Recording data loop
+
+Beyond MSWC/TTS, the CoreS3's own guided recorder feeds a repeatable loop:
+pull a speaker's session, quality-control it with Whisper large-v3
+(`qc` extra: `uv sync --extra qc`), fold the approved audio into the v3
+dataset, retrain, export, and report both the standard held-out accuracy
+and a **user-customised** figure on that speaker's own recordings — kept
+strictly separate, never mixed into one number. One command runs the whole
+thing end to end:
+
+```bash
+export KWS_DATA_ROOT=/path/to/data-root
+scripts/data-loop.sh -H <device-host>   # or: export KWSREC_HOST=<device-host>
+```
+
+`-H`/`KWSREC_HOST` is the SSH name of the machine the CoreS3 is plugged
+into — never hard-coded in the repo. Details, the data layout, and the two
+eval figures: [docs/sphinx/pipeline.rst](docs/sphinx/pipeline.rst).
+
 ## Development
 
 ```bash

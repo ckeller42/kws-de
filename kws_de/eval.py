@@ -3,6 +3,7 @@
 import argparse
 import os
 import pickle
+import re
 
 import numpy as np
 
@@ -84,6 +85,237 @@ def intent_text(intent) -> str:
     if intent.action in config.LIGHT_LEVELS:
         words.append("Prozent")
     return " ".join(words)
+
+
+def prompt_intent(prompt: str):
+    """Recover the true `Intent` a sentence prompt asks for, via the same
+    qc.required_tokens/label_for_token mapping QC uses to segment/label words —
+    so this is the same ground truth QC already agreed the recording matches."""
+    from kws_de import qc
+    from kws_de.grammar import parse
+
+    return parse([qc.label_for_token(t) for t in qc.required_tokens(prompt, "sentences")])
+
+
+HELD_OUT = "held-out"
+IN_TRAINING = "user-customised, in-training"
+
+
+def _relative_to_data_root(p) -> str:
+    """Portable display form of a path under the data root (`data/manifest.json`,
+    `models/command_v3.tflite`, `data/recordings/approved`, ...) for reports/sidecars
+    that get git-committed — NEVER the absolute resolution, which embeds the local
+    `KWS_DATA_ROOT` and username (`config.py`: "Never commit a machine path here").
+    Falls back to just the basename for a path outside the data root (e.g. a test's
+    tmp_path), which is still safe (no machine-local directory structure leaked)."""
+    from pathlib import Path
+
+    p = Path(p)
+    for name, base in (("data", config.DATA_DIR), ("models", config.MODELS_DIR)):
+        try:
+            return str(Path(name) / p.relative_to(base))
+        except ValueError:
+            continue
+    return p.name
+
+
+def _trained_speakers(manifest_path) -> tuple[set[str], bool, str | None]:
+    """Speaker ids (`rec:` stripped) listed in the training manifest's `train`
+    split. This is a SPEAKER-LEVEL match, not a per-clip one — `build_manifest`
+    records no per-file/take field, only which speakers' device recordings went
+    into the split (`kws_de/manifest.py`). So "in `trained_speakers`" means "this
+    speaker had SOME word/negative clip in the training build as of
+    `built_at`" — it does NOT mean this specific clip was in that build. A new
+    take QC-approved for an already-trained speaker after the manifest's
+    `built_at` is real, was never seen by the current model, and is still
+    reported as `IN_TRAINING` by `eval_recordings` purely because the speaker
+    id matches; only a fresh `kws-dataset build` (+ retrain) makes the match
+    exact again. Returns `(set(), False, None)` if no path is given or the file
+    doesn't exist — callers must never guess "in-training" without the manifest
+    saying so."""
+    import json
+    from pathlib import Path
+
+    if manifest_path is None or not Path(manifest_path).exists():
+        return set(), False, None
+    manifest = json.loads(Path(manifest_path).read_text())
+    speakers = set(manifest.get("splits", {}).get("train", {}).get("speakers", []))
+    return speakers, True, manifest.get("built_at")
+
+
+def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=None) -> dict:
+    """Recordings-based eval, split into the two honest figures: `IN_TRAINING`
+    (`"user-customised, in-training"`) for clips whose speaker's device recordings
+    are listed in `manifest_path`'s `train` split, `HELD_OUT` (`"held-out"`)
+    for everything else. Phrase clips are always `HELD_OUT` — the training build
+    (`kws_de.dataset.build`) never reads `approved/phrases/`, only `approved/words/`
+    and `approved/negatives/` (see `kws_de.data.recordings_root`/`negative_windows`),
+    so a phrase clip is never actually training material regardless of speaker.
+    With no manifest (missing path or file absent), every clip is `HELD_OUT`."""
+    import csv
+    from collections import defaultdict
+    from pathlib import Path
+
+    import soundfile as sf
+
+    from kws_de.grammar import Intent, parse
+
+    approved = Path(approved)
+    labels = config.COMMAND_LABELS
+    step = config.SAMPLE_RATE * step_ms // 1000
+    trained_speakers, manifest_found, built_at = _trained_speakers(manifest_path)
+
+    def figure_for(set_name: str, spk: str) -> str:
+        return IN_TRAINING if set_name != "phrases" and spk in trained_speakers else HELD_OUT
+
+    figures = {
+        label: {"isolated": {}, "e2e": {}, "false_accepts": {}} for label in (IN_TRAINING, HELD_OUT)
+    }
+
+    def _new_word_row():
+        return {"n": 0, "ok": 0, "per_word": defaultdict(lambda: [0, 0])}
+
+    iso = defaultdict(lambda: defaultdict(_new_word_row))
+    for f in sorted((approved / "words").glob("*/*.wav")):
+        lab, spk = f.parent.name, f.stem.split("_")[0]
+        sig, _ = sf.read(f, dtype="float32", always_2d=True)
+        pred = labels[int(np.argmax(predict_fn(sig[:, 0])))]
+        r = iso[figure_for("words", spk)][spk]
+        r["n"] += 1
+        r["ok"] += pred == lab
+        r["per_word"][lab][0] += pred == lab
+        r["per_word"][lab][1] += 1
+    for label, per_spk in iso.items():
+        figures[label]["isolated"] = {
+            s: {
+                "n": r["n"],
+                "acc": r["ok"] / r["n"],
+                "per_word": {w: a / n for w, (a, n) in r["per_word"].items()},
+            }
+            for s, r in per_spk.items()
+        }
+
+    def _events(path):
+        sig, _ = sf.read(path, dtype="float32", always_2d=True)
+        return _stream_events(predict_fn, sig[:, 0], labels, step)
+
+    e2e = defaultdict(lambda: defaultdict(lambda: {"n": 0, "ok": 0}))
+    idx = approved / "phrases" / "index.csv"
+    if idx.exists():
+        # index `file` is already relative to approved/ — qc.run_qc writes
+        # `str(dst.relative_to(approved))`, so it carries the "phrases/" segment itself.
+        with idx.open() as fh:
+            for r in csv.DictReader(fh):
+                got = parse(_events(approved / r["file"]))
+                e = e2e[figure_for("phrases", r["speaker"])][r["speaker"]]
+                e["n"] += 1
+                e["ok"] += isinstance(got, Intent) and got == prompt_intent(r["prompt"])
+    for label, per_spk in e2e.items():
+        figures[label]["e2e"] = {
+            s: {"n": v["n"], "acc": v["ok"] / v["n"]} for s, v in per_spk.items()
+        }
+
+    fa = defaultdict(lambda: defaultdict(lambda: {"n": 0, "fired": 0}))
+    nidx = approved / "negatives" / "index.csv"
+    if nidx.exists():
+        with nidx.open() as fh:  # `file` relative to approved/, as for phrases
+            for r in csv.DictReader(fh):
+                got = parse(_events(approved / r["file"]))
+                n = fa[figure_for("negatives", r["speaker"])][r["speaker"]]
+                n["n"] += 1
+                n["fired"] += isinstance(got, Intent)
+    for label, per_spk in fa.items():
+        figures[label]["false_accepts"] = {
+            s: {"n": v["n"], "rate": v["fired"] / v["n"]} for s, v in per_spk.items()
+        }
+
+    return {
+        "manifest_path": (
+            _relative_to_data_root(manifest_path) if manifest_path is not None else None
+        ),
+        "manifest_found": manifest_found,
+        "manifest_built_at": built_at,
+        "figures": figures,
+    }
+
+
+def _figure_totals(fig: dict) -> tuple[int, set[str]]:
+    n_clips = sum(
+        v["n"] for bucket in ("isolated", "e2e", "false_accepts") for v in fig[bucket].values()
+    )
+    speakers = set(fig["isolated"]) | set(fig["e2e"]) | set(fig["false_accepts"])
+    return n_clips, speakers
+
+
+RECORDINGS_SECTION_START = "<!-- kws-eval:recordings:start -->"
+RECORDINGS_SECTION_END = "<!-- kws-eval:recordings:end -->"
+
+
+def replace_recordings_section(report: str, section: str) -> str:
+    """Put `section` into `report` between the marker comments, replacing whatever
+    was there — one run of `kws-eval --recordings` leaves exactly ONE recordings
+    section, so the markdown can never disagree with the JSON sidecar (which is
+    overwritten every run). Appends the marked block if the report has none yet."""
+    body = f"{RECORDINGS_SECTION_START}\n\n{section}\n{RECORDINGS_SECTION_END}\n"
+    start = report.find(RECORDINGS_SECTION_START)
+    end = report.find(RECORDINGS_SECTION_END)
+    if start != -1 and end > start:
+        return report[:start] + body + report[end + len(RECORDINGS_SECTION_END) + 1 :]
+    return (report.rstrip("\n") + "\n\n" if report.strip() else "") + body
+
+
+def render_recordings_section(res: dict) -> str:
+    """Markdown for the recordings-based eval: two figures, labelled verbatim
+    `IN_TRAINING` (`"user-customised, in-training"`) and `HELD_OUT` (`"held-out"`),
+    each stating its clip count, speaker count, and (once, up top) the
+    data-root-relative manifest path checked and the model file actually measured
+    (never an absolute, machine-local path -- see `_relative_to_data_root`) -- or
+    that no manifest was found, in which case every clip is held-out."""
+    if res["manifest_found"]:
+        built = f", built {res['manifest_built_at']}" if res.get("manifest_built_at") else ""
+        out = [f"Training manifest checked: `{res['manifest_path']}`{built}.\n"]
+        out.append(
+            "Match is speaker-level, not per-clip: a clip counts `user-customised, "
+            "in-training` if its speaker has ANY word/negative clip in this "
+            "manifest's train split, including takes recorded/QC-approved after "
+            f"{res['manifest_built_at'] or 'the manifest was built'} — those clips "
+            "were never actually seen by the current model. Re-run `kws-dataset "
+            "build` + retrain to make the match exact again. Phrase clips are "
+            "always `held-out` (never used for training).\n"
+        )
+    elif res["manifest_path"] is not None:
+        out = [f"No training manifest found at `{res['manifest_path']}`; all clips held-out.\n"]
+    else:
+        out = ["No training manifest given; all clips held-out.\n"]
+
+    if res.get("model_path"):
+        sha = res.get("model_sha256", "")
+        out.insert(
+            0,
+            f"Model measured: `{res['model_path']}` (sha256 `{sha[:12]}`)"
+            f"{', evaluated ' + res['evaluated_at'] if res.get('evaluated_at') else ''}.\n",
+        )
+
+    for label in (IN_TRAINING, HELD_OUT):
+        fig = res["figures"][label]
+        n_clips, speakers = _figure_totals(fig)
+        out.append(f"\n## {label}\n")  # leading blank line: markdownlint MD022/MD058
+        out.append(f"{n_clips} clips across {len(speakers)} speakers.\n")
+        out.append(
+            "| speaker | isolated words n | acc | e2e phrases n | intent acc "
+            "| negatives n | false-accept rate |\n|---|---|---|---|---|---|---|"
+        )
+        for spk in sorted(speakers):
+            i = fig["isolated"].get(spk, {})
+            e = fig["e2e"].get(spk, {})
+            f = fig["false_accepts"].get(spk, {})
+            out.append(
+                f"| {spk} | {i.get('n', 0)} | {i.get('acc', float('nan')):.3f} "
+                f"| {e.get('n', 0)} | {e.get('acc', float('nan')):.3f} "
+                f"| {f.get('n', 0)} | {f.get('rate', float('nan')):.3f} |"
+            )
+    # one blank line between blocks, never two (markdownlint MD012/MD022/MD058)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out) + "\n")
 
 
 def _tts_word_clip(word: str, voice: str, rate: int = 170):  # pragma: no cover - shells out
@@ -514,10 +746,61 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         action="store_true",
         help="run the v2 full command-catalog end-to-end eval instead of the v1 report",
     )
+    ap.add_argument(
+        "--recordings",
+        default=None,
+        help="QC-approved recordings dir -> append the held-out / in-training sections",
+    )
+    ap.add_argument(
+        "--prefix",
+        default=None,
+        help="npz/manifest prefix the model was trained on (default: features -> "
+        "manifest.json; e.g. features_v3 -> manifest_v3.json), see kws_de.dataset.build",
+    )
     args = ap.parse_args()
     if args.v2_catalog:
         out = args.out if args.out != "docs/eval-report.md" else "docs/eval-report-v2.md"
         _write_catalog_report(out)
+        return
+    if args.recordings:
+        import hashlib
+        import json
+        from datetime import UTC, datetime
+        from pathlib import Path
+
+        # `--prefix P` selects P's manifest, P's model artefact AND P's report:
+        # v3 recordings figures must never land in the v2 catalog report.
+        suffix = (args.prefix or "features").removeprefix("features")
+        if args.out != "docs/eval-report.md":
+            out = args.out
+        else:
+            out = f"docs/eval-report{suffix.replace('_', '-') or '-v2'}.md"
+        out_path = config.DATA_DIR.parent / out
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        approved_dir = Path(args.recordings)
+        if not approved_dir.is_dir():
+            note = f"no approved recordings found under {_relative_to_data_root(approved_dir)}\n"
+            report = out_path.read_text() if out_path.exists() else ""
+            out_path.write_text(replace_recordings_section(report, note))
+            print(note.strip())
+            return
+        model_path = config.MODELS_DIR / (f"command{suffix}.tflite" if suffix else "command.tflite")
+        try:
+            tflite_bytes = model_path.read_bytes()
+            predict_fn = make_command_predict_fn(tflite_bytes)
+        except Exception as e:  # noqa: BLE001 - re-raised with context, not swallowed
+            raise SystemExit(f"could not load command model for --recordings: {e}") from e
+        manifest_path = config.DATA_DIR / f"manifest{suffix}.json"
+        res = eval_recordings(approved_dir, predict_fn, manifest_path=manifest_path)
+        res["model_path"] = _relative_to_data_root(model_path)
+        res["model_sha256"] = hashlib.sha256(tflite_bytes).hexdigest()
+        res["evaluated_at"] = datetime.now(UTC).isoformat()
+        section = render_recordings_section(res)
+        report = out_path.read_text() if out_path.exists() else ""
+        out_path.write_text(replace_recordings_section(report, section))
+        json_path = Path(f"{out_path}.recordings.json")
+        json_path.write_text(json.dumps(res, indent=2))
+        print(f"wrote recordings section to {out_path}, data to {json_path}")
         return
 
     model = tf.keras.models.load_model(config.MODELS_DIR / "kws.keras")
