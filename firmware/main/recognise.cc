@@ -20,6 +20,9 @@
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "ui/ui.h"
 
+_Static_assert(KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES,
+               "label count (fwgen) must match model output classes (export)");
+
 static const char *TAG = "recognise";
 static constexpr int kStepSamples = KWS_SAMPLE_RATE / 10;      /* inference every 100 ms */
 
@@ -27,11 +30,11 @@ static SemaphoreHandle_t s_lock;
 static recognise_status_t s_st;
 static volatile bool s_active;
 static uint8_t *s_arena;
-static tflite::MicroInterpreter *s_interp;
 static FILE *s_log;
 
 static void log_fire(const char *word, float conf)
 {
+    if (!s_active) return;
     if (!s_log) s_log = fopen("/rec/recognise.log", "a");
     if (!s_log) return;
     fprintf(s_log, "[Log] %lld %s %.2f\n", esp_timer_get_time() / 1000, word, conf);
@@ -46,7 +49,6 @@ static void recognise_task(void *)
     const tflite::Model *model = tflite::GetModel(g_model);
     assert(model->version() == TFLITE_SCHEMA_VERSION);
     static tflite::MicroInterpreter interp(model, resolver, s_arena, KWS_MODEL_ARENA_BYTES);
-    s_interp = &interp;
     assert(interp.AllocateTensors() == kTfLiteOk);
     ESP_LOGI(TAG, "arena used %u / %u", (unsigned)interp.arena_used_bytes(), (unsigned)KWS_MODEL_ARENA_BYTES);
     TfLiteTensor *in = interp.input(0), *out = interp.output(0);

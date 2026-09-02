@@ -65,7 +65,7 @@ def _c_float_rows(name, arr) -> str:
     arr = np.atleast_2d(arr)
     rows = ",\n".join("  {" + ", ".join(f"{v:.8e}f" for v in row) + "}" for row in arr)
     dims = "".join(f"[{d}]" for d in arr.shape) if arr.ndim > 1 else f"[{arr.shape[0]}]"
-    if arr.ndim == 1 or (arr.shape[0] == 1 and name == "KWS_WINDOW"):
+    if arr.shape[0] == 1 and name == "KWS_WINDOW":
         flat = ", ".join(f"{v:.8e}f" for v in np.ravel(arr))
         return f"static const float {name}[{arr.size}] = {{{flat}}};\n"
     return f"static const float {name}{dims} = {{\n{rows}\n}};\n"
