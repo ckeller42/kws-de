@@ -65,3 +65,30 @@ COMMAND_LABELS = DEVICES + ZONES + ACTIONS + ["_unknown_", "_silence_"]
 
 def command_index(label: str) -> int:
     return COMMAND_LABELS.index(label)
+
+
+# Guided-recorder "negative" prompts: everyday German sentences that contain
+# none of the command vocabulary. Used only for on-device recording; the
+# recordings feed false-accept evaluation later.
+NEGATIVE_PROMPTS = [
+    "wie spät ist es",
+    "wo sind wir gerade",
+    "hast du den Schlüssel gesehen",
+    "morgen wird es regnen",
+    "ich habe Hunger",
+    "wann fahren wir los",
+    "das war ein schöner Tag",
+    "kannst du mir helfen",
+    "der Kaffee ist fertig",
+    "wir brauchen noch Brot",
+    "ich gehe kurz raus",
+    "mach die Musik leiser",
+    "wie weit ist es noch",
+    "das Wetter ist super",
+    "ich bin müde",
+    "hast du gut geschlafen",
+    "wir sind gleich da",
+    "gib mir bitte das Handtuch",
+    "die Kinder schlafen schon",
+    "was gibt es heute zum Essen",
+]

@@ -378,6 +378,32 @@ effect is measured with v3.
   `kws_de/`, `firmware/` or a results report without touching paper.md or paper-notes.md
   (`PAPER_SKIP=1` for pure refactors).
 
+### On-device firmware — CoreS3 dual-mode deployment (feat/cores3-firmware)
+
+2026-09-02. The int8 command model now runs on the target hardware (M5Stack CoreS3,
+ESP32-S3), pinned to ESP-IDF v5.5.5, built reproducibly in Docker (`espressif/idf:v5.5.5`),
+final image 0xedf00 bytes (~950 KB, 69 % of the 3 MB app partition free). Two modes:
+
+- **Guided recorder** — collects real word/sentence/negative takes onto flash (`/rec/spkNN/…`,
+  numeric speaker ids only), end-pointed by an **energy VAD** (RMS over 20 ms frames vs an
+  adaptive noise floor, 2-frame open / 500 ms trailing close) that replaces esp-sr's AFE VAD:
+  no model partition, no flash cost, and host-testable. Pulled over **USB mass storage** with
+  `scripts/pull-recordings.sh`. This is the collection path for the v3 real-speech dataset the
+  paper's §4.4 provenance table is waiting on.
+- **Recogniser** — the same MFCC front-end as `kws_de.features` (the C port matches Python to
+  **1.83e-4** max abs error, host-checked against committed test vectors) feeding the int8 model
+  under TFLite-Micro with a `MicroMutableOpResolver<7>` holding exactly the five builtins the
+  export uses (CONV_2D, DEPTHWISE_CONV_2D, FULLY_CONNECTED, MEAN, SOFTMAX — plus RESHAPE, ADD),
+  arena 139 264 B in PSRAM, then the same `KeywordStream` detector as the host. Confirms the
+  op-set gate and the front-end parity claims the paper makes are real on-device, not just in
+  simulation. Device throughput (`infer_ms`, real `arena_used`) still to be logged on hardware.
+
+Reproducibility: config-derived C headers regenerate byte-identically via `kws-fwgen` (CI
+`gen-fresh` gate); model headers via `kws-export --v2 --firmware`. Follow-up: switch the
+`--firmware` INT8 calibration from `features_v2_train[:200]` to `export.balanced_calibration`
+(now available post-merge; the distill run showed balanced calibration recovers ~1.1 pt
+isolated / ~4 pt catalog) and re-export.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

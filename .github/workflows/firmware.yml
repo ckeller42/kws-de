@@ -1,0 +1,56 @@
+name: firmware
+on:
+  push: {branches: [main]}
+  pull_request:
+permissions: {contents: read}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: idf.py build (pinned IDF)
+        uses: espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d # v1
+        with:
+          esp_idf_version: v5.5.5
+          target: esp32s3
+          path: firmware
+      - name: merge single flashable image
+        run: |
+          # esp-idf-ci-action builds inside a container as root, so firmware/build
+          # comes back root-owned; hand it back before the host esptool step writes here.
+          sudo chown -R "$(id -u):$(id -g)" firmware/build
+          pip install esptool
+          cd firmware/build
+          esptool.py --chip esp32s3 merge_bin -o "kws-de-fw-${GITHUB_SHA::7}.bin" @flash_args
+          ls -l kws-de-fw-*.bin
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kws-de-fw-${{ github.sha }}
+          path: firmware/build/kws-de-fw-*.bin
+          retention-days: 30
+  gen-fresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5
+        with: {python-version: "3.11"}
+      # The headers embed librosa/scipy-computed float tables (mel, DCT, window),
+      # so the check is only deterministic against the *locked* numpy/scipy/librosa
+      # that produced the committed files — pip's fresh resolve drifts in the last
+      # digits. uv sync --frozen replays uv.lock exactly.
+      - run: pip install uv
+      - name: committed config-derived headers are current
+        run: |
+          uv sync --frozen
+          # Structure must match exactly; the float tables (mel/DCT/window, TV_MFCC)
+          # are CPU-SIMD- and BLAS-order-dependent, so they are compared within a
+          # tolerance that clears hardware last-digit noise but catches any real
+          # config/generator change. See kws_de.firmware_gen.check.
+          uv run kws-fwgen --check firmware/main/gen
+  host-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - run: make -C firmware/test
+      - name: shellcheck scripts
+        run: shellcheck scripts/*.sh
