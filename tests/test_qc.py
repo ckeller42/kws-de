@@ -130,7 +130,22 @@ def test_label_for_token():
     assert qc.label_for_token("fünfzig") == "fünfzig"
 
 
-def test_run_qc_writes_approved_tree_and_is_idempotent(tmp_path):
+def _phrase_transcriber(p: Path):
+    if "_phrase_" in str(p):
+        return {
+            "text": "Licht Küche an",
+            "words": [
+                {"word": "Licht", "start": 0.2, "end": 0.5},
+                {"word": "Küche", "start": 0.6, "end": 0.9},
+                {"word": "an", "start": 1.0, "end": 1.2},
+            ],
+        }
+    return {"text": "Licht" if "licht" in str(p) else "hallo welt", "words": []}
+
+
+def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tmp_path):
+    # bare "Licht" word take AND a phrase containing "Licht" share take number 001 ->
+    # both must land on distinct approved paths, not alias to the same file.
     inc = tmp_path / "incoming" / "s1"
     _wav(inc / "spk02" / "licht" / "001.wav", _tone())
     _wav(inc / "spk02" / "_phrase_" / "licht-kueche-an_001.wav", _tone(ms=1500))
@@ -144,23 +159,18 @@ def test_run_qc_writes_approved_tree_and_is_idempotent(tmp_path):
         "spk02,t,hallo welt,spk02/_neg_/hallo-welt_002.wav,800,-1,negatives,1,4\n"
     )
 
-    def transcriber(p: Path):
-        if "_phrase_" in str(p):
-            return {
-                "text": "Licht Küche an",
-                "words": [
-                    {"word": "Licht", "start": 0.2, "end": 0.5},
-                    {"word": "Küche", "start": 0.6, "end": 0.9},
-                    {"word": "an", "start": 1.0, "end": 1.2},
-                ],
-            }
-        return {"text": "Licht" if "licht" in str(p) else "hallo welt", "words": []}
-
     qcd, appr = tmp_path / "qc" / "s1", tmp_path / "approved"
-    counts = qc.run_qc(inc, qcd, appr, transcriber)
-    assert counts == {"takes": 4, "approved": 3, "rejected": 1, "words_written": 4}
-    assert (appr / "words" / "Licht" / "spk02_001.wav").exists()  # bare word take
-    assert (appr / "words" / "Küche" / "spk02_001.wav").exists()  # segmented from the phrase
+    counts = qc.run_qc(inc, qcd, appr, _phrase_transcriber)
+    assert counts == {
+        "takes": 4,
+        "approved": 3,
+        "rejected": 1,
+        "words_written": 4,
+        "words_skipped": 0,
+    }
+    licht_files = sorted((appr / "words" / "Licht").glob("*.wav"))
+    assert len(licht_files) == 2  # bare take + phrase-segmented word, distinct files
+    assert (appr / "words" / "Küche" / "spk02_001.wav").exists()
     assert (appr / "words" / "an" / "spk02_001.wav").exists()
     assert (appr / "phrases" / "spk02" / "licht-kueche-an_001.wav").exists()
     assert (appr / "negatives" / "spk02" / "hallo-welt_001.wav").exists()
@@ -170,5 +180,94 @@ def test_run_qc_writes_approved_tree_and_is_idempotent(tmp_path):
     assert (qcd / "report.md").read_text().count("reject") >= 1
     words = list(csv.DictReader((qcd / "words.csv").open()))
     assert {w["word"] for w in words} == {"Licht", "Küche", "an"}
-    # idempotent: a second run produces the same tree and counts
-    assert qc.run_qc(inc, qcd, appr, transcriber) == counts
+    assert counts["words_written"] == len(list((appr / "words").rglob("*.wav")))
+
+    # re-run the SAME stamp: no duplication, no growth in file count
+    counts2 = qc.run_qc(inc, qcd, appr, _phrase_transcriber)
+    assert counts2 == counts
+    assert len(list((appr / "words" / "Licht").glob("*.wav"))) == 2
+    assert len(list((appr / "phrases" / "spk02").glob("*.wav"))) == 1
+    assert len(list(csv.DictReader((appr / "phrases" / "index.csv").open()))) == 1
+
+
+def test_run_qc_two_stamps_same_speaker_dont_alias_or_duplicate(tmp_path):
+    def sessions(inc: Path, take_no: str):
+        _wav(inc / "spk02" / "licht" / f"{take_no}.wav", _tone())
+        (inc / "sessions.csv").write_text(
+            "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+            f"spk02,t,Licht,spk02/licht/{take_no}.wav,800,-10,words,1,1\n"
+        )
+
+    inc1, inc2 = tmp_path / "incoming" / "s1", tmp_path / "incoming" / "s2"
+    sessions(inc1, "001")
+    sessions(inc2, "001")  # each session numbers its own takes from 001
+    qcd1, qcd2, appr = tmp_path / "qc" / "s1", tmp_path / "qc" / "s2", tmp_path / "approved"
+
+    def transcriber(p: Path):
+        return {"text": "Licht", "words": []}
+
+    c1 = qc.run_qc(inc1, qcd1, appr, transcriber)
+    c2 = qc.run_qc(inc2, qcd2, appr, transcriber)
+    assert c1["words_written"] == c2["words_written"] == 1
+    licht = appr / "words" / "Licht"
+    assert len(list(licht.glob("*.wav"))) == 2  # both stamps' clips coexist
+
+    # re-running stamp s1 alone must not touch s2's approved output
+    before_s2 = {f.name: f.read_bytes() for f in licht.glob("spk02_*.wav")}
+    c1_again = qc.run_qc(inc1, qcd1, appr, transcriber)
+    assert c1_again["words_written"] == 1
+    assert len(list(licht.glob("*.wav"))) == 2  # s1's old clip replaced, not added
+    survivors = {f.name: f.read_bytes() for f in licht.glob("spk02_*.wav")}
+    # at least one file from before the re-run is untouched (s2's)
+    assert set(before_s2.items()) & set(survivors.items())
+
+
+def test_run_qc_unmapped_word_token_is_skipped_not_mislabelled(tmp_path):
+    inc = tmp_path / "incoming" / "s1"
+    _wav(inc / "spk02" / "blau" / "001.wav", _tone())
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        "spk02,t,Blau,spk02/blau/001.wav,800,-10,words,1,1\n"
+    )
+
+    def transcriber(p: Path):
+        return {"text": "Blau", "words": []}
+
+    qcd, appr = tmp_path / "qc" / "s1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["approved"] == 1  # content gate approved it
+    assert counts["words_written"] == 0
+    assert counts["words_skipped"] == 1
+    assert not (appr / "words").exists() or not list((appr / "words").rglob("*.wav"))
+
+
+def test_run_qc_segmentation_gap_reported_when_word_spans_miss_a_token(tmp_path):
+    inc = tmp_path / "incoming" / "s1"
+    _wav(inc / "spk02" / "_phrase_" / "licht-kueche-an_001.wav", _tone(ms=1500))
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        "spk02,t,Licht Küche an,spk02/_phrase_/licht-kueche-an_001.wav,1500,-10,sentences,1,1\n"
+    )
+
+    def transcriber(p: Path):
+        # text-level transcript matches (approves content gate), but the word-level
+        # spans Whisper returned are missing the last token -> segmentation gap.
+        return {
+            "text": "Licht Küche an",
+            "words": [
+                {"word": "Licht", "start": 0.2, "end": 0.5},
+                {"word": "Küche", "start": 0.6, "end": 0.9},
+            ],
+        }
+
+    qcd, appr = tmp_path / "qc" / "s1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["approved"] == 1
+    assert counts["words_written"] == 2
+    assert counts["words_skipped"] == 1
+    assert (appr / "words" / "Licht" / "spk02_001.wav").exists()
+    assert (appr / "words" / "Küche" / "spk02_001.wav").exists()
+    assert not (appr / "words" / "an").exists()
+    report = (qcd / "report.md").read_text()
+    assert "## Segmentation gaps" in report
+    assert "licht-kueche-an_001.wav" in report.split("## Segmentation gaps")[1]

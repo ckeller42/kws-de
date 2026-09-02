@@ -238,15 +238,39 @@ def _slug_of(path: Path) -> str:
     return re.sub(r"_\d{3}\.wav$", "", path.name)
 
 
-def _clear_session(approved: Path, speaker: str) -> None:
-    """Remove this speaker's previous outputs so re-runs are idempotent."""
+def _clear_stamp(approved: Path, qc_dir: Path) -> None:
+    """Undo exactly what THIS stamp (qc_dir) wrote last run, via its own
+    written.txt manifest, so re-running one stamp never touches another
+    stamp's or another speaker's approved output. No-op on a first run."""
+    manifest = qc_dir / "written.txt"
+    if not manifest.exists():
+        return
+    prev = {line.strip() for line in manifest.read_text().splitlines() if line.strip()}
+    for rel in prev:
+        f = approved / rel
+        if f.exists():
+            f.unlink()
     for sub in ("phrases", "negatives"):
-        d = approved / sub / speaker
-        if d.is_dir():
-            for f in d.glob("*.wav"):
-                f.unlink()
-    for f in (approved / "words").glob(f"*/{speaker}_*.wav"):
-        f.unlink()
+        idx = approved / sub / "index.csv"
+        if idx.exists():
+            keep = [r for r in csv.DictReader(idx.open()) if r["file"] not in prev]
+            idx.unlink()
+            for r in keep:
+                _append_index(idx, r)
+
+
+def _next_word_no(approved: Path, label: str, speaker: str) -> str:
+    """Next-free <NNN> for approved/words/<label>/<speaker>_<NNN>.wav, scanning
+    the label dir for this speaker's existing takes. Independent of the source
+    take number, so a bare word take and a phrase-segmented word can never
+    collide on the same output path.
+    ponytail: rescans the dir on every call (O(files-in-dir) per word write);
+    fine at recording-pipeline volumes — cache per (label, speaker) within a
+    run if this shows up in profiling."""
+    d = approved / "words" / label
+    pat = re.compile(rf"{re.escape(speaker)}_(\d+)\.wav$")
+    nums = [int(m.group(1)) for f in d.glob(f"{speaker}_*.wav") if (m := pat.match(f.name))]
+    return f"{(max(nums) + 1) if nums else 1:03d}"
 
 
 def _append_index(path: Path, row: dict) -> None:
@@ -261,19 +285,11 @@ def _append_index(path: Path, row: dict) -> None:
 
 def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcriber) -> dict:
     incoming, qc_dir, approved = Path(incoming), Path(qc_dir), Path(approved)
-    takes = read_sessions(incoming)
-    speakers = {t.speaker for t in takes}
-    for spk in speakers:
-        _clear_session(approved, spk)
-    for sub in ("phrases", "negatives"):
-        idx = approved / sub / "index.csv"
-        if idx.exists():  # drop this session's rows, keep other sessions'
-            keep = [r for r in csv.DictReader(idx.open()) if r["speaker"] not in speakers]
-            idx.unlink()
-            for r in keep:
-                _append_index(idx, r)
+    _clear_stamp(approved, qc_dir)
 
-    rows, words_rows, n_words = [], [], 0
+    takes = read_sessions(incoming)
+    rows, words_rows, written, gap_files = [], [], [], []
+    n_words = n_skipped = 0
     for t in takes:
         row, tr = judge(t, transcriber)
         rows.append(row)
@@ -281,13 +297,20 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             continue
         no = _take_no(t.file)
         if t.set == "words":
-            # ponytail: word-set prompts are always canonical command words in
-            # practice; `or tok` is a defensive fallback, not a real code path.
             tok = required_tokens(t.prompt, "words")[0]
-            lab = label_for_token(tok) or tok
-            dst = approved / "words" / lab / f"{t.speaker}_{no}.wav"
+            lab = label_for_token(tok)
+            if lab is None:  # unmapped token: reject filing, don't mislabel
+                n_skipped += 1
+                continue
+            dst = (
+                approved
+                / "words"
+                / lab
+                / f"{t.speaker}_{_next_word_no(approved, lab, t.speaker)}.wav"
+            )
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(t.file.read_bytes())
+            written.append(str(dst.relative_to(approved)))
             n_words += 1
         elif t.set == "sentences":
             sig, sr = sf.read(t.file, dtype="float32", always_2d=True)
@@ -295,6 +318,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             dst = approved / "phrases" / t.speaker / f"{_slug_of(t.file)}_{no}.wav"
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(t.file.read_bytes())
+            written.append(str(dst.relative_to(approved)))
             _append_index(
                 approved / "phrases" / "index.csv",
                 {
@@ -306,17 +330,28 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             need = required_tokens(t.prompt, "sentences")
             spans = [(normalise(w["word"]), w["start"], w["end"]) for w in tr.get("words", [])]
             pos = 0
-            for tok in need:
+            for i, tok in enumerate(need):
                 while pos < len(spans) and not (spans[pos][0] and _matches(tok, spans[pos][0][0])):
                     pos += 1
-                if pos >= len(spans):
+                if pos >= len(spans):  # Whisper's word spans didn't cover this token
+                    n_skipped += len(need) - i
+                    gap_files.append(str(t.file.relative_to(incoming)))
                     break
                 _, s, e = spans[pos]
                 pos += 1
-                lab = label_for_token(tok) or tok
-                out = approved / "words" / lab / f"{t.speaker}_{no}.wav"
+                lab = label_for_token(tok)
+                if lab is None:  # unmapped token: skip this clip, don't mislabel
+                    n_skipped += 1
+                    continue
+                out = (
+                    approved
+                    / "words"
+                    / lab
+                    / f"{t.speaker}_{_next_word_no(approved, lab, t.speaker)}.wav"
+                )
                 out.parent.mkdir(parents=True, exist_ok=True)
                 sf.write(out, segment_word(sig, sr, s, e), sr, subtype="PCM_16")
+                written.append(str(out.relative_to(approved)))
                 words_rows.append(
                     {
                         "src": str(t.file),
@@ -332,6 +367,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             dst = approved / "negatives" / t.speaker / f"{_slug_of(t.file)}_{no}.wav"
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(t.file.read_bytes())
+            written.append(str(dst.relative_to(approved)))
             _append_index(
                 approved / "negatives" / "index.csv",
                 {
@@ -349,22 +385,26 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         )
         w.writeheader()
         w.writerows(words_rows)
+    (qc_dir / "written.txt").write_text("".join(p + "\n" for p in written))
 
     approved_n = sum(r.verdict == "approve" for r in rows)
     rejects = [r for r in rows if r.verdict != "approve"]
     (qc_dir / "report.md").write_text(
         f"# QC {incoming.name}\n\n{len(rows)} takes, {approved_n} approved, "
-        f"{len(rejects)} rejected, {n_words} word clips written.\n\n## Rejects\n\n"
+        f"{len(rejects)} rejected, {n_words} word clips written, "
+        f"{n_skipped} word clips skipped.\n\n## Rejects\n\n"
         + "".join(
             f"- `{Path(r.file).relative_to(incoming)}` — reject: {r.reason} "
             f'(heard: "{r.transcript}")\n'
             for r in rejects
         )
-        + "\n"
+        + "\n## Segmentation gaps\n\n"
+        + ("".join(f"- `{f}`\n" for f in gap_files) or "(none)\n")
     )
     return {
         "takes": len(rows),
         "approved": approved_n,
         "rejected": len(rejects),
         "words_written": n_words,
+        "words_skipped": n_skipped,
     }
