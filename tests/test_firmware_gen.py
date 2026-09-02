@@ -52,3 +52,23 @@ def test_generate_is_deterministic_and_complete(tmp_path):
     assert "#define KWS_N_BINS 241" in fc and "KWS_MEL[40][241]" in fc
     tv = (tmp_path / "test_vectors.h").read_text()
     assert "TV_PCM[16000]" in tv and "TV_MFCC[49][10]" in tv
+
+
+def test_check_passes_on_fresh_and_catches_changes(tmp_path):
+    firmware_gen.generate(tmp_path)
+    assert firmware_gen.check(tmp_path) == []
+
+    # a real value change (>> the hardware-noise tolerance) is caught
+    fc = tmp_path / "features_config.h"
+    text = fc.read_text()
+    m = next(
+        x for x in re.finditer(r"-?\d+\.\d+e[+-]\d+f", text) if abs(float(x.group()[:-1])) > 0.1
+    )
+    fc.write_text(text[: m.start()] + f"{float(m.group()[:-1]) + 0.01:.5e}f" + text[m.end() :])
+    assert "features_config.h" in firmware_gen.check(tmp_path)
+
+    # a structural change (renamed macro) is caught even with identical floats
+    firmware_gen.generate(tmp_path)
+    labels = tmp_path / "labels.h"
+    labels.write_text(labels.read_text().replace("KWS_NUM_LABELS", "KWS_LABEL_COUNT"))
+    assert "labels.h" in firmware_gen.check(tmp_path)

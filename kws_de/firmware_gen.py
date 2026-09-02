@@ -7,6 +7,8 @@ tables, a golden MFCC vector — is emitted here as `static const` data so
 
 import argparse
 import pathlib
+import re
+import tempfile
 
 import numpy as np
 import scipy.fft
@@ -136,10 +138,56 @@ def generate(out) -> None:
     (out / "test_vectors.h").write_text(tv)
 
 
+_FLOAT_RE = re.compile(r"-?\d+\.\d+e[+-]\d+f")
+
+
+# Compare a committed generated header against a freshly generated one. The C
+# float tables (mel/DCT/window, TV_MFCC) are computed through numpy/scipy whose
+# transcendental and matmul kernels are CPU-SIMD- and BLAS-order-dependent, so
+# they are NOT byte-reproducible across machines (CI runner vs a dev laptop)
+# even at pinned library versions. Byte-exact comparison is therefore the wrong
+# gate: structure (every non-float character) must match exactly, values only
+# within a tolerance that clears last-digit hardware noise but catches any real
+# config/generator change (those move values by far more).
+def _headers_match(committed: str, fresh: str) -> bool:
+    if _FLOAT_RE.sub("<f>", committed) != _FLOAT_RE.sub("<f>", fresh):
+        return False
+    a = np.array([float(s[:-1]) for s in _FLOAT_RE.findall(committed)])
+    b = np.array([float(s[:-1]) for s in _FLOAT_RE.findall(fresh)])
+    return a.shape == b.shape and bool(np.allclose(a, b, rtol=1e-4, atol=1e-6))
+
+
+def check(committed_dir) -> list[str]:
+    """Return the names of committed headers that differ (structurally, or
+    numerically beyond tolerance) from a fresh generation. Empty list = OK."""
+    committed_dir = pathlib.Path(committed_dir)
+    with tempfile.TemporaryDirectory() as tmp:
+        generate(tmp)
+        bad = []
+        for f in ("labels.h", "prompts.h", "features_config.h", "test_vectors.h"):
+            if not _headers_match(
+                (committed_dir / f).read_text(), (pathlib.Path(tmp) / f).read_text()
+            ):
+                bad.append(f)
+        return bad
+
+
 def main() -> None:  # pragma: no cover - I/O wrapper
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="firmware/main/gen")
-    generate(ap.parse_args().out)
+    ap.add_argument(
+        "--check",
+        metavar="DIR",
+        help="verify committed headers in DIR are current (structure exact, "
+        "floats within tolerance) instead of writing; exit 1 on mismatch",
+    )
+    args = ap.parse_args()
+    if args.check:
+        bad = check(args.check)
+        if bad:
+            raise SystemExit("stale generated headers: " + ", ".join(bad))
+        return
+    generate(args.out)
 
 
 if __name__ == "__main__":  # pragma: no cover

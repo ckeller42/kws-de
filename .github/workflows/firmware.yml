@@ -39,19 +39,14 @@ jobs:
       # that produced the committed files — pip's fresh resolve drifts in the last
       # digits. uv sync --frozen replays uv.lock exactly.
       - run: pip install uv
-      - name: committed config-derived headers match kws-fwgen
+      - name: committed config-derived headers are current
         run: |
           uv sync --frozen
-          uv run kws-fwgen --out /tmp/gen
-          # test_vectors.h is intentionally NOT byte-checked: TV_MFCC is built with
-          # matmuls whose float32 reduction order is BLAS-dependent (Accelerate vs
-          # OpenBLAS), so it is not byte-reproducible across platforms. It is a test
-          # fixture, validated functionally by firmware/test/test_mfcc.c (C MFCC vs
-          # TV_MFCC within 1e-2). The config headers below have no matmul and are
-          # deterministic.
-          for f in labels.h prompts.h features_config.h; do
-            diff -q "/tmp/gen/$f" "firmware/main/gen/$f"
-          done
+          # Structure must match exactly; the float tables (mel/DCT/window, TV_MFCC)
+          # are CPU-SIMD- and BLAS-order-dependent, so they are compared within a
+          # tolerance that clears hardware last-digit noise but catches any real
+          # config/generator change. See kws_de.firmware_gen.check.
+          uv run kws-fwgen --check firmware/main/gen
   host-test:
     runs-on: ubuntu-latest
     steps:
