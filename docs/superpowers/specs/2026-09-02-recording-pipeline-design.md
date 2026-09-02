@@ -13,9 +13,9 @@ recordings (which may be in training; that overlap is the point of the step and 
 labelled as such, never mixed with the held-out figure). The whole pipeline is documented
 (Sphinx + paper) and its requirements are traced to tests.
 
-Non-goals: on-device QC; speaker verification; anything cloud. The workstation ("wuerfel")
+Non-goals: on-device QC; speaker verification; anything cloud. The workstation
 is the Apple-Silicon Mac that holds `KWS_DATA_ROOT`; the CoreS3 is attached to the second
-Mac ("bar"), reachable over SSH — both machine names stay out of the repo (config/env only).
+Mac, reachable over SSH — machine names stay out of the repo (config/env only).
 
 ## 2. Data layout (under `KWS_DATA_ROOT/data/recordings/`)
 
@@ -52,13 +52,13 @@ Serial console commands `mode menu|record|recognise|wake|usb` and `status`, echo
 ### 3.2 Ingest — `scripts/ingest.sh` (runs on the workstation)
 
 ```
-ingest.sh [-H bar] [-p /dev/cu.usbmodemNNN]
-  1. ssh bar: write "mode usb\n" to the port; wait ≤20 s for /Volumes/KWSREC to mount
-  2. ssh bar: scripts/pull-recordings.sh ~/kwsrec-pull   (existing script: rsyncs spk*/,
+ingest.sh [-H <host>] [-p /dev/cu.usbmodemNNN]
+  1. ssh to the device host: write "mode usb\n" to the port; wait ≤20 s for /Volumes/KWSREC to mount
+  2. ssh host: scripts/pull-recordings.sh ~/kwsrec-pull   (existing script: rsyncs spk*/,
      appends sessions.csv, moves recognise.log to logs/, ejects)
   3. rsync bar:~/kwsrec-pull/ → $KWS_DATA_ROOT/data/recordings/incoming/<stamp>-<spk>/
      (one dir per speaker found; --ignore-existing; never deletes anything anywhere)
-  4. ssh bar: write "mode menu\n" (device back to the selection screen)
+  4. ssh to the device host: write "mode menu\n" (device back to the selection screen)
   5. print the new incoming dir(s); exit non-zero if nothing was pulled
 ```
 
