@@ -8,6 +8,7 @@ Whisper. Layout and rules: docs/superpowers/specs/2026-09-02-recording-pipeline-
 from __future__ import annotations
 
 import csv
+import logging
 import re
 import unicodedata
 from collections.abc import Callable
@@ -18,6 +19,8 @@ import numpy as np
 import soundfile as sf
 
 from kws_de import config
+
+log = logging.getLogger(__name__)
 
 Transcript = dict
 Transcriber = Callable[[Path], Transcript]
@@ -287,7 +290,24 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
     rows, words_rows, written, gap_files = [], [], [], []
     n_words = n_skipped = 0
     for t in takes:
-        row, tr = judge(t, transcriber)
+        try:
+            row, tr = judge(t, transcriber)
+        except Exception as e:  # noqa: BLE001 - one bad take must not abort the batch
+            log.error("judge failed for %s: %s", t.file, e)
+            row = QcRow(
+                file=str(t.file),
+                set=t.set,
+                prompt=t.prompt,
+                speaker=t.speaker,
+                verdict="reject",
+                reason=f"error: {type(e).__name__}",
+                transcript="",
+                match_score=0.0,
+                rms_dbfs=0.0,
+                peak_dbfs=0.0,
+                dur_ms=0,
+            )
+            tr = {"text": "", "words": []}
         rows.append(row)
         if row.verdict != "approve":
             continue
@@ -429,8 +449,9 @@ def whisper_transcriber(
     return transcribe
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover - I/O wrapper
     import argparse
+    import sys
 
     ap = argparse.ArgumentParser(
         prog="kws-qc", description="quality-control a pulled recording session"
@@ -447,7 +468,8 @@ def main() -> None:
     a = ap.parse_args()
     inc = Path(a.incoming)
     if not (inc / "sessions.csv").exists():
-        raise SystemExit(f"{inc}: no sessions.csv (exit 2)")
+        print(f"{inc}: no sessions.csv (exit 2)", file=sys.stderr)
+        raise SystemExit(2)
     takes = read_sessions(inc)
     if a.dry_run:
         print(f"{len(takes)} takes in {inc}")
@@ -459,7 +481,9 @@ def main() -> None:
     try:
         tr = whisper_transcriber(a.model)
     except Exception as e:  # noqa: BLE001 - model download/import failure is a user-facing exit
-        raise SystemExit(f"could not load {a.model}: {e} (exit 4)") from e
+        print(f"could not load {a.model}: {e} (exit 4)", file=sys.stderr)
+        raise SystemExit(4) from e
     counts = run_qc(inc, qc_dir, approved, tr)
-    (qc_dir / "report.md").open("a").write(f"\nModel: `{a.model}`\n")
+    with (qc_dir / "report.md").open("a") as fh:
+        fh.write(f"\nModel: `{a.model}`\n")
     print(f"qc: {counts} -> {qc_dir}")

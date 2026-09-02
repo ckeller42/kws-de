@@ -299,6 +299,43 @@ def test_run_qc_segmentation_gap_reported_when_word_spans_miss_a_token(tmp_path)
     assert "licht-kueche-an_001.wav" in report.split("## Segmentation gaps")[1]
 
 
+def test_run_qc_isolates_a_transcriber_error_to_one_row(tmp_path):
+    inc = tmp_path / "incoming" / "s1"
+    _wav(inc / "spk01" / "licht" / "001.wav", _tone())
+    _wav(inc / "spk01" / "_neg_" / "boom_001.wav", _tone())
+    _wav(inc / "spk01" / "kueche" / "001.wav", _tone())
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        "spk01,t,Licht,spk01/licht/001.wav,800,-10,words,1,1\n"
+        "spk01,t,boom,spk01/_neg_/boom_001.wav,800,-10,negatives,1,2\n"
+        "spk01,t,Küche,spk01/kueche/001.wav,800,-10,words,1,3\n"
+    )
+    calls = []
+
+    def transcriber(p: Path):
+        calls.append(p)
+        if len(calls) == 2:  # second take: simulate a transcriber blow-up
+            raise RuntimeError("boom")
+        return {"text": "Licht" if "licht" in str(p) else "Küche", "words": []}
+
+    qcd, appr = tmp_path / "qc" / "s1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["takes"] == 3  # all three takes judged, none dropped
+    rows = list(csv.DictReader((qcd / "qc.csv").open()))
+    assert rows[0]["verdict"] == "approve"  # first take: unaffected
+    assert rows[1]["verdict"] == "reject" and rows[1]["reason"] == "error: RuntimeError"
+    assert rows[2]["verdict"] == "approve"  # third take: batch continued past the error
+
+
+def test_cli_missing_sessions_csv_exits_2(tmp_path, monkeypatch):
+    inc = tmp_path / "incoming" / "nope"
+    inc.mkdir(parents=True)
+    monkeypatch.setattr("sys.argv", ["kws-qc", str(inc)])
+    with pytest.raises(SystemExit) as exc:
+        qc.main()
+    assert exc.value.code == 2
+
+
 def test_cli_dry_run_lists_takes_without_model(tmp_path, capsys, monkeypatch):
     inc = tmp_path / "incoming" / "s2"
     _wav(inc / "spk03" / "licht" / "001.wav", _tone())
