@@ -22,6 +22,23 @@ Front end (MFCC)
    ``firmware/main/gen/features_config.h`` — never hard-coded a second time
    in C.
 
+.. req:: MFCC front end uses an exact 480-point FFT
+   :id: REQ_FW_FRONTEND_FFT
+   :status: implemented
+
+   The per-frame spectrum is a real FFT over the vendored kissfft
+   (``firmware/main/mfcc_fft.cc``, ``kiss_fftr`` at nfft = 480 = 2^5*3*5, an
+   exact mixed radix), never a zero-padded 512-point transform: padding
+   changes the bin spacing and hence the mel energies the models were
+   trained on. Feature parity with the Python front end
+   (:need:`REQ_FW_MFCC_PARITY`) is unaffected by the transform — max
+   absolute deviation 5.4e-4, and 0 LSB on the int8 tensor fed to the
+   command model. The measured front-end cost on the CoreS3 is 3.0 ms per
+   new frame, against 8.5 ms for the naive DFT it replaced: a streaming
+   recogniser step of 82-85 ms for the 9-10 frames a step consumes, of which
+   52-53 ms is the command model's TFLM ``Invoke``
+   (:need:`REQ_FW_ARENA_PLACEMENT`) and the remainder the front end.
+
 .. req:: MFCC int8 quantisation matches the model's input scale/zero-point
    :id: REQ_FW_MFCC_QUANTIZE
    :status: implemented
@@ -237,6 +254,24 @@ Storage / USB
 
 Recogniser
 ----------
+
+.. req:: TFLM arenas prefer internal SRAM, wake model first
+   :id: REQ_FW_ARENA_PLACEMENT
+   :status: implemented
+
+   ``arena_alloc`` (``firmware/main/arena.h``) allocates every TFLM tensor
+   arena with ``MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`` and falls back to
+   PSRAM with a ``WARN`` line, logging
+   ``heap_caps_get_free_size(MALLOC_CAP_INTERNAL)`` before and after either
+   way — arena placement, not the model, is what sets ``Invoke`` time, and
+   the log has to say which heap was used rather than leaving it to be
+   guessed. At least 64 KB of internal RAM stays free after the arenas, for
+   the UI and the audio ring. Measured on the CoreS3: 148,895 B free
+   internal when the models start, which fits the 49,152 B wake arena but
+   not also the 139,264 B command arena, so the **wake** arena — the model
+   that runs continuously — takes internal RAM (82,907 B left free) and the
+   command arena stays in PSRAM. Effect: wake 5 -> 3 ms/step; the command
+   model's ``Invoke`` unchanged at 52-53 ms.
 
 .. req:: TFLite Micro op resolver is the exact gated set
    :id: REQ_FW_TFLM_OPSET

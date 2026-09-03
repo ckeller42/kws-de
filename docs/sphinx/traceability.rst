@@ -65,7 +65,7 @@ Gaps: requirements with no linked test
    :columns: id, title, status
    :style: table
 
-As of this writing, three requirements are open gaps:
+As of this writing, four requirements are open gaps:
 
 - ``REQ_FW_RECORD_CLIP_REJECT`` — clip-and-redo is implemented but neither
   a host test nor the manual checklist currently exercises it (the
@@ -78,3 +78,8 @@ As of this writing, three requirements are open gaps:
 - ``REQ_FW_DATA_NOT_COMMITTED`` — enforced only by ``.gitignore`` and code
   review, not by a CI check (e.g. a ``git ls-files`` assertion that none
   of the ignored paths are tracked).
+- ``REQ_FW_ARENA_PLACEMENT`` — tier 3 by nature: which heap an arena lands
+  in, and what it costs, only exist on real silicon. The boot log is the
+  evidence (an ``INFO`` line naming internal RAM and the free size, or a
+  ``WARN`` naming PSRAM); an on-target Unity test could assert it once that
+  tier exists.
