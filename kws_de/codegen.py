@@ -13,6 +13,9 @@ silent approximation.
 """
 
 import dataclasses
+import math
+import pathlib
+import re
 
 from kws_de import tflite_graph
 
@@ -207,3 +210,85 @@ def rewrite_streaming(graph: tflite_graph.Graph) -> Plan:
             alias[op.outputs[0]] = alias.get(op.inputs[0], op.inputs[0])
         ops.append(op)
     return Plan(graph=graph, ops=tuple(ops), rings=tuple(rings), alias=alias)
+
+
+_ITEMSIZE = {"int8": 1, "uint8": 1, "int32": 4, "int16": 2, "float32": 4}
+_ALIGN = 16  # esp-nn's S3 kernels want 16-byte-aligned operands
+
+
+@dataclasses.dataclass(frozen=True)
+class Arena:
+    offsets: dict[int, int]  # tensor index -> byte offset in the arena
+    size: int  # total arena bytes (16-byte aligned)
+
+
+def tensor_bytes(graph: tflite_graph.Graph, index: int) -> int:
+    t = graph.tensors[index]
+    return math.prod(t.shape) * _ITEMSIZE[t.dtype]
+
+
+def _round_up(value: int, align: int = _ALIGN) -> int:
+    return -(-value // align) * align
+
+
+def plan_arena(plan: Plan, scratch_bytes: int = 0) -> Arena:
+    """Greedy first-fit over tensor lifetimes.
+
+    A tensor is live from the op that writes it to the last op that reads it
+    (aliases -- RESHAPE's zero-copy outputs -- are resolved to the tensor
+    that actually owns the storage). Constants live in flash, ring buffers
+    are their own static storage, and the graph input is a caller-supplied
+    buffer outside the arena -- so the arena holds exactly the intermediate
+    activations, including the graph's output (the caller reads it before the
+    next call can reuse the slot). Scratch (esp-nn's conv workspace) is a
+    single block at the end, live for the whole call, because two kernels
+    never run at once.
+    """
+    graph = plan.graph
+    fixed = {r.buffer_tensor for r in plan.rings} | set(graph.inputs)
+
+    first: dict[int, int] = {}
+    last: dict[int, int] = {}
+    for step, op in enumerate(plan.ops):
+        for t in op.outputs:
+            first.setdefault(t, step)
+            last[t] = max(last.get(t, step), step)
+        for t in op.inputs:
+            t = plan.alias.get(t, t)
+            if graph.tensors[t].data is None:
+                last[t] = max(last.get(t, step), step)
+
+    candidates = [
+        t
+        for t in sorted(first, key=lambda t: (-tensor_bytes(graph, t), t))
+        if t not in fixed and t not in plan.alias and graph.tensors[t].data is None
+    ]
+
+    offsets: dict[int, int] = {}
+    placed: list[tuple[int, int, int, int]] = []  # (offset, end, first, last)
+    for t in candidates:
+        size = _round_up(tensor_bytes(graph, t))
+        lo, hi = first[t], last[t]
+        overlapping = sorted((off, end) for off, end, f, lst in placed if not (lst < lo or f > hi))
+        offset = 0
+        for off, end in overlapping:
+            if offset + size <= off:
+                break
+            offset = max(offset, end)
+        offsets[t] = offset
+        placed.append((offset, offset + size, lo, hi))
+
+    used = max((end for _, end, _, _ in placed), default=0)
+    return Arena(offsets=offsets, size=_round_up(used + scratch_bytes))
+
+
+_MACRO_RE = re.compile(r"^#define\s+(\w+)\s+(\d+)\s*$", re.MULTILINE)
+
+
+def tflm_arena_bytes(header: pathlib.Path, macro: str) -> int:
+    """The arena the firmware allocates for TFLM today, read from the committed
+    gen/ header -- the ceiling the generated arena must not exceed."""
+    for name, value in _MACRO_RE.findall(pathlib.Path(header).read_text()):
+        if name == macro:
+            return int(value)
+    raise UnsupportedGraph(f"{header} does not define {macro}")

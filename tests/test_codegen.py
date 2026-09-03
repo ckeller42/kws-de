@@ -1,4 +1,5 @@
 import dataclasses
+import pathlib
 
 import pytest
 
@@ -6,6 +7,8 @@ from kws_de import codegen, config, tflite_graph
 
 WAKE = config.MODELS_DIR / "hey_bus.tflite"
 needs_wake = pytest.mark.skipif(not WAKE.exists(), reason=f"{WAKE} absent (KWS_DATA_ROOT)")
+
+GEN = pathlib.Path(__file__).resolve().parents[1] / "firmware" / "main" / "gen"
 
 
 def _tensor(index, shape, dtype="int8", scale=0.5, zp=-128, data=None):
@@ -156,3 +159,45 @@ def test_wake_model_has_six_rings_of_3792_bytes():
         "QUANTIZE",
     }
     assert len(plan.ops) == 14
+
+
+def test_arena_reuses_the_slot_of_a_dead_tensor():
+    """Two activations whose lifetimes do not overlap must share one offset;
+    a planner that just concatenates would double the arena."""
+    plan = codegen.rewrite_streaming(_streaming_graph())
+    arena = codegen.plan_arena(plan)
+    assert arena.size >= 16
+    assert arena.size % 16 == 0
+    # only t5 (the depthwise output, 4 B) needs arena space: the ring is static
+    # storage and t0 is the graph input.
+    assert set(arena.offsets) == {5}
+    assert arena.offsets[5] == 0
+
+
+def test_arena_accounts_for_scratch():
+    plan = codegen.rewrite_streaming(_streaming_graph())
+    plain = codegen.plan_arena(plan)
+    with_scratch = codegen.plan_arena(plan, scratch_bytes=1024)
+    assert with_scratch.size == plain.size + 1024
+
+
+@needs_wake
+def test_wake_arena_is_at_most_the_tflm_arena():
+    g = tflite_graph.read_graph(WAKE.read_bytes())
+    arena = codegen.plan_arena(codegen.rewrite_streaming(g))
+    tflm = codegen.tflm_arena_bytes(GEN / "wake_model_config.h", "KWS_WAKE_ARENA_BYTES")
+    assert tflm == 40960
+    assert arena.size <= tflm, f"generated arena {arena.size} B exceeds TFLM's {tflm} B"
+
+
+@needs_wake
+def test_wake_arena_holds_every_live_activation():
+    g = tflite_graph.read_graph(WAKE.read_bytes())
+    plan = codegen.rewrite_streaming(g)
+    arena = codegen.plan_arena(plan)
+    for op in plan.ops:
+        for t in op.outputs:
+            if t in plan.alias or t in {r.buffer_tensor for r in plan.rings}:
+                continue
+            end = arena.offsets[t] + codegen.tensor_bytes(g, t)
+            assert end <= arena.size
