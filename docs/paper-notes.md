@@ -499,6 +499,17 @@ re-enumerate until a physical re-plug. Leaving USB mode now restarts the chip (m
 console back), which is what the command means anyway; a PHY re-attach for the JTAG peripheral
 is the cleaner upgrade.
 
+**Wake model round 5: real positives, user-customised by design (2026-09-03).** Ten real "Hey Bus"
+takes (two sessions of a main user, pulled and QC-approved by the remote loop) were added to the
+round-4 recipe as their own feature set (sampling weight 5). Through the firmware int8 feature
+path at the device gate (0.85 × 2 steps): round 4 fires on 4 of 10 real takes, round 5 on **10 of
+10** (peak 0.996 on every clip); a variant trained on one session only fires 5 of 5 on the other,
+unseen session. The TTS non-wake worst peak fell 0.988 → 0.758. The price is generic-voice
+margin: a synthetic Piper "hey bus" clip played through a laptop speaker drops from 3 of 3 fires
+(0.96–0.99) to 0 of 3 (0.59–0.64). This is the intended trade: the wake model is customised to
+the device's main users, the same "user-customised, in-training" policy the command model
+follows, and each new speaker's five takes go through the same loop.
+
 ### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
 
 Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the
