@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pytest
 
@@ -16,13 +18,18 @@ def test_write_model_config_reports_quant_and_arena(tmp_path):
     model = build_dscnn(num_classes=len(config.COMMAND_LABELS))
     rep = rng.standard_normal((8, config.N_FRAMES, config.N_MFCC)).astype(np.float32)
     blob = to_int8_tflite(model, rep)
+    src = tmp_path / "command.tflite"
+    src.write_bytes(blob)
     p = tmp_path / "model_config.h"
-    info = write_model_config(blob, p)
+    info = write_model_config(blob, p, src)
     txt = p.read_text()
     assert "#define KWS_MODEL_INPUT_SCALE" in txt and "#define KWS_MODEL_INPUT_ZERO_POINT" in txt
     assert f"#define KWS_MODEL_NUM_CLASSES {len(config.COMMAND_LABELS)}" in txt
     assert info["arena_bytes"] % 4096 == 0 and info["arena_bytes"] > 0
     assert f"#define KWS_MODEL_ARENA_BYTES {info['arena_bytes']}" in txt
+    # Stamp: <name>@<8 hex> <YYYY-MM-DD>, so the device can report its model.
+    assert re.search(r'#define KWS_MODEL_ID "command\.tflite@[0-9a-f]{8} \d{4}-\d\d-\d\d"', txt)
+    assert f"#define KWS_MODEL_BYTES {len(blob)}" in txt
 
 
 def test_model_health_gate_catches_broken_models():
@@ -74,6 +81,10 @@ def test_write_wake_headers_emits_model_contract(tmp_path):
     assert "#define KWS_WAKE_OUTPUT_ZERO_POINT 0" in cfg
     assert info["arena_bytes"] % 4096 == 0
     assert f"#define KWS_WAKE_ARENA_BYTES {info['arena_bytes']}" in cfg
+    assert re.search(
+        r'#define KWS_WAKE_MODEL_ID "hey_bus\.tflite@[0-9a-f]{8} \d{4}-\d\d-\d\d"', cfg
+    )
+    assert f"#define KWS_WAKE_MODEL_BYTES {model.stat().st_size}" in cfg
 
 
 def test_write_wake_headers_skips_a_missing_model(tmp_path):

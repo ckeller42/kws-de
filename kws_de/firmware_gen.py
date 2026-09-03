@@ -72,13 +72,36 @@ def mfcc_reference(x, win, mel, dct) -> np.ndarray:
 # pinned library versions. The C side reads these as `float`, so the dropped
 # digits carry no information; host MFCC parity keeps its ~55x tolerance margin.
 def _c_float_rows(name, arr) -> str:
-    arr = np.atleast_2d(arr)
-    rows = ",\n".join("  {" + ", ".join(f"{v:.5e}f" for v in row) + "}" for row in arr)
-    dims = "".join(f"[{d}]" for d in arr.shape) if arr.ndim > 1 else f"[{arr.shape[0]}]"
-    if arr.shape[0] == 1 and name == "KWS_WINDOW":
-        flat = ", ".join(f"{v:.5e}f" for v in np.ravel(arr))
+    arr = np.asarray(arr)
+    if arr.ndim == 1:
+        flat = ", ".join(f"{v:.5e}f" for v in arr)
         return f"static const float {name}[{arr.size}] = {{{flat}}};\n"
+    rows = ",\n".join("  {" + ", ".join(f"{v:.5e}f" for v in row) + "}" for row in arr)
+    dims = "".join(f"[{d}]" for d in arr.shape)
     return f"static const float {name}{dims} = {{\n{rows}\n}};\n"
+
+
+def mel_bands(mel: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compress the mel filterbank to its non-zero band per filter.
+
+    A triangular mel filter touches 4-33 of the 241 FFT bins, so the dense
+    40x241 matrix is 95% exact zeros — 38.5 KB of flash rodata read in full for
+    every frame. Returned as (start, length, weights) with the weights
+    concatenated in filter order.
+
+    Dropping only *exact* zeros keeps the dot product bit-identical: `acc += 0 *
+    power[k]` leaves a finite accumulator unchanged in IEEE-754, and the
+    surviving terms are summed in the same ascending-bin order.
+    """
+    nz = mel != 0.0
+    start = nz.argmax(axis=1).astype(np.int32)
+    end = mel.shape[1] - nz[:, ::-1].argmax(axis=1)
+    length = (end - start).astype(np.int32)
+    interior = [m for m in range(mel.shape[0]) if not nz[m, start[m] : end[m]].all()]
+    if interior:
+        raise ValueError(f"mel filters {interior} have interior zeros — banding would drop terms")
+    weights = np.concatenate([mel[m, start[m] : end[m]] for m in range(mel.shape[0])])
+    return start, length, weights.astype(np.float32)
 
 
 def _c_strings(name, items) -> str:
@@ -109,7 +132,7 @@ def generate(out) -> None:
     (out / "prompts.h").write_text(p)
 
     win, mel, dct = mfcc_tables()
-    fc = hdr
+    fc = hdr + "#include <stdint.h>\n"
     fc += f"#define KWS_SAMPLE_RATE {config.SAMPLE_RATE}\n#define KWS_WIN {config.WIN_SAMPLES}\n"
     fc += f"#define KWS_HOP {config.HOP_SAMPLES}\n#define KWS_N_MELS {config.N_MELS}\n"
     fc += f"#define KWS_N_MFCC {config.N_MFCC}\n#define KWS_N_FRAMES {config.N_FRAMES}\n"
@@ -117,9 +140,13 @@ def generate(out) -> None:
     fc += f"#define KWS_TOP_DB {TOP_DB}f\n#define KWS_AMIN {AMIN}f\n"
     for k, v in DETECTOR.items():
         fc += f"#define KWS_{k.upper()} {v}{'f' if isinstance(v, float) else ''}\n"
+    mel_start, mel_len, mel_w = mel_bands(mel)
+    fc += f"#define KWS_MEL_NNZ {mel_w.size}\n"
     fc += (
         _c_float_rows("KWS_WINDOW", win)
-        + _c_float_rows("KWS_MEL", mel)
+        + _c_int_rows("KWS_MEL_START", mel_start, "uint16_t")
+        + _c_int_rows("KWS_MEL_LEN", mel_len, "uint16_t")
+        + _c_float_rows("KWS_MEL_W", mel_w)
         + _c_float_rows("KWS_DCT", dct)
     )
     (out / "features_config.h").write_text(fc)
@@ -209,7 +236,10 @@ def wake_test_vector() -> tuple[np.ndarray, np.ndarray]:
 
 
 def _c_int_rows(name, arr, ctype) -> str:
-    arr = np.atleast_2d(arr)
+    arr = np.asarray(arr)
+    if arr.ndim == 1:
+        flat = ", ".join(str(int(v)) for v in arr)
+        return f"static const {ctype} {name}[{arr.size}] = {{{flat}}};\n"
     rows = ",\n".join("  {" + ", ".join(str(int(v)) for v in row) + "}" for row in arr)
     dims = "".join(f"[{d}]" for d in arr.shape)
     return f"static const {ctype} {name}{dims} = {{\n{rows}\n}};\n"

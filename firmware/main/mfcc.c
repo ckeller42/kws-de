@@ -14,9 +14,20 @@ static void frame_logmel(const int16_t pcm[KWS_WIN], float logmel[KWS_N_MELS])
     float x[KWS_WIN], power[KWS_N_BINS];
     for (int n = 0; n < KWS_WIN; n++) x[n] = (pcm[n] / 32768.f) * KWS_WINDOW[n];
     mfcc_fft_power(x, power);
+    /* Banded mel filterbank: each triangular filter is non-zero over only 4-33
+       of the 241 bins, so the generator ships the runs (KWS_MEL_W, 459 floats)
+       instead of the dense 40x241 matrix — 38.5 KB of flash rodata that used to
+       be read in full for every frame, against a 32 KB data cache. Dropping
+       exact zeros is bit-identical arithmetic: the surviving terms accumulate
+       in the same ascending-bin order, and `acc += 0 * power[k]` never moved a
+       finite accumulator. */
+    const float *w = KWS_MEL_W;
     for (int m = 0; m < KWS_N_MELS; m++) {
+        const float *p = power + KWS_MEL_START[m];
+        int len = KWS_MEL_LEN[m];
         float acc = 0.f;
-        for (int k = 0; k < KWS_N_BINS; k++) acc += KWS_MEL[m][k] * power[k];
+        for (int k = 0; k < len; k++) acc += w[k] * p[k];
+        w += len;
         logmel[m] = 10.f * log10f(acc > KWS_AMIN ? acc : KWS_AMIN);
     }
 }

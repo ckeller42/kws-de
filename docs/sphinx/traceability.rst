@@ -78,6 +78,11 @@ As of this writing, four requirements are open gaps:
 - ``REQ_FW_DATA_NOT_COMMITTED`` — enforced only by ``.gitignore`` and code
   review, not by a CI check (e.g. a ``git ls-files`` assertion that none
   of the ignored paths are tracked).
+- ``REQ_FW_ASSIST_GATE`` — the gate's logic is fully covered on the host
+  (``firmware/test/test_assist_gate.c``), but the wiring around it — that a
+  wake fire reaches the gate and that the recogniser actually stops — is
+  tier 3, evidenced by the ``KWS_DUTY`` and ``assist: recogniser on/off``
+  log lines under a console-injected fire (``wakefire``).
 - ``REQ_FW_ARENA_PLACEMENT`` — tier 3 by nature: which heap an arena lands
   in, and what it costs, only exist on real silicon. The boot log is the
   evidence (an ``INFO`` line naming internal RAM and the free size, or a
