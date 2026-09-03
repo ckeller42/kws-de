@@ -38,7 +38,14 @@ static void sd_vfs_detach(void)
 /* Bring up the microSD, or fail: no card, a card the SPI probe cannot talk to,
    or one that carries no filesystem and cannot be formatted into one. A card
    that probes but has no readable filesystem is reformatted FAT on the spot —
-   see CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL in sdkconfig.defaults. */
+   see CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL in sdkconfig.defaults.
+   ponytail: a card that can never be formatted (write-protected, dying, fake)
+   pays that format attempt on every boot — ~25 s for a 64 GB card — before the
+   fallback wins. An empty slot costs nothing and a good card pays it once, so
+   this is a broken-card symptom rather than a standing cost. Avoiding it would
+   mean probing raw sectors for writability first, which needs the card handle
+   the BSP only hands out through a full mount. Upgrade path if dead cards turn
+   out to be common: own the sdspi bring-up here instead of going via the BSP. */
 static esp_err_t sd_init(void)
 {
     ESP_RETURN_ON_ERROR(bsp_sdcard_mount(), TAG, "microSD mount");

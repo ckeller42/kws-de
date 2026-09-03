@@ -138,9 +138,13 @@ and USB mode exports whichever volume that is.
   once, on the spot, and then used
   (`CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL` in `sdkconfig.defaults`) — so a
   blank or foreign-formatted card just works, at the cost of one long
-  boot. **Anything already on such a card is erased**, so use a card you
-  are happy to hand over to the device. The internal flash partition is
-  never formatted.
+  boot (~25 s for a 64 GB card). **Anything already on such a card is
+  erased**, so use a card you are happy to hand over to the device. The
+  internal flash partition is never formatted.
+- **A card that can never be formatted pays that ~25 s on every boot**
+  before the fallback takes over, so a boot that is suddenly half a minute
+  slower means the card is write-protected, dying, or counterfeit — take it
+  out. An empty slot costs nothing.
 - **The volume label is forced to `KWSREC`** on both media at every mount,
   whatever the card arrived with, so the host always mounts the same name
   and `scripts/pull-recordings.sh` finds it without configuration.
