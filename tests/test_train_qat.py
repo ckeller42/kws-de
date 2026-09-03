@@ -9,9 +9,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import tensorflow as tf
 
 from kws_de import config
+
+# The QAT path needs the optional `qat` extra (tfmot + tf_keras); without it the
+# re-exec'd trainer cannot import legacy Keras, so skip rather than fail.
+pytest.importorskip("tensorflow_model_optimization")
+pytest.importorskip("tf_keras")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

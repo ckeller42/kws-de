@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5
         with: {python-version: "3.11"}
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,qat]"
       - run: ruff check . && ruff format --check .
       - name: Tests + coverage gate (pure modules >= 85%)
         run: |
