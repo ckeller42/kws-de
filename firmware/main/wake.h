@@ -24,7 +24,7 @@
  * device fires on speech that is not the wake phrase; lower it if real
  * utterances are missed. One step is 30 ms of audio.
  * @{ */
-#define WAKE_THRESHOLD 0.99f       /**< Probability a step must reach to count. */
+#define WAKE_THRESHOLD 0.85f       /**< Probability a step must reach to count (real voice peaks 0.83-0.99, noise <= 0.44 on the v4 model). */
 #define WAKE_MIN_CONSECUTIVE 2     /**< Consecutive qualifying steps needed to fire. */
 #define WAKE_REFRACTORY_MS 1500    /**< Deaf period after a fire, in ms. */
 /** @} */

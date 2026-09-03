@@ -481,6 +481,17 @@ driver with a bounded wait (and the CDC-ACM port in USB mode) and assembles line
 verified on the device, and a reusable host-side helper that opens the port with DTR/RTS low
 (a careless open resets the chip) replaced the ad-hoc `cat`/`echo` capture.
 
+**Wake model v4 on the device (2026-09-03).** Retrained the "Hey Bus" model with TTS hard
+negatives (near-misses, the command vocabulary, everyday sentences), reverb augmentation and
+multi-voice positives (the mls checkpoint's speakers plus the project's other German Piper and
+macOS voices; two Piper voices held out for the probe): 9,000 + 9,000 clips, 20k steps, 58,080 B.
+Host probe: "hey bus" fires in 3 of 4 probe voices (v1: 1 of 4), but one seen voice still peaks
+0.99 on "licht küche an". On the device with a real speaker the 2 s peak trace reads 0.83-0.99 on
+"Hey Bus" (v1: 0.13) and <= 0.44 on silence/room noise, so the gate moved from 0.99 to 0.85 (x2
+consecutive steps, 1.5 s refractory); a synthetic clip played through a laptop speaker fires 3/3.
+Real "Hey Bus" takes from the recording session are the next positives; false-accept rate on
+real speech is still unmeasured.
+
 ### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
 
 Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the
