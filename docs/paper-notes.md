@@ -608,6 +608,30 @@ margin: a synthetic Piper "hey bus" clip played through a laptop speaker drops f
 the device's main users, the same "user-customised, in-training" policy the command model
 follows, and each new speaker's five takes go through the same loop.
 
+**Is a bigger wake model free? (2026-09-03, negative result).** Hypothesis from the runtime audit:
+the streaming model is overhead-bound (45 compute ops for 24,736 MACs, 3 ms per step), so more
+capacity should cost nothing. Three variants trained on the identical round-5 data: wide (channels
+×1.5: 47,856 MACs, 90,224 B), deep (+1 block, kernel 25: 30,432 MACs, 71,304 B), both (59,472
+MACs, 111,928 B). Compute is indeed nearly free (same 45 ops for wide), but the arena grows 49 →
+82 / 61 / 106 KB, and everything above the ~66 KB of internal SRAM the wake model may take falls
+back to PSRAM, which gives back the 5 → 3 ms win (predicted 5.4 / 3.5 / 6.4 ms per step from the
+calibrated cost model). Detection: all variants keep 10 of 10 real takes (a training-set score),
+wide has the best unseen-voice margin, but false fires on 48 German non-wake clips at the device
+gate rise from 2 (round 5) to 14 / 9 / 10; microWakeWord's own false-accepts-per-hour stays 0.000
+for all but "both" (0.75/h at 0.85), a floor effect of its English ambient set. Kept round 5. The
+missing measurement is an unseen-speaker real-take set.
+
+**Second real session and the loop end to end (2026-09-03 evening).** A main user's guided session
+(spk10, 98 sentences + 19 negatives) filled the 10 MB recordings partition four sentences short;
+the remote pull recovered all 117 takes. With the recorder's per-set hangover fix, takes are
+1.96–3.66 s (median 2.43 s; the first session's were cut at 0.84 s) and QC approved **116 of 117**
+(first session: 65 of 208), levels median −31 dBFS, none clipped; segmentation yielded 146 word
+clips and skipped 112 where Whisper's word spans did not cover every keyword (a QC gap to close).
+Rebuilding v3 with all three speakers (train 32,399 rows) and QAT fine-tuning: INT8 held-out test
+accuracy 0.907. On the recordings: spk02 isolated words 0.553 → 0.605; spk10 0.473 (as an unseen
+speaker on the previous model) → **0.678** in training, phrases end to end 4 → 8 of 97, false
+accepts 3 → 1 of 19. Phrase-level recognition on real speech remains the open problem.
+
 ### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
 
 Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the

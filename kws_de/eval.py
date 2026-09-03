@@ -757,6 +757,11 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         help="npz/manifest prefix the model was trained on (default: features -> "
         "manifest.json; e.g. features_v3 -> manifest_v3.json), see kws_de.dataset.build",
     )
+    ap.add_argument(
+        "--qat",
+        action="store_true",
+        help="evaluate the QAT export (command<suffix>_qat.tflite) instead of the PTQ one",
+    )
     args = ap.parse_args()
     if args.v2_catalog:
         out = args.out if args.out != "docs/eval-report.md" else "docs/eval-report-v2.md"
@@ -784,6 +789,8 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
             out_path.write_text(replace_recordings_section(report, note))
             print(note.strip())
             return
+        if args.qat:
+            suffix = f"{suffix}_qat"  # the QAT export of the same prefix (kws-export --qat)
         model_path = config.MODELS_DIR / (f"command{suffix}.tflite" if suffix else "command.tflite")
         try:
             tflite_bytes = model_path.read_bytes()
