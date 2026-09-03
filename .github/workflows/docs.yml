@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  docs-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -44,7 +44,7 @@ jobs:
           path: docs/_build/html
 
   deploy:
-    needs: build
+    needs: docs-build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
