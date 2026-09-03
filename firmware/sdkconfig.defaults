@@ -20,3 +20,14 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_LV_USE_SNAPSHOT=y
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# Quad I/O flash: the CoreS3 module supports it (Espressif's own BSP defaults to
+# QIO for this board) and it roughly doubles the rate at which code and rodata
+# stream in from flash. Everything hot here executes and reads from flash
+# through the caches, so this is the cheapest bandwidth on offer.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+# 1 kHz tick. At 100 Hz the bare vTaskDelay(1) in the wake catch-up loop slept a
+# whole 10 ms tick after every Invoke, capping backlog drain at ~2x realtime; at
+# 1 kHz it is a 1 ms yield and ~5x. Every pdMS_TO_TICKS() call site scales on its
+# own. The tick ISR is in IRAM and driven by the systimer, so 10x the ticks costs
+# well under 1% of a core.
+CONFIG_FREERTOS_HZ=1000
