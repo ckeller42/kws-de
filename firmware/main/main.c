@@ -10,6 +10,8 @@
 #include "wake.h"
 #include "usb_drive.h"
 #include "console.h"
+#include "gen/model_config.h"
+#include "gen/wake_model_config.h"
 #include "ui/ui.h"
 
 static const char *TAG = "main";
@@ -34,6 +36,7 @@ void app_set_mode(ui_mode_t m)
     if (s_mode == UI_MODE_USB) ESP_ERROR_CHECK(usb_drive_exit());
     if (s_mode == UI_MODE_RECOGNISE) recognise_set_active(false);
     if (s_mode == UI_MODE_WAKE) wake_set_active(false);
+    if (s_mode == UI_MODE_ASSIST) { wake_set_active(false); recognise_set_active(false); }
     s_mode = m;
     if (m == UI_MODE_MENU) ui_show_menu();
     if (m == UI_MODE_USB) {
@@ -51,6 +54,10 @@ void app_set_mode(ui_mode_t m)
     /* Wake mode measures the wake model alone: the command recogniser stays off
        so nothing else competes for the mic, the CPU, or the screen. */
     if (m == UI_MODE_WAKE) { ui_show_wake(); recognise_set_active(false); wake_set_active(true); }
+    /* Assist: the wake model runs continuously and opens a window for the
+       recogniser on each fire, so the recogniser starts OFF and the wake
+       task turns it on. See assist_gate.h. */
+    if (m == UI_MODE_ASSIST) { ui_show_assist(); recognise_set_active(false); wake_set_active(true); }
 }
 
 ui_mode_t app_get_mode(void) { return s_mode; }
@@ -67,9 +74,18 @@ void app_main(void)
      * ponytail: hardcoded "0:" drive, revisit if a second FAT volume is ever added */
     char label[12] = {0};
     if (f_getlabel("0:", label, NULL) == FR_OK && label[0] == '\0') f_setlabel("0:KWSREC");
+    /* Which models this image actually carries. A firmware binary outlives the
+       checkout that built it, so the stamp (name@sha8 date, generated into the
+       model config headers) is the only way to answer that from the device. */
+    ESP_LOGI(TAG, "models: command %s, wake %s", KWS_MODEL_ID, KWS_WAKE_MODEL_ID);
     audio_start();
-    recognise_start();
+    /* Wake before recognise: only one TFLM arena fits internal SRAM, and the
+       first caller takes it. The wake model is the always-on one and gains far
+       more from being there (3x a step) than the recogniser does (5%), so it
+       gets first claim rather than whichever happened to start first. Taking
+       the smaller arena first also leaves room for both tasks' 16 KB stacks. */
     wake_start();
+    recognise_start();
     record_start();                    /* starts paused (REC_IDLE) until Record is chosen */
     console_start();
     ui_show_menu();

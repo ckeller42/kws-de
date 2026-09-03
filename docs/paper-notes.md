@@ -216,6 +216,104 @@ ES7210 + ESP-SR 2-mic AFE and the van acoustics are an unmodeled domain. Spec:
 `docs/superpowers/specs/2026-09-01-on-device-hw-mic-followup-design.md`. Expected result: real
 accuracy below synthetic eval; quantifying that gap is the contribution.
 
+### E7 — runtime optimisation wave 2 (2026-09-03, measured on the CoreS3)
+
+Everything below is measured on the device, before and after, in one session. Wave 1 had left
+the recogniser step at 82–85 ms with `Invoke` at 52–53 ms and no visibility into what those
+53 ms were made of.
+
+**Instrumentation first.** esp-tflite-micro's esp-nn kernel wrappers already accumulate
+microseconds per replaced op; zeroing them around `Invoke` and logging the residual
+(`Invoke` minus the kernels) turned the whole exercise from guesswork into arithmetic.
+Baseline: `Invoke` 52.9 ms = conv 21.9 + depthwise 17.5 + FC 0.17 + softmax 0.22 +
+**residual 13.2 ms**. The audit had estimated the residual (the reference-C `MEAN`) at ~3 ms;
+it is a quarter of the whole inference. Wake: step 3477 ± 185 µs.
+
+**Arenas right-sized (2026-09-03).** The generated arena size was the desktop interpreter's
+sum of all int8 tensors × 1.2 — 139,264 B against the 55,024 B TFLM actually uses, because
+the planner reuses buffers. Pinning the size to the measured need let the command arena into
+internal SRAM: **step 85 → 66 ms, `Invoke` 52.9 → 40.5 ms (−23 %)**, depthwise alone
+17.5 → 8.5 ms. The residual did not move (13.2 → 13.5 ms), which is the clean confirmation
+that `MEAN` is compute-bound in reference C rather than starved of bandwidth.
+
+**Quad-I/O flash + 1 kHz tick (2026-09-03).** Both are defaults Espressif's own CoreS3 BSP
+ships. **Step 66 → 57 ms, front end 3.09 → 2.01 ms per frame**, `Invoke` unchanged — the
+front-end gain is flash bandwidth on the mel table, and `Invoke` not moving confirms the arena
+is no longer the bottleneck. The 1 kHz tick turns the wake catch-up loop's `vTaskDelay(1)`
+from a 10 ms sleep into a 1 ms yield: wake step 5.53 → 4.81 ms.
+
+**Banded mel filterbank (2026-09-03).** A triangular mel filter is non-zero over 4–33 of the
+241 FFT bins, so the dense `KWS_MEL[40][241]` was 95 % exact zeros — 38.5 KB of flash rodata
+read *in full for every frame*. Emitting per-band `(start, len, weights)` (459 floats) cut the
+**front end 2.01 → 0.46 ms per frame** and the **step 57 → 44 ms**. Bit-identical, not
+approximate: only exact zeros are dropped and the surviving terms accumulate in the same
+order, so host MFCC parity is unchanged to the digit (5.4e-4, 0 LSB). Across both waves the
+front end went **8.5 → 3.09 → 2.01 → 0.46 ms per frame, an 18x cut**.
+
+**64 KB data cache, and who gets the SRAM (2026-09-03).** Only one arena fits internal SRAM —
+the largest contiguous DRAM region is ~76 KB against 64 + 40 KB of arenas — so this is a
+choice. Doubling the data cache (32 KB of internal RAM) covers the wake path's real working
+set of a 31 KB arena plus a 58 KB weight blob: **wake step 4910 ± 1197 → 1902 ± 481 µs, 2.6x
+faster with 60 % less spread**. It also makes PSRAM much cheaper — moving the command arena
+out of SRAM costs 12.4 ms at a 32 KB cache and 2.3 ms at 64 KB — which is what makes giving
+the SRAM to the always-on model affordable. Recogniser step 43 → 46 ms in exchange.
+
+**Core pinning (2026-09-03).** Both inference tasks moved off LVGL's core 1 (priority 4, 5 ms
+tick, preempting a 40 ms `Invoke` repeatedly) to core 0. Kept on the *variance*, which is what
+preemption actually costs: wake step 4790 ± 1450 → 4910 ± 1197 µs (mean +2.5 %, spread −17 %),
+recogniser `Invoke` 39.8 → 39.1 ms.
+
+**Wake-gated duty cycle — the deployment shape (2026-09-03).** Always-on recognition is a
+measurement baseline, not a design: measured, it costs **315 ms of inference per wall
+second**. Assist mode runs only the wake model continuously (~1.9 ms per 30 ms of audio) and
+opens a 2.5 s window for the recogniser on each wake fire. Measured with one interaction per
+10 s: **253/1000 of wall time active, 97 ms of inference per wall second — 3.2x less CPU**,
+and the ratio scales with interaction rate (at one interaction a minute it is ~16 ms/s, a 20x
+cut). Both modes emit the same `KWS_DUTY` log line so the two are directly comparable.
+
+**Shipped model (2026-09-03).** The final firmware carries the QAT v3 command model
+(`kws-export --qat --prefix features_v3`), **INT8 test accuracy 0.9123**, against 0.7475 for
+the v2 post-training-quantised model the optimisation work was measured on. Same architecture
+and width, so the timings are unchanged (`Invoke` 41.4 ms, step 45–46 ms, front end 0.485 ms
+per frame, wake step 1.95 ms) — the accuracy comes from QAT and the v3 dataset, not from
+anything in this wave, and the wave's numbers are not affected by the swap.
+
+**Net across wave 2: recogniser step 85 → 46 ms, front end 3.09 → 0.46 ms per frame, wake
+step 3.48 → 1.90 ms — and the duty-cycle design takes always-on inference cost from 315 to
+97 ms/s at one interaction per 10 s.**
+
+#### Rejected, with the number that rejected it
+
+- **`MEAN` → `AVERAGE_POOL_2D`.** The 13.5 ms residual is a third of `Invoke`, so this was the
+  biggest single prize on the table. It fails on arithmetic, not speed: TFLite's int8 average
+  pool has no output rescale, so the converter must give its output the *input's* scale
+  (0.265) where `MEAN` picks its own (0.021). Quantising the pooled 32-value embedding — the
+  vector the classifier reads — 12.6x more coarsely moved **90 LSB maximum output delta,
+  4,879 of 5,474 test rows changed, accuracy 74.75 % → 74.17 %**. A depthwise convolution with
+  constant 1/490 weights *is* bit-exact (0 LSB on all 5,474 rows, identical accuracy) because
+  it requantises like any other conv — but esp-nn's s16 scratch for a 49×10 filter needs a
+  **78,464 B arena**, which does not fit internal SRAM at all, forfeiting a larger win. `MEAN`
+  stays. The clean follow-up is esp-nn's unused `esp_nn_mean_s8_esp32s3.c`, which would claim
+  the 13.5 ms without touching the model.
+- **`CONFIG_NN_SKIP_NUDGE`.** Advertised at "~20 %"; measured at **0.7 ms** (`Invoke`
+  40.0 → 39.3 ms, step 44 → 43 ms). Not worth a documented ±1 LSB on all ~188k requantisations
+  per `Invoke` when no host test can audit it — the host runs neither esp-nn nor TFLM. This is
+  why the boot log now prints a numeric fingerprint (the golden MFCC vector through the real
+  interpreter, as 23 int8 outputs): device arithmetic changes are otherwise invisible.
+- **32 KB instruction cache.** With the data cache already at 64 KB: recogniser `Invoke`
+  41.6 → 41.5 ms (inside the noise) and wake step 1902 → 1818 µs. 0.08 ms for 16 KB of SRAM.
+- **Wake weights copied to internal RAM.** Needs 58,080 B; 47,539 B internal remains after the
+  arenas (largest block 31,744 B), and copying them would leave 17.8 KB — under the 24 KB
+  floor. The 64 KB data cache already covers those weights, which is most of why the wake step
+  is 1.9 ms.
+
+#### Lesson worth a slide
+
+Three of the four rejections were rejected by a *measurement that did not exist before this
+wave*. The kernel timers turned "MEAN is ~3 ms" into "MEAN is 13.5 ms"; the boot fingerprint
+turned "skip-nudge is probably fine" into a question the host cannot answer. Optimisation
+work on a microcontroller is mostly building the instrument.
+
 ## 4. Method details worth a figure
 
 - Two-stage always-on architecture (LikeC4 diagrams in `docs/likec4/` — reuse for slides).
