@@ -31,7 +31,7 @@ int main(void)
         }
     }
     printf("wake parity: %d/%d steps differ (%d clips, %u B state)\n",
-           bad, WAKE_STEPS, WAKE_CLIPS, (unsigned) wake_infer_arena_bytes());
+           bad, WAKE_STEPS, WAKE_CLIPS, (unsigned) wake_infer_state_bytes());
     assert(bad == 0);
     puts("test_wake_parity OK");
     return 0;

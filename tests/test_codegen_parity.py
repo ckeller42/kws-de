@@ -26,11 +26,16 @@ COMMAND = config.MODELS_DIR / "command.tflite"
 # The layers the spec names: the command model's first 3x3 conv over a single
 # input channel, its 3x3 depthwise, its 1x1 conv and its (per-channel) FC; the
 # wake model's 5x1 stem conv, a 21x1 depthwise, a 1x1 conv and the 1088->1 FC.
+# op 7 (MEAN) and op 9 (SOFTMAX) are the command model's own requantisation --
+# S-2: before this, they were covered only by the insensitive whole-model
+# check (see test_whole_command_model_matches_the_interpreter).
 LAYERS = [
     ("command", COMMAND, 0, "CONV_2D 3x3x1"),
     ("command", COMMAND, 1, "DEPTHWISE_CONV_2D 3x3"),
     ("command", COMMAND, 2, "CONV_2D 1x1"),
+    ("command", COMMAND, 7, "MEAN"),
     ("command", COMMAND, 8, "FULLY_CONNECTED 32->23 per-channel"),
+    ("command", COMMAND, 9, "SOFTMAX"),
     ("wake", WAKE, 14, "CONV_2D 5x1 stem"),
     ("wake", WAKE, 32, "DEPTHWISE_CONV_2D 21x1"),
     ("wake", WAKE, 18, "CONV_2D 1x1"),
@@ -163,31 +168,63 @@ def test_whole_wake_model_matches_the_interpreter_on_every_step():
     assert f"wake parity: 0/{steps} steps differ" in result.stdout, result.stdout
 
 
+REAL_CLIPS = 64  # S-1: >= 64 real feature windows, kept to a few seconds' compile
+
+
 @needs_command
 @needs_cc
 def test_whole_command_model_matches_the_interpreter():
     """The command model is the only one with MEAN and SOFTMAX, both of which
-    carry their own requantisation, so it gets its own whole-model check."""
+    carry their own requantisation, so it gets its own whole-model check.
+
+    S-1: 4 synthetic random-int8 vectors alone are nearly insensitive here --
+    softmax's int8 output saturates, so a 1-LSB error in MEAN's multiplier or
+    a wrong fold shift can leave all 92 compared bytes unchanged (see the
+    review). Real MFCC feature windows exercise the actual input distribution
+    the classifier runs on, so most of the clips below are drawn from the
+    test split (kws_de.dataset.load_split, prefix "features_v3" -- the real-
+    speech rebuild, matching the command model's [1, 49, 10, 1] input); the
+    cheap synthetic vectors stay too as an edge-of-range check.
+    """
+    from kws_de import dataset
+
     blob = COMMAND.read_bytes()
     itp, detail_in, detail_out = _interpreter(blob)
+    in_scale, in_zp = detail_in["quantization"]
     rng = np.random.default_rng(7)
+
     inputs, expect = [], []
-    for _ in range(4):
-        sample = rng.integers(-128, 128, size=detail_in["shape"], dtype=np.int8)
-        itp.set_tensor(detail_in["index"], sample)
+
+    def _run(sample: np.ndarray) -> None:
+        itp.set_tensor(detail_in["index"], sample.astype(np.int8))
         itp.invoke()
         inputs.append(sample.ravel())
         expect.append(itp.get_tensor(detail_out["index"]).ravel().astype(np.int8))
+
+    for _ in range(4):
+        _run(rng.integers(-128, 128, size=detail_in["shape"], dtype=np.int8))
+
+    features, _, _ = dataset.load_split("test", "features_v3")
+    assert features.shape[1:] == tuple(int(d) for d in detail_in["shape"][1:3]), features.shape
+    real = rng.choice(len(features), size=REAL_CLIPS, replace=False)
+    for i in real:
+        # Same quantisation the eval harness uses for this model
+        # (kws_de.eval._tflite_predict): round(feature / scale + zero_point).
+        q = np.round(features[i] / in_scale + in_zp).astype(np.int8)
+        _run(q[None, ..., None])
 
     files = codegen.generate(blob, "command")
     GEN_DIR.mkdir(parents=True, exist_ok=True)
     for filename, text in files.items():
         (GEN_DIR / filename).write_text(text)
-    codegen.write_infer_vectors(
-        "command", [(np.array(inputs, np.int8), np.array(expect, np.int8))], GEN_DIR
-    )
+    # One clip per vector: the model is stateless, so grouping is only for
+    # WAKE_CLIPS/COMMAND_CLIPS to report how many real clips ran.
+    clips = [(np.array([i]), np.array([e])) for i, e in zip(inputs, expect, strict=True)]
+    codegen.write_infer_vectors("command", clips, GEN_DIR)
     _make("test_command_parity")
     result = subprocess.run(
         [str(TEST_DIR / "test_command_parity")], capture_output=True, text=True, check=True
     )
-    assert "command parity: 0/" in result.stdout, result.stdout
+    total_bytes = len(inputs) * len(expect[0])
+    assert f"command parity: 0/{total_bytes}" in result.stdout, result.stdout
+    assert f"{len(inputs)} clips" in result.stdout, result.stdout

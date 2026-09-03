@@ -75,6 +75,18 @@ def _rows_and_channels(shape: tuple[int, ...], tensor: int) -> tuple[int, int]:
     raise UnsupportedGraph(f"tensor t{tensor}: ring shape {shape} is not [1, rows, 1, C]")
 
 
+def _check_single_io(graph: tflite_graph.Graph) -> None:
+    """Emitter.ref and _render only ever look at graph.inputs[0]/outputs[0]; a
+    second input or output would silently alias onto the first one's pointer
+    instead of erroring, the "silent approximation" this module refuses."""
+    if len(graph.inputs) != 1 or len(graph.outputs) != 1:
+        raise UnsupportedGraph(
+            f"graph has {len(graph.inputs)} input(s) {list(graph.inputs)} and "
+            f"{len(graph.outputs)} output(s) {list(graph.outputs)}; only exactly "
+            "one of each is emitted"
+        )
+
+
 def rewrite_streaming(graph: tflite_graph.Graph) -> Plan:
     """Collapse every resource variable's READ/CONCAT/SLICE/ASSIGN idiom into
     one ring buffer, and return the ops that actually compute something.
@@ -509,6 +521,18 @@ def _check_u16(op, **values: int) -> None:
             )
 
 
+def _check_int8(op, **tensors) -> None:
+    """LOGISTIC/MEAN/AVERAGE_POOL_2D read their operands through a plain
+    int8_t* (unlike QUANTIZE, which is the one op that legitimately crosses
+    int8/uint8). A uint8 tensor read that way is silently misinterpreted --
+    refuse it by name instead."""
+    for name, t in tensors.items():
+        if t.dtype != "int8":
+            raise UnsupportedGraph(
+                f"op {op.index} {op.name}: {name} t{t.index} is {t.dtype}, only int8 is emitted"
+            )
+
+
 def _bias(ctx: "Emitter", op, tag: str) -> str:
     """The op's bias table. TFLite encodes an absent optional bias as tensor
     index -1, which would index Python's *last* tensor -- somebody else's
@@ -795,8 +819,10 @@ def logistic_lut(tflite: bytes, op) -> list[int]:
 
 def emit_logistic(ctx: Emitter, op, lut) -> None:
     g = ctx.plan.graph
+    in_t, out_t = g.tensors[op.inputs[0]], g.tensors[op.outputs[0]]
+    _check_int8(op, input=in_t, output=out_t)
     table = ctx.const_i8(f"op{op.index}_lut", lut)
-    count = math.prod(g.tensors[op.inputs[0]].shape)
+    count = math.prod(in_t.shape)
     src, dst = ctx.ref(op.inputs[0]), ctx.ref(op.outputs[0])
     ctx.emit(f"for (int i = 0; i < {count}; i++)")
     ctx.emit(f"    {dst}[i] = {table}[(uint8_t)({src}[i] + 128)];")
@@ -811,17 +837,22 @@ def emit_quantize(ctx: Emitter, op) -> None:
         float(np.float32(in_t.scales[0])) / float(np.float32(out_t.scales[0]))
     )
     cast = "uint8_t" if out_t.dtype == "uint8" else "int8_t"
+    in_cast = "uint8_t" if in_t.dtype == "uint8" else "int8_t"
     src, dst = ctx.ref(op.inputs[0]), ctx.ref(op.outputs[0])
     same_scale = (mult, shift) == (1 << 30, 1)  # reference/requantize.h's own test
     mixed = (in_t.dtype, out_t.dtype) in (("int8", "uint8"), ("uint8", "int8"))
     if same_scale and mixed and abs(in_zp - out_zp) == 128:
-        # reference/requantize.h fast path: a pure 128 shift is a sign-bit flip.
+        # reference/requantize.h fast path: a pure 128 shift is a sign-bit flip,
+        # byte-identical whether the source is read as int8_t or uint8_t.
         ctx.emit(f"for (int i = 0; i < {count}; i++)")
         ctx.emit(f"    (({cast} *){dst})[i] = ({cast})({src}[i] ^ 0x80);")
         return
     lo, hi = (0, 255) if out_t.dtype == "uint8" else (-128, 127)
     ctx.emit(f"for (int i = 0; i < {count}; i++) {{")
-    ctx.emit(f"    int32_t v = kws_requantize({src}[i] - {in_zp}, {mult}, {shift}) + {out_zp};")
+    ctx.emit(
+        f"    int32_t v = kws_requantize(((const {in_cast} *){src})[i] - {in_zp}, "
+        f"{mult}, {shift}) + {out_zp};"
+    )
     ctx.emit(f"    (({cast} *){dst})[i] = (v < {lo}) ? {lo} : ((v > {hi}) ? {hi} : v);")
     ctx.emit("}")
 
@@ -846,6 +877,7 @@ def emit_mean(ctx: Emitter, op) -> None:
     AVERAGE_POOL_2D export of the same layer drifts by up to 90 LSB)."""
     g = ctx.plan.graph
     in_t, out_t = g.tensors[op.inputs[0]], g.tensors[op.outputs[0]]
+    _check_int8(op, input=in_t, output=out_t)
     in_h, in_w, in_c = _nhwc(in_t.shape)
     axes = sorted(int(a) for a in tflite_graph.constant(g, op.inputs[1], "int32"))
     if axes != [1, 2] or out_t.shape[-1] != in_c or math.prod(out_t.shape) != in_c:
@@ -872,6 +904,7 @@ def emit_mean(ctx: Emitter, op) -> None:
 def emit_average_pool(ctx: Emitter, op) -> None:
     g = ctx.plan.graph
     in_t, out_t = g.tensors[op.inputs[0]], g.tensors[op.outputs[0]]
+    _check_int8(op, input=in_t, output=out_t)
     if float(np.float32(in_t.scales[0])) != float(np.float32(out_t.scales[0])) or int(
         in_t.zero_points[0]
     ) != int(out_t.zero_points[0]):
@@ -904,6 +937,8 @@ EMITTERS = {
     "CONV_2D": emit_conv,
     "DEPTHWISE_CONV_2D": emit_depthwise,
     "FULLY_CONNECTED": emit_fully_connected,
+    "MEAN": emit_mean,
+    "SOFTMAX": emit_softmax,
 }
 
 
@@ -934,6 +969,7 @@ def initial_states(tflite: bytes, graph: tflite_graph.Graph) -> dict[int, int]:
 
 
 _PROLOGUE = """/* generated by kws-codegen from {model} -- do not edit */
+#include <assert.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -964,6 +1000,7 @@ static inline int32_t kws_requantize(int32_t x, int32_t mult, int32_t shift)
 def generate(tflite: bytes, name: str) -> dict[str, str]:
     """Return {"<name>_infer.c": source, "<name>_infer.h": header}."""
     graph = tflite_graph.read_graph(tflite)
+    _check_single_io(graph)
     plan = rewrite_streaming(graph)
     scratch = max((scratch_bytes(graph, op) for op in plan.ops), default=0)
     ctx = Emitter(
@@ -1038,6 +1075,13 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
         lines.append(_REQUANTIZE)
     lines += ["\n".join(statics), "", "\n".join(ctx.consts), ""]
 
+    # One name, one number: ARENA_BYTES/arena_bytes() is the transient planner
+    # arena (activations + esp-nn scratch), reused every call; STATE_BYTES/
+    # state_bytes() is the ring storage that persists *between* calls (0 for a
+    # stateless model like command). Task 6 compares the arena number, not the
+    # sum of both, against TFLM's arena ceiling.
+    state_bytes = " + ".join(f"sizeof {r.name}" for r in rings) or "0"
+
     reset = [f"void {name}_infer_reset(void)", "{"]
     reset += [f"    memset({r.name}, {fill[r.var_tensor]}, sizeof {r.name});" for r in rings]
     reset += [
@@ -1050,7 +1094,12 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
         "",
         f"size_t {name}_infer_arena_bytes(void)",
         "{",
-        "    return sizeof arena" + "".join(f" + sizeof {r.name}" for r in rings) + ";",
+        "    return sizeof arena;",
+        "}",
+        "",
+        f"size_t {name}_infer_state_bytes(void)",
+        "{",
+        f"    return {state_bytes};",
         "}",
     ]
     lines.append("\n".join(reset))
@@ -1065,21 +1114,47 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
             f"void {name}_infer_step(const int8_t in[{in_t.shape[-2]} * {in_t.shape[-1]}], "
             f"{out_ctype} *prob_q);\n"
         )
+        body = [signature, "{", *ctx.body, *shifts, "}"]
     else:
         signature = f"void {name}_infer(const int8_t in[{in_len}], {out_ctype} out[{out_len}])"
-        shifts = []
-        decl = f"void {name}_infer(const int8_t in[{in_len}], {out_ctype} out[{out_len}]);\n"
-    lines.append("\n".join([signature, "{", *ctx.body, *shifts, "}"]))
+        decl = (
+            "/* `in` and `out` must be 16-byte aligned: esp-nn's S3 kernels take "
+            "them as direct operands, with no arena copy in front of either "
+            "(checked on `in` in debug builds; `out` is never read back here to "
+            "check against). */\n"
+            f"void {name}_infer(const int8_t in[{in_len}], {out_ctype} out[{out_len}]);\n"
+        )
+        # Cheap, debug-only: the caller-owned `in` buffer is not one of the
+        # generator's own aligned statics (arena/rings), and nothing else here
+        # would catch a misaligned pointer before esp-nn silently mis-reads it.
+        body = [
+            signature,
+            "{",
+            "#ifndef NDEBUG",
+            "    assert(((uintptr_t) in & 15) == 0);",
+            "#endif",
+            *ctx.body,
+            "}",
+        ]
+    lines.append("\n".join(body))
 
     header = (
         f"/* generated by kws-codegen from {name} -- do not edit */\n"
         "#pragma once\n#include <stddef.h>\n#include <stdint.h>\n\n"
         f"#define {name.upper()}_INFER_INPUT_LEN {in_len}\n"
         f"#define {name.upper()}_INFER_OUTPUT_LEN {out_len}\n"
-        f"#define {name.upper()}_INFER_ARENA_BYTES {ctx.arena.size}\n\n"
+        "/* Transient arena: activations + esp-nn scratch, live only for the "
+        "duration of one call. */\n"
+        f"#define {name.upper()}_INFER_ARENA_BYTES {ctx.arena.size}\n"
+        "/* Persistent state: ring-buffer history that must survive between "
+        f"calls (0 if {name} is stateless). Separate from the arena above -- "
+        "add both for the model's total static footprint. */\n"
+        f"#define {name.upper()}_INFER_STATE_BYTES "
+        f"{sum(r.bytes + r.new_rows * r.channels for r in rings)}\n\n"
         '#ifdef __cplusplus\nextern "C" {\n#endif\n\n'
         f"void {name}_infer_init(void);\n"
         f"void {name}_infer_reset(void);\n" + decl + f"size_t {name}_infer_arena_bytes(void);\n"
+        f"size_t {name}_infer_state_bytes(void);\n"
         "\n#ifdef __cplusplus\n}\n#endif\n"
     )
     return {f"{name}_infer.c": "\n".join(lines) + "\n", f"{name}_infer.h": header}

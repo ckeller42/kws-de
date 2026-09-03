@@ -183,13 +183,41 @@ def test_arena_accounts_for_scratch():
     assert with_scratch.size == plain.size + 1024
 
 
+def _footprint(g):
+    """(arena bytes, ring/state bytes) exactly as codegen.generate sizes them:
+    the same plan_arena(scratch_bytes=...) call it makes, without generating
+    and re-parsing the C. arena is the transient planner arena (activations +
+    esp-nn scratch); state is ring storage that persists between calls."""
+    plan = codegen.rewrite_streaming(g)
+    scratch = max((codegen.scratch_bytes(g, op) for op in plan.ops), default=0)
+    arena = codegen.plan_arena(plan, scratch_bytes=scratch)
+    state = sum(r.bytes + r.new_rows * r.channels for r in plan.rings)
+    return arena.size, state
+
+
 @needs_wake
 def test_wake_arena_is_at_most_the_tflm_arena():
+    """A regression guard on the *real* generated numbers (S-3): the old form
+    of this test called plan_arena() with no scratch, so it asserted
+    128 <= 40960 and could never fail."""
     g = tflite_graph.read_graph(WAKE.read_bytes())
-    arena = codegen.plan_arena(codegen.rewrite_streaming(g))
+    arena, state = _footprint(g)
+    assert (arena, state) == (15680, 4200)
     tflm = codegen.tflm_arena_bytes(GEN / "wake_model_config.h", "KWS_WAKE_ARENA_BYTES")
     assert tflm == 40960
-    assert arena.size <= tflm, f"generated arena {arena.size} B exceeds TFLM's {tflm} B"
+    assert arena + state <= tflm, f"generated {arena + state} B exceeds TFLM's {tflm} B"
+
+
+@needs_command
+def test_command_arena_is_at_most_the_tflm_arena():
+    """The command model's arena has much less headroom than wake's and had no
+    ceiling test at all before this fix (S-3)."""
+    g = tflite_graph.read_graph(COMMAND.read_bytes())
+    arena, state = _footprint(g)
+    assert state == 0  # stateless: no rings
+    tflm = codegen.tflm_arena_bytes(GEN / "model_config.h", "KWS_MODEL_ARENA_BYTES")
+    assert tflm == 65536
+    assert arena + state <= tflm, f"generated {arena + state} B exceeds TFLM's {tflm} B"
 
 
 @needs_wake
@@ -465,6 +493,77 @@ def test_generate_command_emits_a_stateless_entry_point():
     assert "ring0" not in source and "memmove" not in source
     assert source.count("esp_nn_mean_nhwc_s8(") == 1
     assert source.count("esp_nn_softmax_s8(") == 1
+
+
+def test_check_single_io_refuses_multiple_inputs_or_outputs():
+    """S-4: a second input or output would silently alias onto the first
+    one's pointer (Emitter.ref / _render only ever look at index 0)."""
+    g = _streaming_graph()
+    with pytest.raises(codegen.UnsupportedGraph, match="2 input"):
+        codegen._check_single_io(dataclasses.replace(g, inputs=(0, 4)))
+    with pytest.raises(codegen.UnsupportedGraph, match="2 output"):
+        codegen._check_single_io(dataclasses.replace(g, outputs=(5, 4)))
+    codegen._check_single_io(g)  # single in/out: no raise
+
+
+def _quantize_plan(in_dtype, out_dtype, in_scale, out_scale, in_zp=0, out_zp=-128):
+    tensors = {
+        0: _tensor(0, (1, 4), dtype=in_dtype, scale=in_scale, zp=in_zp),
+        1: _tensor(1, (1, 4), dtype=out_dtype, scale=out_scale, zp=out_zp),
+    }
+    op = tflite_graph.Op(0, "QUANTIZE", (0,), (1,), {})
+    graph = tflite_graph.Graph(
+        ops=(op,), tensors=tensors, inputs=(0,), outputs=(1,), variables={}, init_subgraph=None
+    )
+    return codegen.Plan(graph=graph, ops=(op,), rings=(), alias={})
+
+
+def test_quantize_general_path_reads_a_uint8_source_through_the_right_cast():
+    """S-5: arena/ring refs are int8_t*; a uint8 input read that way through
+    QUANTIZE's general (non-fast-path) branch would silently misread values
+    >= 128. scale ratio 0.5 -> mult/shift (1<<30, 0), not the fast path's
+    (1<<30, 1), so this exercises kws_requantize, not the XOR shortcut."""
+    plan = _quantize_plan("uint8", "int8", in_scale=1.0, out_scale=2.0)
+    ctx = _emitter(plan)
+    codegen.emit_quantize(ctx, plan.ops[0])
+    text = "\n".join(ctx.body)
+    assert "kws_requantize" in text
+    assert "const uint8_t *" in text
+
+
+@needs_wake
+def test_wake_arena_and_state_bytes_are_distinct_numbers():
+    """S-6: ARENA_BYTES/arena_bytes() is the transient planner arena; the
+    separate STATE_BYTES/state_bytes() is the ring storage. Before this fix
+    both the macro and the function conflated the two under one name."""
+    files = codegen.generate(WAKE.read_bytes(), "wake")
+    header, source = files["wake_infer.h"], files["wake_infer.c"]
+    assert "#define WAKE_INFER_ARENA_BYTES 15680" in header
+    assert "#define WAKE_INFER_STATE_BYTES 4200" in header
+    assert "size_t wake_infer_state_bytes(void);" in header
+    assert "return sizeof arena;" in source
+    assert "return sizeof ring0" in source  # state_bytes sums the rings
+
+
+@needs_command
+def test_command_infer_asserts_input_alignment_in_debug_builds():
+    """S-7: `in` is a caller-owned buffer esp-nn's S3 kernels read directly
+    (unlike the wake model's `in`, which is copied into an aligned ring
+    before any esp-nn call touches it) -- a cheap debug-only check."""
+    source = codegen.generate(COMMAND.read_bytes(), "command")["command_infer.c"]
+    assert "#include <assert.h>" in source
+    assert "#ifndef NDEBUG" in source
+    assert "assert(((uintptr_t) in & 15) == 0);" in source
+    header = codegen.generate(COMMAND.read_bytes(), "command")["command_infer.h"]
+    assert "16-byte aligned" in header
+
+
+@needs_wake
+def test_wake_infer_step_has_no_alignment_assert():
+    """The streaming entry point's `in` never reaches an esp-nn call directly
+    (it is memcpy'd into an aligned ring first), so it needs no check."""
+    source = codegen.generate(WAKE.read_bytes(), "wake")["wake_infer.c"]
+    assert "assert(((uintptr_t) in & 15) == 0);" not in source
 
 
 def test_padding_same_and_valid():
