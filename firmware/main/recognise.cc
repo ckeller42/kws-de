@@ -14,6 +14,7 @@
 #include "gen/labels.h"
 #include "gen/model_config.h"
 #include "gen/model_data.h"
+#include "gen/test_vectors.h"
 #include "mfcc.h"
 #include "nn_timers.h"
 #include "stream.h"
@@ -55,6 +56,22 @@ static void recognise_task(void *)
     if (interp.AllocateTensors() != kTfLiteOk) { ESP_LOGE(TAG, "AllocateTensors failed"); vTaskDelete(nullptr); return; }
     ESP_LOGI(TAG, "arena used %u / %u", (unsigned)interp.arena_used_bytes(), (unsigned)KWS_MODEL_ARENA_BYTES);
     TfLiteTensor *in = interp.input(0), *out = interp.output(0);
+
+    /* Numeric fingerprint of the inference path, once per boot: the golden MFCC
+       vector through the real interpreter, printed as its 23 int8 outputs.
+       Kernel-level build options (esp-nn's requantise rounding, for one) change
+       device arithmetic that no host test can observe — the host runs neither
+       esp-nn nor TFLM — so this line is the only way to tell a change that is
+       bit-exact from one that quietly moved the model's outputs. Compare it
+       across two boot logs. */
+    mfcc_quantize(TV_MFCC, in->data.int8, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
+    if (interp.Invoke() == kTfLiteOk) {
+        char line[6 * KWS_NUM_LABELS + 1];      /* "-128," is 5 chars plus the terminator */
+        int n = 0;
+        for (int i = 0; i < KWS_NUM_LABELS && n < (int)sizeof line - 1; i++)
+            n += snprintf(line + n, sizeof line - (size_t)n, "%d,", out->data.int8[i]);
+        ESP_LOGI(TAG, "selftest int8 out: %s", line);
+    }
 
     static stream_t stream;
     static mfcc_state_t mstate;                            /* persistent ring of the last 49 log-mel frames */
