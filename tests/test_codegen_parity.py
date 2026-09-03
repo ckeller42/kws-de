@@ -45,8 +45,9 @@ LAYERS = [
 needs_cc = pytest.mark.skipif(shutil.which("cc") is None, reason="no host C compiler")
 
 
-def _make(target: str) -> None:
-    subprocess.run(["make", "-C", str(TEST_DIR), target], check=True)
+def _make(target: str, **make_vars: str) -> None:
+    cmd = ["make", "-C", str(TEST_DIR), target] + [f"{k}={v}" for k, v in make_vars.items()]
+    subprocess.run(cmd, check=True)
 
 
 def _interpreter_output(blob: bytes, op, inputs):
@@ -134,10 +135,17 @@ def _wake_clip(blob: bytes, rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 @needs_wake
 @needs_cc
 @pytest.mark.skipif(not WAKE_TAKES.exists(), reason="approved/wake absent")
-def test_whole_wake_model_matches_the_interpreter_on_every_step():
+def test_whole_wake_model_matches_the_interpreter_on_every_step(tmp_path):
     """The golden feature vector plus the ten approved wake takes, run through
     the generated C as a streaming sequence and compared step by step -- a
-    state bug that the last step happens to agree on still fails here."""
+    state bug that the last step happens to agree on still fails here.
+
+    Generates into `tmp_path`, not the committed `firmware/main/gen` (S-3):
+    this test's real-clip vectors are recordings-derived and never committed,
+    so regenerating them must not touch the tracked `wake_infer.{c,h}` --
+    `GEN_DIR=<tmp_path>` on the `make` command line points the build there
+    instead, leaving the working tree exactly as `kws-codegen` last wrote it.
+    """
     import soundfile as sf
 
     from kws_de import firmware_gen
@@ -156,11 +164,10 @@ def test_whole_wake_model_matches_the_interpreter_on_every_step():
     clips = [_wake_clip(blob, r) for r in rows]
 
     files = codegen.generate(blob, "wake")
-    GEN_DIR.mkdir(parents=True, exist_ok=True)
     for filename, text in files.items():
-        (GEN_DIR / filename).write_text(text)
-    codegen.write_infer_vectors("wake", clips, GEN_DIR)
-    _make("test_wake_parity")
+        (tmp_path / filename).write_text(text)
+    codegen.write_infer_vectors("wake", clips, tmp_path)
+    _make("test_wake_parity", GEN_DIR=str(tmp_path))
     result = subprocess.run(
         [str(TEST_DIR / "test_wake_parity")], capture_output=True, text=True, check=True
     )
@@ -173,7 +180,7 @@ REAL_CLIPS = 64  # S-1: >= 64 real feature windows, kept to a few seconds' compi
 
 @needs_command
 @needs_cc
-def test_whole_command_model_matches_the_interpreter():
+def test_whole_command_model_matches_the_interpreter(tmp_path):
     """The command model is the only one with MEAN and SOFTMAX, both of which
     carry their own requantisation, so it gets its own whole-model check.
 
@@ -185,6 +192,11 @@ def test_whole_command_model_matches_the_interpreter():
     test split (kws_de.dataset.load_split, prefix "features_v3" -- the real-
     speech rebuild, matching the command model's [1, 49, 10, 1] input); the
     cheap synthetic vectors stay too as an edge-of-range check.
+
+    Generates into `tmp_path`, not `firmware/main/gen` (S-3): same reasoning
+    as the wake test above, and command_infer.{c,h} are not even committed
+    yet (Task 8), so this only mattered for `git status` noise before -- now
+    it generates nowhere near the tracked directory at all.
     """
     from kws_de import dataset
 
@@ -214,14 +226,13 @@ def test_whole_command_model_matches_the_interpreter():
         _run(q[None, ..., None])
 
     files = codegen.generate(blob, "command")
-    GEN_DIR.mkdir(parents=True, exist_ok=True)
     for filename, text in files.items():
-        (GEN_DIR / filename).write_text(text)
+        (tmp_path / filename).write_text(text)
     # One clip per vector: the model is stateless, so grouping is only for
     # WAKE_CLIPS/COMMAND_CLIPS to report how many real clips ran.
     clips = [(np.array([i]), np.array([e])) for i, e in zip(inputs, expect, strict=True)]
-    codegen.write_infer_vectors("command", clips, GEN_DIR)
-    _make("test_command_parity")
+    codegen.write_infer_vectors("command", clips, tmp_path)
+    _make("test_command_parity", GEN_DIR=str(tmp_path))
     result = subprocess.run(
         [str(TEST_DIR / "test_command_parity")], capture_output=True, text=True, check=True
     )

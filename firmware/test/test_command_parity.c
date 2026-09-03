@@ -12,8 +12,8 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "gen/command_infer.h"
-#include "gen/command_infer_vectors.h"
+#include "command_infer.h"
+#include "command_infer_vectors.h"
 
 int main(void)
 {

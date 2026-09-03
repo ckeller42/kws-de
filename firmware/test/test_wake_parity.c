@@ -10,8 +10,8 @@
    which the generated source itself #errors on. */
 #include <assert.h>
 #include <stdio.h>
-#include "gen/wake_infer.h"
-#include "gen/wake_infer_vectors.h"
+#include "wake_infer.h"
+#include "wake_infer_vectors.h"
 
 int main(void)
 {

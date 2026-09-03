@@ -578,6 +578,12 @@ def test_write_then_check_roundtrips(tmp_path):
     assert info["arena_bytes"] > 0 and info["ring_bytes"] == 3792
     assert (tmp_path / "wake_infer.c").exists()
     assert (tmp_path / "wake_infer.h").exists()
+    assert (tmp_path / "wake_smoke_vectors.h").exists()
+    # S-4: pin write()'s state_bytes to the header's own STATE_BYTES macro --
+    # they are computed two different ways and must not silently drift apart.
+    header = (tmp_path / "wake_infer.h").read_text()
+    assert f"#define WAKE_INFER_STATE_BYTES {info['state_bytes']}" in header
+    assert info["state_bytes"] == 4200
     assert codegen.check(WAKE, "wake", tmp_path) == []
 
 
@@ -586,6 +592,31 @@ def test_check_reports_a_stale_file(tmp_path):
     codegen.write(WAKE, "wake", tmp_path)
     (tmp_path / "wake_infer.c").write_text("/* stale */\n")
     assert codegen.check(WAKE, "wake", tmp_path) == ["wake_infer.c"]
+
+
+@needs_wake
+def test_check_reports_a_stale_smoke_vectors_file(tmp_path):
+    codegen.write(WAKE, "wake", tmp_path)
+    (tmp_path / "wake_smoke_vectors.h").write_text("/* stale */\n")
+    assert codegen.check(WAKE, "wake", tmp_path) == ["wake_smoke_vectors.h"]
+
+
+@needs_wake
+def test_smoke_vectors_text_is_deterministic():
+    blob = WAKE.read_bytes()
+    a = codegen.smoke_vectors_text(blob, "wake")
+    b = codegen.smoke_vectors_text(blob, "wake")
+    assert a == b
+    assert "#define WAKE_SMOKE_STEPS 64" in a
+    assert "WAKE_SMOKE_IN[64][120]" in a
+    assert "WAKE_SMOKE_EXPECT[64][1]" in a
+
+
+@needs_command
+def test_smoke_vectors_text_is_none_for_a_stateless_model():
+    """The command model has no rings -- nothing streaming to smoke-test, and
+    `write()`/`check()` skip the file entirely (see their `is not None` guard)."""
+    assert codegen.smoke_vectors_text(COMMAND.read_bytes(), "command") is None
 
 
 def test_padding_same_and_valid():

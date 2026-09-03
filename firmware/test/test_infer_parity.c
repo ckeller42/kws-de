@@ -9,7 +9,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "gen/conv_probe_vectors.h"
+#include "conv_probe_vectors.h"
 
 #if defined(SKIP_NUDGE) || defined(CONFIG_NN_SKIP_NUDGE)
 #error "esp-nn's SKIP_NUDGE requantisation is not bit-exact; parity is meaningless with it"

@@ -24,9 +24,13 @@ firmware/managed_components/
 firmware/dependencies.lock
 firmware/test/*.o
 
-# host parity harness: the pinned esp-nn clone plus the probe, generated models
-# and vector headers the parity tests write — build fixtures, not shipped
-# firmware, except the wake inference Task 6 commits as the firmware artefact
+# host parity harness: the pinned esp-nn clone plus the probe, real-clip
+# models and vector headers tests/test_codegen_parity.py writes into a scratch
+# tmp_path (GEN_DIR override, see firmware/test/Makefile) — build fixtures,
+# not shipped firmware, except the wake inference Task 6 commits as the
+# firmware artefact. wake_infer_vectors.h (recordings-derived, ~400 KB) is
+# deliberately NOT committed — see wake_smoke_vectors.h below for the
+# committed, synthetic, model-free equivalent test_wake_smoke builds against.
 firmware/test/.esp-nn/
 firmware/test/test_infer_parity
 firmware/test/test_wake_parity
@@ -37,7 +41,6 @@ firmware/main/gen/*_infer.h
 firmware/main/gen/*_infer_vectors.h
 !firmware/main/gen/wake_infer.c
 !firmware/main/gen/wake_infer.h
-!firmware/main/gen/wake_infer_vectors.h
 
 # local training environments + data (train/mww etc.)
 train/**/.venv/
