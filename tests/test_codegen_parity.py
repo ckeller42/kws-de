@@ -93,3 +93,101 @@ def test_layer_is_byte_identical(model, path, op_index, what):
     )
     assert f"conv parity: 0/{expect.size} bytes differ" in result.stdout, result.stdout
     assert "test_infer_parity OK" in result.stdout
+
+
+WAKE_TAKES = config.DATA_DIR / "recordings" / "approved" / "wake"
+needs_wake = pytest.mark.skipif(not WAKE.exists(), reason=f"{WAKE} absent (KWS_DATA_ROOT)")
+needs_command = pytest.mark.skipif(not COMMAND.exists(), reason=f"{COMMAND} absent")
+
+
+def _interpreter(blob: bytes):
+    """The reference resolver, for the reason spelled out in _interpreter_output."""
+    itp = tf.lite.Interpreter(
+        model_content=blob,
+        experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF,
+    )
+    itp.allocate_tensors()
+    return itp, itp.get_input_details()[0], itp.get_output_details()[0]
+
+
+def _wake_clip(blob: bytes, rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(inputs, outputs) for every 3-row step of one clip, from a freshly reset
+    interpreter -- the states carry across steps and must not carry across
+    clips, exactly as on the device."""
+    itp, detail_in, detail_out = _interpreter(blob)
+    itp.reset_all_variables()
+    inputs, probs = [], []
+    for start in range(0, len(rows) - 2, 3):
+        window = rows[start : start + 3]
+        itp.set_tensor(detail_in["index"], window[None, ...].astype(np.int8))
+        itp.invoke()
+        inputs.append(window.ravel())
+        probs.append(itp.get_tensor(detail_out["index"]).ravel())
+    return np.array(inputs, np.int8), np.array(probs, np.uint8)
+
+
+@needs_wake
+@needs_cc
+@pytest.mark.skipif(not WAKE_TAKES.exists(), reason="approved/wake absent")
+def test_whole_wake_model_matches_the_interpreter_on_every_step():
+    """The golden feature vector plus the ten approved wake takes, run through
+    the generated C as a streaming sequence and compared step by step -- a
+    state bug that the last step happens to agree on still fails here."""
+    import soundfile as sf
+
+    from kws_de import firmware_gen
+
+    pytest.importorskip("pymicro_features")
+    blob = WAKE.read_bytes()
+    _, golden = firmware_gen.wake_test_vector()
+    takes = sorted(WAKE_TAKES.rglob("*.wav"))
+    assert len(takes) == 10, f"expected 10 approved wake takes, found {len(takes)}"
+
+    rows = [golden]
+    for path in takes:
+        pcm, rate = sf.read(path, dtype="int16")
+        assert rate == config.SAMPLE_RATE
+        rows.append(firmware_gen.wake_features(pcm))
+    clips = [_wake_clip(blob, r) for r in rows]
+
+    files = codegen.generate(blob, "wake")
+    GEN_DIR.mkdir(parents=True, exist_ok=True)
+    for filename, text in files.items():
+        (GEN_DIR / filename).write_text(text)
+    codegen.write_infer_vectors("wake", clips, GEN_DIR)
+    _make("test_wake_parity")
+    result = subprocess.run(
+        [str(TEST_DIR / "test_wake_parity")], capture_output=True, text=True, check=True
+    )
+    steps = sum(len(i) for i, _ in clips)
+    assert f"wake parity: 0/{steps} steps differ" in result.stdout, result.stdout
+
+
+@needs_command
+@needs_cc
+def test_whole_command_model_matches_the_interpreter():
+    """The command model is the only one with MEAN and SOFTMAX, both of which
+    carry their own requantisation, so it gets its own whole-model check."""
+    blob = COMMAND.read_bytes()
+    itp, detail_in, detail_out = _interpreter(blob)
+    rng = np.random.default_rng(7)
+    inputs, expect = [], []
+    for _ in range(4):
+        sample = rng.integers(-128, 128, size=detail_in["shape"], dtype=np.int8)
+        itp.set_tensor(detail_in["index"], sample)
+        itp.invoke()
+        inputs.append(sample.ravel())
+        expect.append(itp.get_tensor(detail_out["index"]).ravel().astype(np.int8))
+
+    files = codegen.generate(blob, "command")
+    GEN_DIR.mkdir(parents=True, exist_ok=True)
+    for filename, text in files.items():
+        (GEN_DIR / filename).write_text(text)
+    codegen.write_infer_vectors(
+        "command", [(np.array(inputs, np.int8), np.array(expect, np.int8))], GEN_DIR
+    )
+    _make("test_command_parity")
+    result = subprocess.run(
+        [str(TEST_DIR / "test_command_parity")], capture_output=True, text=True, check=True
+    )
+    assert "command parity: 0/" in result.stdout, result.stdout

@@ -6,7 +6,9 @@ import pytest
 from kws_de import codegen, config, tflite_graph
 
 WAKE = config.MODELS_DIR / "hey_bus.tflite"
+COMMAND = config.MODELS_DIR / "command.tflite"
 needs_wake = pytest.mark.skipif(not WAKE.exists(), reason=f"{WAKE} absent (KWS_DATA_ROOT)")
+needs_command = pytest.mark.skipif(not COMMAND.exists(), reason=f"{COMMAND} absent")
 
 GEN = pathlib.Path(__file__).resolve().parents[1] / "firmware" / "main" / "gen"
 
@@ -393,6 +395,76 @@ def test_generated_sources_refuse_to_build_with_skip_nudge():
     for a faster, non-bit-exact one. Every generated .c must break the build."""
     assert "CONFIG_NN_SKIP_NUDGE" in codegen.NUDGE_GUARD
     assert codegen.NUDGE_GUARD.count("#error") == 1
+
+
+def test_softmax_params_match_tflm_for_the_command_head():
+    """Input scale 0.371104, beta 1.0 -> PreprocessSoftmaxScaling + diff_min."""
+    mult, shift, diff_min = codegen.softmax_params_from_scale(0.371104, beta=1.0)
+    assert shift >= 0
+    assert 0 < mult <= (1 << 31) - 1
+    # CalculateInputRadius(5, shift, 31) == floor(31 * 2**26 / 2**shift)
+    assert diff_min == -((31 * (1 << 26)) >> shift) < 0
+
+
+@needs_wake
+def test_logistic_lut_is_256_monotone_entries_from_the_reference_kernel():
+    blob = WAKE.read_bytes()
+    g = tflite_graph.read_graph(blob)
+    op = next(o for o in g.ops if o.name == "LOGISTIC")
+    lut = codegen.logistic_lut(blob, op)
+    assert len(lut) == 256
+    assert all(-128 <= v <= 127 for v in lut)
+    assert all(b >= a for a, b in zip(lut, lut[1:], strict=False)), "sigmoid is non-decreasing"
+    assert lut[0] == -128 and lut[-1] == 127
+
+
+@needs_wake
+def test_wake_states_reset_to_the_quantised_zero_not_to_zero():
+    """microWakeWord's CALL_ONCE fills every ring with -128 (the quantised
+    zero). A reset that memset 0 would disagree with the interpreter for the
+    whole first second of every clip."""
+    blob = WAKE.read_bytes()
+    g = tflite_graph.read_graph(blob)
+    fill = codegen.initial_states(blob, g)
+    assert set(fill) == set(g.variables)
+    assert set(fill.values()) == {0x80}  # int8 -128
+    assert "memset(ring0, 128, sizeof ring0);" in codegen.generate(blob, "wake")["wake_infer.c"]
+
+
+@needs_wake
+def test_generate_wake_emits_the_documented_api():
+    blob = WAKE.read_bytes()
+    files = codegen.generate(blob, "wake")
+    assert set(files) == {"wake_infer.c", "wake_infer.h"}
+    header = files["wake_infer.h"]
+    for decl in (
+        "void wake_infer_init(void);",
+        "void wake_infer_reset(void);",
+        "void wake_infer_step(const int8_t in[3 * 40], uint8_t *prob_q);",
+        "size_t wake_infer_arena_bytes(void);",
+    ):
+        assert decl in header, decl
+    source = files["wake_infer.c"]
+    assert source.count("esp_nn_conv_s8(") == 5
+    assert source.count("esp_nn_depthwise_conv_s8(") == 4
+    assert source.count("esp_nn_fully_connected_s8(") == 1
+    assert "ring0" in source and "ring5" in source
+    assert "memmove" in source  # the ring shift
+    assert "CONFIG_NN_SKIP_NUDGE" in source
+    # the wake QUANTIZE is int8 -> uint8 at one scale: the reference kernel's
+    # sign-bit-flip fast path, not a multiply
+    assert "^ 0x80" in source and "kws_requantize" not in source
+
+
+@needs_command
+def test_generate_command_emits_a_stateless_entry_point():
+    blob = COMMAND.read_bytes()
+    files = codegen.generate(blob, "command")
+    header, source = files["command_infer.h"], files["command_infer.c"]
+    assert "void command_infer(const int8_t in[490], int8_t out[23]);" in header
+    assert "ring0" not in source and "memmove" not in source
+    assert source.count("esp_nn_mean_nhwc_s8(") == 1
+    assert source.count("esp_nn_softmax_s8(") == 1
 
 
 def test_padding_same_and_valid():

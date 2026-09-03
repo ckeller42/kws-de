@@ -224,6 +224,7 @@ _ALIGN = 16  # esp-nn's S3 kernels want 16-byte-aligned operands
 class Arena:
     offsets: dict[int, int]  # tensor index -> byte offset in the arena
     size: int  # total arena bytes (16-byte aligned)
+    scratch_offset: int = 0  # where esp-nn's scratch block starts
 
 
 def tensor_bytes(graph: tflite_graph.Graph, index: int) -> int:
@@ -292,8 +293,8 @@ def plan_arena(plan: Plan, scratch_bytes: int = 0) -> Arena:
         offsets[t] = offset
         placed.append((offset, offset + size, lo, hi))
 
-    used = max((end for _, end, _, _ in placed), default=0)
-    return Arena(offsets=offsets, size=_round_up(used + scratch_bytes))
+    used = _round_up(max((end for _, end, _, _ in placed), default=0))
+    return Arena(offsets=offsets, size=used + _round_up(scratch_bytes), scratch_offset=used)
 
 
 _MACRO_RE = re.compile(r"^#define\s+(\w+)\s+(\d+)\s*$", re.MULTILINE)
@@ -735,11 +736,353 @@ def emit_fully_connected(ctx: Emitter, op) -> None:
     ctx.emit(f"esp_nn_fully_connected_s8({head}{shift}, {mult}, {tail}")
 
 
+_SCALED_DIFF_INTEGER_BITS = 5
+
+
+def softmax_params_from_scale(input_scale: float, beta: float = 1.0) -> tuple[int, int, int]:
+    """PreprocessSoftmaxScaling + diff_min, as CalculateSoftmaxParams does."""
+    bits = _SCALED_DIFF_INTEGER_BITS
+    real = min(beta * float(np.float32(input_scale)) * (1 << (31 - bits)), float((1 << 31) - 1))
+    mult, shift = quantize_multiplier(real)
+    # CalculateInputRadius(bits, shift, 31), floor of an exactly representable
+    # quotient, so the shift is the same thing without the double round-trip.
+    return mult, shift, -(((1 << bits) - 1) * (1 << (31 - bits)) >> shift)
+
+
+def softmax_params(graph, op) -> tuple[int, int, int]:
+    """(input_multiplier, input_left_shift, diff_min) for an int8 SOFTMAX."""
+    in_t, out_t = graph.tensors[op.inputs[0]], graph.tensors[op.outputs[0]]
+    if int(out_t.zero_points[0]) != -128 or float(np.float32(out_t.scales[0])) != 1.0 / 256:
+        raise UnsupportedGraph(
+            f"op {op.index} SOFTMAX: output t{op.outputs[0]} must be int8 with scale "
+            f"1/256 and zero point -128, got {out_t.scales[0]}/{out_t.zero_points[0]}"
+        )
+    mult, shift, diff_min = softmax_params_from_scale(
+        in_t.scales[0], float(op.options.get("beta", 1.0))
+    )
+    if shift < 0:
+        # esp_nn_softmax_s8 computes `1 << shift`; a negative one is undefined.
+        raise UnsupportedGraph(
+            f"op {op.index} SOFTMAX: input scale {in_t.scales[0]} gives left shift {shift}"
+        )
+    return mult, shift, diff_min
+
+
+def logistic_lut(tflite: bytes, op) -> list[int]:
+    """The reference LOGISTIC kernel's answer for every possible int8 input.
+
+    gemmlowp's fixed-point sigmoid is not worth reimplementing: the input is one
+    byte wide, so run the reference kernel itself over all 256 values through a
+    one-op probe model and freeze the result as a table. Bit-exact by
+    construction, and it cannot drift from the kernel it was taken from.
+    """
+    import tensorflow as tf
+
+    interpreter = tf.lite.Interpreter(
+        model_content=tflite_graph.probe_model(tflite, op),
+        experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF,
+    )
+    interpreter.allocate_tensors()
+    detail_in = interpreter.get_input_details()[0]
+    detail_out = interpreter.get_output_details()[0]
+    lut = []
+    for q in range(-128, 128):
+        interpreter.set_tensor(detail_in["index"], np.full(detail_in["shape"], q, np.int8))
+        interpreter.invoke()
+        lut.append(int(interpreter.get_tensor(detail_out["index"]).flat[0]))
+    return lut
+
+
+def emit_logistic(ctx: Emitter, op, lut) -> None:
+    g = ctx.plan.graph
+    table = ctx.const_i8(f"op{op.index}_lut", lut)
+    count = math.prod(g.tensors[op.inputs[0]].shape)
+    src, dst = ctx.ref(op.inputs[0]), ctx.ref(op.outputs[0])
+    ctx.emit(f"for (int i = 0; i < {count}; i++)")
+    ctx.emit(f"    {dst}[i] = {table}[(uint8_t)({src}[i] + 128)];")
+
+
+def emit_quantize(ctx: Emitter, op) -> None:
+    g = ctx.plan.graph
+    in_t, out_t = g.tensors[op.inputs[0]], g.tensors[op.outputs[0]]
+    count = math.prod(in_t.shape)
+    in_zp, out_zp = int(in_t.zero_points[0]), int(out_t.zero_points[0])
+    mult, shift = quantize_multiplier(
+        float(np.float32(in_t.scales[0])) / float(np.float32(out_t.scales[0]))
+    )
+    cast = "uint8_t" if out_t.dtype == "uint8" else "int8_t"
+    src, dst = ctx.ref(op.inputs[0]), ctx.ref(op.outputs[0])
+    same_scale = (mult, shift) == (1 << 30, 1)  # reference/requantize.h's own test
+    mixed = (in_t.dtype, out_t.dtype) in (("int8", "uint8"), ("uint8", "int8"))
+    if same_scale and mixed and abs(in_zp - out_zp) == 128:
+        # reference/requantize.h fast path: a pure 128 shift is a sign-bit flip.
+        ctx.emit(f"for (int i = 0; i < {count}; i++)")
+        ctx.emit(f"    (({cast} *){dst})[i] = ({cast})({src}[i] ^ 0x80);")
+        return
+    lo, hi = (0, 255) if out_t.dtype == "uint8" else (-128, 127)
+    ctx.emit(f"for (int i = 0; i < {count}; i++) {{")
+    ctx.emit(f"    int32_t v = kws_requantize({src}[i] - {in_zp}, {mult}, {shift}) + {out_zp};")
+    ctx.emit(f"    (({cast} *){dst})[i] = (v < {lo}) ? {lo} : ((v > {hi}) ? {hi} : v);")
+    ctx.emit("}")
+
+
+def emit_softmax(ctx: Emitter, op) -> None:
+    g = ctx.plan.graph
+    shape = g.tensors[op.inputs[0]].shape
+    depth = shape[-1]
+    outer = math.prod(shape) // depth
+    mult, shift, diff_min = softmax_params(g, op)
+    ctx.emit("esp_nn_set_softmax_scratch_buf(scratch);")
+    ctx.emit(
+        f"esp_nn_softmax_s8({ctx.ref(op.inputs[0])}, {outer}, {depth}, "
+        f"{mult}, {shift}, {diff_min}, {ctx.ref(op.outputs[0])});"
+    )
+
+
+def emit_mean(ctx: Emitter, op) -> None:
+    """MEAN over (H, W). esp_nn_mean_nhwc_s8 is TFLM's QuantizedMeanOrSum with
+    the 1/(H*W) already folded into the multiplier -- which is where the
+    precision lives, so the fold is done exactly as the reducer does it (an
+    AVERAGE_POOL_2D export of the same layer drifts by up to 90 LSB)."""
+    g = ctx.plan.graph
+    in_t, out_t = g.tensors[op.inputs[0]], g.tensors[op.outputs[0]]
+    in_h, in_w, in_c = _nhwc(in_t.shape)
+    axes = sorted(int(a) for a in tflite_graph.constant(g, op.inputs[1], "int32"))
+    if axes != [1, 2] or out_t.shape[-1] != in_c or math.prod(out_t.shape) != in_c:
+        raise UnsupportedGraph(
+            f"op {op.index} MEAN: only reduction over axes [1, 2] of a [1, H, W, C] "
+            f"tensor is emitted, got axes {axes} and output shape {out_t.shape}"
+        )
+    mult, shift = quantize_multiplier(
+        float(np.float32(in_t.scales[0])) / float(np.float32(out_t.scales[0]))
+    )
+    # Readapt the rescale to fold in 1 / (H * W), exactly as QuantizedMeanOrSum:
+    #   s = min(63 - clz64(n), 32, 31 + output_shift); mult = (mult << s) / n
+    # 63 - clz64(n) is floor(log2(n)), i.e. n.bit_length() - 1 for n >= 1.
+    n = in_h * in_w
+    s = min(n.bit_length() - 1, 32, 31 + shift)
+    mult, shift = (mult << s) // n, shift - s
+    ctx.emit(
+        f"esp_nn_mean_nhwc_s8({ctx.ref(op.inputs[0])}, {ctx.ref(op.outputs[0])}, "
+        f"{in_h}, {in_w}, {in_c}, {int(in_t.zero_points[0])}, "
+        f"{int(out_t.zero_points[0])}, {mult}, {shift});"
+    )
+
+
+def emit_average_pool(ctx: Emitter, op) -> None:
+    g = ctx.plan.graph
+    in_t, out_t = g.tensors[op.inputs[0]], g.tensors[op.outputs[0]]
+    if float(np.float32(in_t.scales[0])) != float(np.float32(out_t.scales[0])) or int(
+        in_t.zero_points[0]
+    ) != int(out_t.zero_points[0]):
+        raise UnsupportedGraph(
+            f"op {op.index} AVERAGE_POOL_2D: esp_nn_avg_pool_s8 does not requantise, "
+            f"but t{op.inputs[0]} and t{op.outputs[0]} have different quantisation"
+        )
+    in_h, in_w, in_c = _nhwc(in_t.shape)
+    out_h, out_w, _ = _nhwc(out_t.shape)
+    k_h, k_w = int(op.options["filter_height"]), int(op.options["filter_width"])
+    s_h, s_w = int(op.options["stride_h"]), int(op.options["stride_w"])
+    pad_h, pad_w, exp_h, exp_w = padding_hw(
+        in_h, in_w, k_h, k_w, s_h, s_w, str(op.options["padding"])
+    )
+    if (exp_h, exp_w) != (out_h, out_w):
+        raise UnsupportedGraph(
+            f"op {op.index} AVERAGE_POOL_2D: padding gives {exp_h}x{exp_w}, tensor "
+            f"t{op.outputs[0]} says {out_h}x{out_w}"
+        )
+    _check_u16(op, in_h=in_h, in_w=in_w, in_c=in_c, out_h=out_h, out_w=out_w)
+    act_min, act_max = activation_range(g, op)
+    ctx.emit(
+        f"esp_nn_avg_pool_s8({ctx.ref(op.inputs[0])}, {in_w}, {in_h}, "
+        f"{ctx.ref(op.outputs[0])}, {out_w}, {out_h}, {s_w}, {s_h}, {k_w}, {k_h}, "
+        f"{pad_w}, {pad_h}, {act_min}, {act_max}, {in_c});"
+    )
+
+
 EMITTERS = {
     "CONV_2D": emit_conv,
     "DEPTHWISE_CONV_2D": emit_depthwise,
     "FULLY_CONNECTED": emit_fully_connected,
 }
+
+
+def initial_states(tflite: bytes, graph: tflite_graph.Graph) -> dict[int, int]:
+    """resource tensor -> the byte its CALL_ONCE init subgraph fills it with.
+
+    microWakeWord's ring states start at the quantised zero, which is -128
+    (0x80) and not 0 for these tensors -- a reset that zeroed them would
+    disagree with the interpreter for the whole first second of every clip.
+    Read the value out of the model instead of assuming one.
+    """
+    if graph.init_subgraph is None:
+        return {}
+    init = tflite_graph.read_graph(tflite, graph.init_subgraph)
+    assigns = {op.inputs[0]: op.inputs[1] for op in init.ops if op.name == "ASSIGN_VARIABLE"}
+    fill: dict[int, int] = {}
+    for var, name in graph.variables.items():
+        source = next((t for t, n in init.variables.items() if n == name), None)
+        if source is None or source not in assigns:
+            raise UnsupportedGraph(f"resource t{var} ({name}) is not initialised by CALL_ONCE")
+        data = init.tensors[assigns[source]].data
+        if data is None or len(set(data)) != 1:
+            raise UnsupportedGraph(
+                f"resource t{var} ({name}): CALL_ONCE initialiser is not a constant fill"
+            )
+        fill[var] = data[0]
+    return fill
+
+
+_PROLOGUE = """/* generated by kws-codegen from {model} -- do not edit */
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include "esp_nn.h"
+
+{guard}"""
+
+# TFLM's MultiplyByQuantizedMultiplier for the ops esp-nn does not cover: the
+# same gemmlowp double-rounding path esp_nn_requantize takes when SKIP_NUDGE is
+# not defined (which the guard above makes sure of).
+_REQUANTIZE = """
+static inline int32_t kws_requantize(int32_t x, int32_t mult, int32_t shift)
+{
+    int32_t left = shift > 0 ? shift : 0;
+    int32_t right = shift > 0 ? 0 : -shift;
+    int64_t ab = (int64_t)(x * (1 << left)) * (int64_t)mult;
+    int64_t nudge = ab >= 0 ? (1 << 30) : (1 - (1 << 30));
+    int32_t high = (int32_t)((ab + nudge) / (1LL << 31));
+    if (right == 0) return high;
+    int32_t mask = (1 << right) - 1;
+    int32_t rem = high & mask;
+    int32_t threshold = (mask >> 1) + (high < 0 ? 1 : 0);
+    return (high >> right) + (rem > threshold ? 1 : 0);
+}
+"""
+
+
+def generate(tflite: bytes, name: str) -> dict[str, str]:
+    """Return {"<name>_infer.c": source, "<name>_infer.h": header}."""
+    graph = tflite_graph.read_graph(tflite)
+    plan = rewrite_streaming(graph)
+    scratch = max((scratch_bytes(graph, op) for op in plan.ops), default=0)
+    ctx = Emitter(
+        prefix=name,
+        plan=plan,
+        arena=plan_arena(plan, scratch_bytes=scratch),
+        scratch_bytes=scratch,
+    )
+
+    # The CONCATENATION that built each ring is gone, so the rows it appended
+    # are copied into the ring's tail right where the op producing them ran.
+    feeds: dict[int, list[Ring]] = {}
+    for ring in plan.rings:
+        feeds.setdefault(plan.alias.get(ring.new_tensor, ring.new_tensor), []).append(ring)
+
+    def _fill(tensor: int) -> None:
+        for ring in feeds.get(tensor, ()):
+            ctx.emit(
+                f"memcpy({ring.name} + {ring.bytes}, {ctx.ref(ring.new_tensor)}, "
+                f"{ring.new_rows * ring.channels});"
+            )
+
+    for tensor in graph.inputs:
+        _fill(tensor)
+    for op in plan.ops:
+        if op.name == "RESHAPE":
+            pass  # an alias, no code
+        elif op.name == "CONV_2D":
+            emit_conv(ctx, op)
+        elif op.name == "DEPTHWISE_CONV_2D":
+            emit_depthwise(ctx, op)
+        elif op.name == "FULLY_CONNECTED":
+            emit_fully_connected(ctx, op)
+        elif op.name == "AVERAGE_POOL_2D":
+            emit_average_pool(ctx, op)
+        elif op.name == "MEAN":
+            emit_mean(ctx, op)
+        elif op.name == "SOFTMAX":
+            emit_softmax(ctx, op)
+        elif op.name == "LOGISTIC":
+            emit_logistic(ctx, op, logistic_lut(tflite, op))
+        elif op.name == "QUANTIZE":
+            emit_quantize(ctx, op)
+        else:
+            raise UnsupportedGraph(f"op {op.index} {op.name}: no emitter")
+        for t in op.outputs:
+            _fill(t)
+    return _render(ctx, name, initial_states(tflite, graph))
+
+
+def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
+    graph = ctx.plan.graph
+    in_t = graph.tensors[graph.inputs[0]]
+    out_t = graph.tensors[graph.outputs[0]]
+    in_len, out_len = math.prod(in_t.shape), math.prod(out_t.shape)
+    out_ctype = "uint8_t" if out_t.dtype == "uint8" else "int8_t"
+    rings = ctx.plan.rings
+
+    # esp-nn's kernels want 16-byte-aligned operands; the generated constant
+    # tables are copied into the (aligned) scratch by the S3 kernels themselves,
+    # so only the buffers the kernels read and write directly are declared so.
+    statics = [f"static int8_t arena[{ctx.arena.size}] __attribute__((aligned(16)));"]
+    if ctx.scratch_bytes:
+        statics.append(f"static int8_t *const scratch = arena + {ctx.arena.scratch_offset};")
+    statics += [
+        f"static int8_t {r.name}[{r.bytes + r.new_rows * r.channels}] __attribute__((aligned(16)));"
+        for r in rings
+    ]
+
+    lines = [_PROLOGUE.format(model=name, guard=NUDGE_GUARD)]
+    if any("kws_requantize" in line for line in ctx.body):
+        lines.append(_REQUANTIZE)
+    lines += ["\n".join(statics), "", "\n".join(ctx.consts), ""]
+
+    reset = [f"void {name}_infer_reset(void)", "{"]
+    reset += [f"    memset({r.name}, {fill[r.var_tensor]}, sizeof {r.name});" for r in rings]
+    reset += [
+        "}",
+        "",
+        f"void {name}_infer_init(void)",
+        "{",
+        f"    {name}_infer_reset();",
+        "}",
+        "",
+        f"size_t {name}_infer_arena_bytes(void)",
+        "{",
+        "    return sizeof arena" + "".join(f" + sizeof {r.name}" for r in rings) + ";",
+        "}",
+    ]
+    lines.append("\n".join(reset))
+
+    if rings:
+        signature = f"void {name}_infer_step(const int8_t in[{in_len}], {out_ctype} *out)"
+        shifts = [
+            f"    memmove({r.name}, {r.name} + {r.new_rows * r.channels}, {r.bytes});"
+            for r in rings
+        ]
+        decl = (
+            f"void {name}_infer_step(const int8_t in[{in_t.shape[-2]} * {in_t.shape[-1]}], "
+            f"{out_ctype} *prob_q);\n"
+        )
+    else:
+        signature = f"void {name}_infer(const int8_t in[{in_len}], {out_ctype} out[{out_len}])"
+        shifts = []
+        decl = f"void {name}_infer(const int8_t in[{in_len}], {out_ctype} out[{out_len}]);\n"
+    lines.append("\n".join([signature, "{", *ctx.body, *shifts, "}"]))
+
+    header = (
+        f"/* generated by kws-codegen from {name} -- do not edit */\n"
+        "#pragma once\n#include <stddef.h>\n#include <stdint.h>\n\n"
+        f"#define {name.upper()}_INFER_INPUT_LEN {in_len}\n"
+        f"#define {name.upper()}_INFER_OUTPUT_LEN {out_len}\n"
+        f"#define {name.upper()}_INFER_ARENA_BYTES {ctx.arena.size}\n\n"
+        '#ifdef __cplusplus\nextern "C" {\n#endif\n\n'
+        f"void {name}_infer_init(void);\n"
+        f"void {name}_infer_reset(void);\n" + decl + f"size_t {name}_infer_arena_bytes(void);\n"
+        "\n#ifdef __cplusplus\n}\n#endif\n"
+    )
+    return {f"{name}_infer.c": "\n".join(lines) + "\n", f"{name}_infer.h": header}
 
 
 def write_probe_vectors(tflite: bytes, op, inputs, expect, gen_dir) -> None:
@@ -779,4 +1122,34 @@ def write_probe_vectors(tflite: bytes, op, inputs, expect, gen_dir) -> None:
         f"#define CONV_PROBE_SCRATCH {max(scratch_bytes(graph, op), 16)}\n"
         f"static const int8_t CONV_PROBE_IN[{np.size(inputs)}] = {{{flat_in}}};\n"
         f"static const int8_t CONV_PROBE_EXPECT[{np.size(expect)}] = {{{flat_expect}}};\n"
+    )
+
+
+def _c_rows(name: str, ctype: str, rows) -> str:
+    rows = np.asarray(rows)
+    body = ",\n".join("  {" + ", ".join(str(int(v)) for v in row) + "}" for row in rows)
+    return f"static const {ctype} {name}[{rows.shape[0]}][{rows.shape[1]}] = {{\n{body}\n}};\n"
+
+
+def write_infer_vectors(name: str, clips, gen_dir) -> None:
+    """gen/<name>_infer_vectors.h: every step of every clip and the answer the
+    interpreter gave for it.
+
+    `clips` is a sequence of (inputs, expect) pairs, each [steps, len] -- one
+    clip per state reset, so the harness can check a whole streaming sequence
+    and not just a single call. Regenerate whenever the model changes; the
+    header and the model are read together by the host parity harness.
+    """
+    inputs = np.concatenate([np.asarray(i, np.int8) for i, _ in clips])
+    expect = np.concatenate([np.asarray(e) for _, e in clips])
+    ctype = "uint8_t" if expect.dtype == np.uint8 else "int8_t"
+    steps = ", ".join(str(len(i)) for i, _ in clips)
+    upper = name.upper()
+    pathlib.Path(gen_dir, f"{name}_infer_vectors.h").write_text(
+        "/* generated by kws-codegen -- do not edit */\n#pragma once\n#include <stdint.h>\n"
+        f"#define {upper}_CLIPS {len(clips)}\n"
+        f"#define {upper}_STEPS {len(inputs)}\n"
+        f"static const uint16_t {upper}_CLIP_STEPS[{len(clips)}] = {{{steps}}};\n"
+        + _c_rows(f"{upper}_IN", "int8_t", inputs)
+        + _c_rows(f"{upper}_EXPECT", ctype, expect)
     )
