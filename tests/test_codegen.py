@@ -110,6 +110,24 @@ def test_rewrite_rejects_a_slice_that_is_not_the_ring_shift():
         codegen.rewrite_streaming(bad)
 
 
+def test_duplicate_read_variable_names_the_resource():
+    g = _streaming_graph()
+    ops = list(g.ops) + [tflite_graph.Op(6, "READ_VARIABLE", (1,), (2,), {})]
+    bad = dataclasses.replace(g, ops=tuple(ops))
+    with pytest.raises(codegen.UnsupportedGraph, match=r"t1\b"):
+        codegen.rewrite_streaming(bad)
+
+
+def test_non_ring_concatenation_names_the_op():
+    g = _streaming_graph()
+    tensors = dict(g.tensors)
+    tensors[10] = _tensor(10, (1, 2, 1, 4))
+    extra = tflite_graph.Op(6, "CONCATENATION", (0, 0), (10,), {"axis": 1})
+    bad = dataclasses.replace(g, tensors=tensors, ops=(*g.ops, extra))
+    with pytest.raises(codegen.UnsupportedGraph, match=r"op 6\b"):
+        codegen.rewrite_streaming(bad)
+
+
 def test_unsupported_op_names_the_op_and_tensor():
     g = _streaming_graph()
     ops = list(g.ops)

@@ -35,15 +35,6 @@ SUPPORTED_OPS = frozenset(
         "CALL_ONCE",
     }
 )
-# Ops that exist only to move bytes around; the rewrite resolves them away.
-_BOOKKEEPING = {
-    "VAR_HANDLE",
-    "READ_VARIABLE",
-    "ASSIGN_VARIABLE",
-    "CALL_ONCE",
-    "CONCATENATION",
-    "STRIDED_SLICE",
-}
 
 
 class UnsupportedGraph(ValueError):
@@ -106,8 +97,24 @@ def rewrite_streaming(graph: tflite_graph.Graph) -> Plan:
                     f"{tensor.dtype}, only int8/int32/uint8 are supported"
                 )
 
-    reads = {op.inputs[0]: op.outputs[0] for op in graph.ops if op.name == "READ_VARIABLE"}
-    assigns = {op.inputs[0]: op.inputs[1] for op in graph.ops if op.name == "ASSIGN_VARIABLE"}
+    def _index_once(name: str, value_of) -> dict[int, int]:
+        """Map resource-variable tensor -> value tensor for every `name` op,
+        raising if a variable is touched by more than one such op."""
+        out: dict[int, int] = {}
+        for op in graph.ops:
+            if op.name != name:
+                continue
+            var = op.inputs[0]
+            if var in out:
+                raise UnsupportedGraph(
+                    f"resource t{var} ({graph.variables.get(var, '?')}) has more than "
+                    f"one {name} (op {op.index} duplicates an earlier one)"
+                )
+            out[var] = value_of(op)
+        return out
+
+    reads = _index_once("READ_VARIABLE", lambda op: op.outputs[0])
+    assigns = _index_once("ASSIGN_VARIABLE", lambda op: op.inputs[1])
     concat_of = {op.inputs[0]: op for op in graph.ops if op.name == "CONCATENATION"}
     slice_of = {op.outputs[0]: op for op in graph.ops if op.name == "STRIDED_SLICE"}
 
@@ -174,9 +181,26 @@ def rewrite_streaming(graph: tflite_graph.Graph) -> Plan:
             )
         )
 
+    ring_concat_outputs = {r.buffer_tensor for r in rings}
+    ring_slice_outputs = {assigns[r.var_tensor] for r in rings}
+
     ops = []
     for op in graph.ops:
-        if op.name in _BOOKKEEPING:
+        if op.name in ("VAR_HANDLE", "READ_VARIABLE", "ASSIGN_VARIABLE", "CALL_ONCE"):
+            continue
+        if op.name == "CONCATENATION":
+            if op.outputs[0] not in ring_concat_outputs:
+                raise UnsupportedGraph(
+                    f"op {op.index} CONCATENATION (-> t{op.outputs[0]}) is not part of "
+                    "a detected ring; the emitters only support ring concatenation"
+                )
+            continue
+        if op.name == "STRIDED_SLICE":
+            if op.outputs[0] not in ring_slice_outputs:
+                raise UnsupportedGraph(
+                    f"op {op.index} STRIDED_SLICE (-> t{op.outputs[0]}) is not part of "
+                    "a detected ring; the emitters only support ring slicing"
+                )
             continue
         if op.name == "RESHAPE":
             # Same bytes, different shape: the output shares the input's storage.
