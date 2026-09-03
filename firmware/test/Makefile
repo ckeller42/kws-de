@@ -1,6 +1,6 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -I../main
-TESTS := test_mfcc test_stream test_wav test_prompts test_vad test_wakefront
+TESTS := test_mfcc test_stream test_wav test_prompts test_vad test_wakefront test_assist_gate
 
 # The wake front-end is upstream TFLite-Micro/kissfft C++ (.cc), vendored
 # verbatim so it stays bit-identical to what pymicro-features compiles — hence
@@ -30,6 +30,8 @@ test_prompts: test_prompts.c ../main/prompts.c
 	$(CC) $(CFLAGS) -o $@ $^
 test_vad: test_vad.c ../main/vad.c
 	$(CC) $(CFLAGS) -o $@ $^ -lm
+test_assist_gate: test_assist_gate.c ../main/assist_gate.c
+	$(CC) $(CFLAGS) -o $@ $^
 test_wakefront: test_wakefront.c ../main/wakefront.c $(MF_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ -x c++ $^ -lm
 

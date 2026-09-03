@@ -206,10 +206,20 @@ mode usb
 status
 ```
 
-- `mode menu|record|recordwake|recognise|wake|usb` — switches the app
+- `mode menu|record|recordwake|recognise|wake|assist|usb` — switches the app
   mode, same as tapping the matching menu/back button.
-- `status` — prints the current mode, and in record/record-wake mode also
+- `status` — prints the current mode; the model stamps as
+  `models command=<id> wake=<id>`; and in record/record-wake mode also
   the recorder's phase/index/count/speaker.
+- `wakefire` — injects one synthetic wake fire down the same path as a real
+  one (gate, beep, log, UI). A measurement hook for the assist-mode duty
+  cycle, which cannot be exercised without fires.
+
+A model stamp is `<file name>@<first 8 hex of the tflite's sha256> <date>`,
+e.g. `command_v3_qat.tflite@fc36da9f 2026-09-03`. It is generated into
+`gen/model_config.h` / `gen/wake_model_config.h` by `kws-export --firmware`
+and also logged once at boot (`main: models: command <id>, wake <id>`), so a
+flashed device can say which models it carries without rebuilding.
 
 Every command ends with `ok` or `err <reason>` on its own line so a host
 script can tell when it finished. Implemented in `firmware/main/console.c`.

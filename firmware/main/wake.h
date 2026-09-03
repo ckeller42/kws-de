@@ -49,6 +49,16 @@ typedef struct {
 void wake_start(void);
 /** @brief Enable/disable wake inference. Turning on resets the model and front-end state; turning off closes the log. */
 void wake_set_active(bool on);
+/**
+ * @brief Inject one synthetic wake fire (serial console: `wakefire`).
+ *
+ * Measurement instrument, not a feature. The wake-gated duty cycle can only be
+ * measured with fires in the log, and an acoustic trigger cannot be scripted
+ * from a serial console on a remote rig. The injected fire takes exactly the
+ * same path as a real one — gate, beep, log, UI — so what it measures is the
+ * production path and not a simulation of it.
+ */
+void wake_inject_fire(void);
 /** @brief Copy the current wake status under mutex. */
 void wake_get_status(wake_status_t *out);
 
