@@ -24,6 +24,12 @@ firmware/managed_components/
 firmware/dependencies.lock
 firmware/test/*.o
 
+# host parity harness: the pinned esp-nn clone and the one-layer probe the
+# parity test generates — a build fixture, not shipped firmware
+firmware/test/.esp-nn/
+firmware/test/test_infer_parity
+firmware/main/gen/conv_probe*
+
 # local training environments + data (train/mww etc.)
 train/**/.venv/
 train/**/datasets/

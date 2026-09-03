@@ -310,3 +310,30 @@ def test_wake_arena_has_zero_pairwise_overlaps():
     arena = codegen.plan_arena(plan)
     assert _overlaps(plan, arena) == []
     assert all(offset % 16 == 0 for offset in arena.offsets.values())
+
+
+def test_quantize_multiplier_matches_tflm_reference_values():
+    """Spot values computed from TFLM's QuantizeMultiplier: frexp then round
+    q * 2**31, with the 2**31 carry and the flush-to-zero below 2**-31."""
+    assert codegen.quantize_multiplier(0.0) == (0, 0)
+    assert codegen.quantize_multiplier(1.0) == (1 << 30, 1)
+    assert codegen.quantize_multiplier(0.5) == (1 << 30, 0)
+    assert codegen.quantize_multiplier(2.0) == (1 << 30, 2)
+    mult, shift = codegen.quantize_multiplier(0.0234375)
+    assert mult == 1610612736 and shift == -5
+    assert codegen.quantize_multiplier(2.0**-40) == (0, 0)
+
+
+def test_activation_range_relu_uses_round_half_away_from_zero():
+    g = _streaming_graph()
+    op = g.ops[5]
+    assert codegen.activation_range(g, op) == (-128, 127)  # NONE
+    relu = dataclasses.replace(op, options={**op.options, "fused_activation_function": "RELU"})
+    # output scale 0.5, zp -128 -> quantize(0.0) == -128 -> clamped to qmin
+    assert codegen.activation_range(g, relu) == (-128, 127)
+
+
+def test_padding_same_and_valid():
+    assert codegen.padding_hw(49, 10, 3, 3, 1, 1, "SAME") == (1, 1, 49, 10)
+    assert codegen.padding_hw(5, 1, 5, 1, 3, 1, "VALID") == (0, 0, 1, 1)
+    assert codegen.padding_hw(1, 1, 1, 1, 1, 1, "SAME") == (0, 0, 1, 1)

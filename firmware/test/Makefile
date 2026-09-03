@@ -35,6 +35,37 @@ test_assist_gate: test_assist_gate.c ../main/assist_gate.c
 test_wakefront: test_wakefront.c ../main/wakefront.c $(MF_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ -x c++ $^ -lm
 
+# esp-nn, pinned. The device gets it through the esp-tflite-micro managed
+# component (esp-tflite-micro 1.4.0 asks for esp-nn >=1.1.1, so the component
+# manager resolves the newest 1.x); the host parity test needs the same sources,
+# so fetch that same tag into an ignored directory rather than vendoring a copy
+# that can drift.
+# NEVER define SKIP_NUDGE / CONFIG_NN_SKIP_NUDGE here: that macro selects
+# esp-nn's faster, NON-bit-exact requantisation and would silently break parity.
+# test_infer_parity.c #errors if either is defined, so the build cannot lie.
+# Not in $(TESTS): it needs a network clone and the generated
+# ../main/gen/conv_probe.c, both of which only tests/test_codegen_parity.py
+# produces. `make -C firmware/test` must stay green without either.
+ESP_NN_REF ?= v1.3.0
+ESP_NN ?= .esp-nn
+ESP_NN_SRCS := $(ESP_NN)/src/convolution/esp_nn_conv_ansi.c \
+               $(ESP_NN)/src/convolution/esp_nn_depthwise_conv_ansi.c \
+               $(ESP_NN)/src/fully_connected/esp_nn_fully_connected_ansi.c
+# Third-party sources: -Wall only, as with the vendored microfrontend above
+# (esp-nn's unused-parameter stubs are not ours to police).
+ESP_NN_CFLAGS := -std=c11 -O2 -Wall -I$(ESP_NN)/include -I$(ESP_NN)/src/common
+
+$(ESP_NN):
+	git clone --depth 1 --branch $(ESP_NN_REF) https://github.com/espressif/esp-nn $(ESP_NN)
+
+# Phony on purpose: the probe source is rewritten per layer by the parity test,
+# and on a 2-second-resolution filesystem make would call a stale binary
+# "up to date" and silently compare the previous layer.
+test_infer_parity: test_infer_parity.c ../main/gen/conv_probe.c | $(ESP_NN)
+	$(CC) $(CFLAGS) -I$(ESP_NN)/include -c test_infer_parity.c -o test_infer_parity.o
+	$(CC) $(CFLAGS) -I$(ESP_NN)/include -c ../main/gen/conv_probe.c -o conv_probe.o
+	$(CC) $(ESP_NN_CFLAGS) -o $@ test_infer_parity.o conv_probe.o $(ESP_NN_SRCS) -lm
+
 clean:
-	rm -f $(TESTS) *.o
-.PHONY: all clean
+	rm -f $(TESTS) test_infer_parity *.o
+.PHONY: all clean test_infer_parity

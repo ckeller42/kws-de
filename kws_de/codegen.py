@@ -17,6 +17,8 @@ import math
 import pathlib
 import re
 
+import numpy as np
+
 from kws_de import tflite_graph
 
 SUPPORTED_OPS = frozenset(
@@ -302,3 +304,331 @@ def tflm_arena_bytes(header: pathlib.Path, macro: str) -> int:
         if name == macro:
             return int(value)
     raise UnsupportedGraph(f"{header} does not define {macro}")
+
+
+_QMIN, _QMAX = -128, 127
+
+
+def _round_half_away(value: float) -> int:
+    """TfLiteRound == std::round: ties away from zero. Python's round() is
+    banker's rounding and would differ on exactly-.5 multipliers."""
+    return int(math.floor(value + 0.5)) if value >= 0 else int(math.ceil(value - 0.5))
+
+
+def quantize_multiplier(double_multiplier: float) -> tuple[int, int]:
+    """Port of tflite::QuantizeMultiplier -> (quantized_multiplier, shift)."""
+    if double_multiplier == 0.0:
+        return 0, 0
+    q, shift = math.frexp(double_multiplier)
+    q_fixed = _round_half_away(q * (1 << 31))
+    if q_fixed == (1 << 31):
+        q_fixed //= 2
+        shift += 1
+    if shift < -31:
+        return 0, 0
+    return int(q_fixed), int(shift)
+
+
+def _effective_scale(in_scale: float, filter_scale: float, out_scale: float) -> float:
+    # TFLM reads all three as float32 and widens to double before dividing.
+    return (
+        float(np.float32(in_scale)) * float(np.float32(filter_scale)) / float(np.float32(out_scale))
+    )
+
+
+def per_channel_multipliers(graph, op) -> tuple[list[int], list[int]]:
+    """(multipliers, shifts) per output channel, exactly as TFLM prepares them.
+    A per-tensor filter scale is broadcast over the channels, as TFLM does."""
+    in_t = graph.tensors[op.inputs[0]]
+    w_t = graph.tensors[op.inputs[1]]
+    out_t = graph.tensors[op.outputs[0]]
+    channels = out_t.shape[-1]
+    scales = w_t.scales if len(w_t.scales) > 1 else (w_t.scales[0],) * channels
+    if len(scales) != channels:
+        raise UnsupportedGraph(
+            f"op {op.index} {op.name}: filter t{w_t.index} has {len(scales)} scales "
+            f"for {channels} output channels"
+        )
+    mults, shifts = [], []
+    for scale in scales:
+        m, s = quantize_multiplier(_effective_scale(in_t.scales[0], scale, out_t.scales[0]))
+        mults.append(m)
+        shifts.append(s)
+    return mults, shifts
+
+
+def activation_range(graph, op) -> tuple[int, int]:
+    """Port of CalculateActivationRangeQuantizedImpl for int8 outputs."""
+    out = graph.tensors[op.outputs[0]]
+    scale, zp = float(np.float32(out.scales[0])), int(out.zero_points[0])
+    activation = str(op.options.get("fused_activation_function", "NONE"))
+
+    def q(value: float) -> int:
+        return zp + _round_half_away(value / scale)
+
+    if activation == "RELU":
+        return max(_QMIN, q(0.0)), _QMAX
+    if activation == "RELU6":
+        return max(_QMIN, q(0.0)), min(_QMAX, q(6.0))
+    if activation == "RELU_N1_TO_1":
+        return max(_QMIN, q(-1.0)), min(_QMAX, q(1.0))
+    if activation != "NONE":
+        raise UnsupportedGraph(f"op {op.index} {op.name}: activation {activation}")
+    return _QMIN, _QMAX
+
+
+def padding_hw(in_h, in_w, k_h, k_w, s_h, s_w, padding) -> tuple[int, int, int, int]:
+    """(pad_h, pad_w, out_h, out_w) -- ComputeOutSize + ComputePadding, dilation 1."""
+    if padding == "SAME":
+        out_h, out_w = -(-in_h // s_h), -(-in_w // s_w)
+    elif padding == "VALID":
+        out_h, out_w = (in_h - k_h) // s_h + 1, (in_w - k_w) // s_w + 1
+    else:
+        raise UnsupportedGraph(f"unknown padding {padding!r}")
+    pad_h = max(0, ((out_h - 1) * s_h + k_h - in_h) // 2)
+    pad_w = max(0, ((out_w - 1) * s_w + k_w - in_w) // 2)
+    return pad_h, pad_w, out_h, out_w
+
+
+@dataclasses.dataclass
+class Emitter:
+    """Accumulates the pieces of one generated .c file."""
+
+    prefix: str  # "wake" or "command"
+    plan: Plan
+    arena: Arena
+    consts: list[str] = dataclasses.field(default_factory=list)
+    body: list[str] = dataclasses.field(default_factory=list)
+    scratch_bytes: int = 0
+
+    def const_i8(self, name: str, values) -> str:
+        flat = ", ".join(str(int(v)) for v in np.ravel(values))
+        self.consts.append(f"static const int8_t {name}[{np.size(values)}] = {{{flat}}};")
+        return name
+
+    def const_i32(self, name: str, values) -> str:
+        flat = ", ".join(str(int(v)) for v in np.ravel(values))
+        self.consts.append(f"static const int32_t {name}[{np.size(values)}] = {{{flat}}};")
+        return name
+
+    def ref(self, tensor: int) -> str:
+        """C expression for tensor `tensor`'s storage."""
+        tensor = self.plan.alias.get(tensor, tensor)
+        for ring in self.plan.rings:
+            if ring.buffer_tensor == tensor:
+                return ring.name
+        if tensor in self.plan.graph.inputs:
+            return "in"
+        if tensor in self.plan.graph.outputs:
+            return "out"
+        return f"(arena + {self.arena.offsets[tensor]})"
+
+    def emit(self, line: str) -> None:
+        self.body.append("    " + line)
+
+
+def _dims(name: str, width: int, height: int, channels: int, extra: int) -> str:
+    return (
+        f"const data_dims_t {name} = {{ .width = {width}, .height = {height}, "
+        f".channels = {channels}, .extra = {extra} }};"
+    )
+
+
+def _nhwc(shape: tuple[int, ...]) -> tuple[int, int, int]:
+    if len(shape) != 4 or shape[0] != 1:
+        raise UnsupportedGraph(f"expected a [1, H, W, C] tensor, got {shape}")
+    return shape[1], shape[2], shape[3]
+
+
+def _conv_geometry(g, op):
+    """Shapes, stride and padding shared by CONV_2D and DEPTHWISE_CONV_2D,
+    with the tensor's own output shape used as the check on our padding math."""
+    in_h, in_w, in_c = _nhwc(g.tensors[op.inputs[0]].shape)
+    out_h, out_w, out_c = _nhwc(g.tensors[op.outputs[0]].shape)
+    _, k_h, k_w, w_c = g.tensors[op.inputs[1]].shape
+    if int(op.options.get("dilation_h_factor", 1)) != 1 or (
+        int(op.options.get("dilation_w_factor", 1)) != 1
+    ):
+        # esp-tflite-micro sends dilated convolutions to the TFLM reference
+        # kernel instead of esp-nn, so the esp-nn call would not be equivalent.
+        raise UnsupportedGraph(f"op {op.index} {op.name}: dilation != 1 is not emitted")
+    s_h, s_w = int(op.options["stride_h"]), int(op.options["stride_w"])
+    pad_h, pad_w, exp_h, exp_w = padding_hw(
+        in_h, in_w, k_h, k_w, s_h, s_w, str(op.options["padding"])
+    )
+    if (exp_h, exp_w) != (out_h, out_w):
+        raise UnsupportedGraph(
+            f"op {op.index} {op.name}: padding gives {exp_h}x{exp_w}, tensor "
+            f"t{op.outputs[0]} says {out_h}x{out_w}"
+        )
+    return (in_h, in_w, in_c), (out_h, out_w, out_c), (k_h, k_w, w_c), (s_h, s_w), (pad_h, pad_w)
+
+
+def _conv_constants(ctx: Emitter, op) -> tuple[str, str, str, str, str]:
+    """weights, bias, multiplier and shift tables in flash, plus the op's tag."""
+    g = ctx.plan.graph
+    tag = f"op{op.index}"
+    weights = ctx.const_i8(f"{tag}_w", tflite_graph.constant(g, op.inputs[1]))
+    bias = ctx.const_i32(f"{tag}_b", tflite_graph.constant(g, op.inputs[2], "int32"))
+    mults, shifts = per_channel_multipliers(g, op)
+    return (
+        tag,
+        weights,
+        bias,
+        ctx.const_i32(f"{tag}_mult", mults),
+        ctx.const_i32(f"{tag}_shift", shifts),
+    )
+
+
+def emit_conv(ctx: Emitter, op) -> None:
+    g = ctx.plan.graph
+    (in_h, in_w, in_c), (out_h, out_w, out_c), (k_h, k_w, w_c), (s_h, s_w), (pad_h, pad_w) = (
+        _conv_geometry(g, op)
+    )
+    tag, weights, bias, mult, shift = _conv_constants(ctx, op)
+    act_min, act_max = activation_range(g, op)
+    in_zp = int(g.tensors[op.inputs[0]].zero_points[0])
+    out_zp = int(g.tensors[op.outputs[0]].zero_points[0])
+    ctx.emit("{")
+    ctx.emit("  " + _dims(f"{tag}_in", in_w, in_h, in_c, 1))
+    ctx.emit("  " + _dims(f"{tag}_out", out_w, out_h, out_c, 1))
+    ctx.emit("  " + _dims(f"{tag}_flt", k_w, k_h, w_c, 0))
+    ctx.emit(
+        f"  const conv_params_t {tag}_p = {{ .in_offset = {-in_zp}, "
+        f".out_offset = {out_zp}, .stride = {{ {s_w}, {s_h} }}, "
+        f".padding = {{ {pad_w}, {pad_h} }}, .dilation = {{ 0, 0 }}, "
+        f".activation = {{ {act_min}, {act_max} }} }};"
+    )
+    ctx.emit(
+        f"  const quant_data_t {tag}_q = {{ .shift = (int32_t *){shift}, "
+        f".mult = (int32_t *){mult} }};"
+    )
+    ctx.emit("  esp_nn_set_conv_scratch_buf(scratch);")
+    ctx.emit(
+        f"  esp_nn_conv_s8(&{tag}_in, {ctx.ref(op.inputs[0])}, &{tag}_flt, {weights}, "
+        f"{bias}, &{tag}_out, {ctx.ref(op.outputs[0])}, &{tag}_p, &{tag}_q);"
+    )
+    ctx.emit("}")
+
+
+def emit_depthwise(ctx: Emitter, op) -> None:
+    g = ctx.plan.graph
+    (in_h, in_w, in_c), (out_h, out_w, out_c), (k_h, k_w, w_c), (s_h, s_w), (pad_h, pad_w) = (
+        _conv_geometry(g, op)
+    )
+    ch_mult = int(op.options.get("depth_multiplier", 1))
+    if in_c * ch_mult != out_c:
+        raise UnsupportedGraph(
+            f"op {op.index} DEPTHWISE_CONV_2D: {in_c} x {ch_mult} != {out_c} output channels"
+        )
+    tag, weights, bias, mult, shift = _conv_constants(ctx, op)
+    act_min, act_max = activation_range(g, op)
+    in_zp = int(g.tensors[op.inputs[0]].zero_points[0])
+    out_zp = int(g.tensors[op.outputs[0]].zero_points[0])
+    ctx.emit("{")
+    ctx.emit("  " + _dims(f"{tag}_in", in_w, in_h, in_c, 1))
+    ctx.emit("  " + _dims(f"{tag}_out", out_w, out_h, out_c, 1))
+    ctx.emit("  " + _dims(f"{tag}_flt", k_w, k_h, w_c, 0))
+    ctx.emit(
+        f"  const dw_conv_params_t {tag}_p = {{ .in_offset = {-in_zp}, "
+        f".out_offset = {out_zp}, .ch_mult = {ch_mult}, "
+        f".stride = {{ {s_w}, {s_h} }}, .padding = {{ {pad_w}, {pad_h} }}, "
+        f".dilation = {{ 0, 0 }}, .activation = {{ {act_min}, {act_max} }} }};"
+    )
+    ctx.emit(
+        f"  const quant_data_t {tag}_q = {{ .shift = (int32_t *){shift}, "
+        f".mult = (int32_t *){mult} }};"
+    )
+    ctx.emit("  esp_nn_set_depthwise_conv_scratch_buf(scratch);")
+    ctx.emit(
+        f"  esp_nn_depthwise_conv_s8(&{tag}_in, {ctx.ref(op.inputs[0])}, &{tag}_flt, "
+        f"{weights}, {bias}, &{tag}_out, {ctx.ref(op.outputs[0])}, &{tag}_p, &{tag}_q);"
+    )
+    ctx.emit("}")
+
+
+def emit_fully_connected(ctx: Emitter, op) -> None:
+    """A per-tensor filter scale takes esp_nn_fully_connected_s8; more than one
+    scale is TFLM's `is_per_channel` path, which takes the _per_ch_ variant with
+    multiplier/shift tables. Both branches exist in esp-tflite-micro's kernel and
+    the model decides which -- our command model's classifier is per-channel."""
+    g = ctx.plan.graph
+    in_t = g.tensors[op.inputs[0]]
+    w = g.tensors[op.inputs[1]]
+    out_t = g.tensors[op.outputs[0]]
+    out_depth = out_t.shape[-1]
+    accum_depth = w.shape[-1]
+    batches = math.prod(out_t.shape) // out_depth
+    if batches != 1:
+        raise UnsupportedGraph(
+            f"op {op.index} FULLY_CONNECTED: output {out_t.shape} is {batches} batches; "
+            "only a single batch is emitted"
+        )
+    tag = f"op{op.index}"
+    weights = ctx.const_i8(f"{tag}_w", tflite_graph.constant(g, op.inputs[1]))
+    bias = ctx.const_i32(f"{tag}_b", tflite_graph.constant(g, op.inputs[2], "int32"))
+    act_min, act_max = activation_range(g, op)
+    in_zp = int(in_t.zero_points[0])
+    w_zp = int(w.zero_points[0])
+    out_zp = int(out_t.zero_points[0])
+    head = (
+        f"{ctx.ref(op.inputs[0])}, {-in_zp}, {accum_depth}, {weights}, {-w_zp}, "
+        f"{bias}, {ctx.ref(op.outputs[0])}, {out_depth}, {out_zp}, "
+    )
+    tail = f"{act_min}, {act_max});"
+    if len(w.scales) > 1:
+        mults, shifts = per_channel_multipliers(g, op)
+        mult = ctx.const_i32(f"{tag}_mult", mults)
+        shift = ctx.const_i32(f"{tag}_shift", shifts)
+        ctx.emit(
+            f"esp_nn_fully_connected_per_ch_s8({head}(int32_t *){shift}, (int32_t *){mult}, {tail}"
+        )
+        return
+    mult, shift = quantize_multiplier(
+        _effective_scale(in_t.scales[0], w.scales[0], out_t.scales[0])
+    )
+    ctx.emit(f"esp_nn_fully_connected_s8({head}{shift}, {mult}, {tail}")
+
+
+EMITTERS = {
+    "CONV_2D": emit_conv,
+    "DEPTHWISE_CONV_2D": emit_depthwise,
+    "FULLY_CONNECTED": emit_fully_connected,
+}
+
+_PROBE_SCRATCH = 8192  # host-only: esp-nn's ANSI kernels ask for no scratch at all
+
+
+def write_probe_vectors(tflite: bytes, op, inputs, expect, gen_dir) -> None:
+    """Emit gen/conv_probe.c plus gen/conv_probe_vectors.h: one op wrapped in a
+    `conv_probe` function, with the interpreter's input and expected output as
+    C arrays -- the smallest thing that proves the emitters' parameter
+    preparation matches TFLM's, before a whole model is generated."""
+    graph = tflite_graph.read_graph(tflite)
+    # The probe's graph is one op: its activation input is the function's `in`
+    # and its output is `out`, so Emitter.ref resolves both without an arena.
+    probe = dataclasses.replace(graph, inputs=(op.inputs[0],), outputs=(op.outputs[0],))
+    plan = Plan(graph=probe, ops=(op,), rings=(), alias={})
+    ctx = Emitter(prefix="conv_probe", plan=plan, arena=plan_arena(plan))
+    EMITTERS[op.name](ctx, op)
+    gen_dir = pathlib.Path(gen_dir)
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    (gen_dir / "conv_probe.c").write_text(
+        "/* generated by kws-codegen -- do not edit */\n"
+        '#include <stdint.h>\n#include "esp_nn.h"\n\n'
+        + "\n".join(ctx.consts)
+        + "\n\nvoid conv_probe(const int8_t *in, int8_t *out, void *scratch)\n{\n"
+        # FULLY_CONNECTED takes no scratch buffer; the harness passes one anyway.
+        + "    (void) scratch;\n"
+        + "\n".join(ctx.body)
+        + "\n}\n"
+    )
+    flat_in = ", ".join(str(int(v)) for v in np.ravel(inputs))
+    flat_expect = ", ".join(str(int(v)) for v in np.ravel(expect))
+    (gen_dir / "conv_probe_vectors.h").write_text(
+        "/* generated by kws-codegen -- do not edit */\n#pragma once\n#include <stdint.h>\n"
+        f"#define CONV_PROBE_OUT_LEN {np.size(expect)}\n"
+        f"#define CONV_PROBE_SCRATCH {_PROBE_SCRATCH}\n"
+        f"static const int8_t CONV_PROBE_IN[{np.size(inputs)}] = {{{flat_in}}};\n"
+        f"static const int8_t CONV_PROBE_EXPECT[{np.size(expect)}] = {{{flat_expect}}};\n"
+    )
