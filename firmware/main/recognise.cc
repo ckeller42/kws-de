@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include "arena.h"
 #include "audio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -89,7 +90,9 @@ static void recognise_task(void *)
         if (mstate.count < KWS_N_FRAMES) continue;         /* not a full 1 s of frames yet */
         mfcc_finish(&mstate, feats);
         mfcc_quantize(feats, in->data.int8, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
+        int64_t t_invoke = esp_timer_get_time();
         if (interp.Invoke() != kTfLiteOk) { ESP_LOGE(TAG, "Invoke failed"); continue; }
+        uint32_t invoke_ms = (uint32_t)((esp_timer_get_time() - t_invoke) / 1000);
         int best = 0;
         for (int i = 0; i < KWS_NUM_LABELS; i++) {
             probs[i] = (out->data.int8[i] - KWS_MODEL_OUTPUT_ZERO_POINT) * KWS_MODEL_OUTPUT_SCALE;
@@ -98,7 +101,8 @@ static void recognise_task(void *)
         int fired = stream_push(&stream, probs);
         uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
         if ((++steps % 50) == 0)                           /* ~every 5 s: front-end + inference cost */
-            ESP_LOGI(TAG, "step %lu ms (%d new frames)", (unsigned long)ms, pushed);
+            ESP_LOGI(TAG, "step %lu ms (invoke %lu ms, %d new frames)",
+                     (unsigned long)ms, (unsigned long)invoke_ms, pushed);
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_st.infer_ms = ms; s_st.arena_used = interp.arena_used_bytes();
@@ -118,7 +122,7 @@ static void recognise_task(void *)
 extern "C" void recognise_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
-    s_arena = (uint8_t *)heap_caps_malloc(KWS_MODEL_ARENA_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_arena = arena_alloc(TAG, "command", KWS_MODEL_ARENA_BYTES);
     assert(s_arena);
     /* Priority 3: BELOW the LVGL task (4, same core). Inference is heavy and
        best-effort; if it outranked LVGL it starved touch handling, so the

@@ -1,6 +1,7 @@
 #include "wake.h"
 #include <cassert>
 #include <cstdio>
+#include "arena.h"
 #include "audio.h"
 #include "beep.h"
 #include "esp_heap_caps.h"
@@ -164,7 +165,7 @@ static void wake_task(void *)
 extern "C" void wake_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
-    s_arena = (uint8_t *)heap_caps_malloc(KWS_WAKE_ARENA_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_arena = arena_alloc(TAG, "wake", KWS_WAKE_ARENA_BYTES);
     assert(s_arena);
     /* Priority 3, core 1 — same slot as the recogniser: below the LVGL task (4)
        so touch stays responsive. Only one of the two is ever active. */

@@ -609,6 +609,31 @@ after); it runs the TFLM microfrontend, not this code. What the FFT does *not* e
 ~54 ms fixed cost per step that the same fit exposes, independent of frame count — that is
 TFLM `Invoke`, and the next note takes it apart.
 
+**TFLM arenas in internal RAM (2026-09-03).** With the front end no longer dominant, the
+recogniser step decomposes as **52–53 ms `Invoke` + ~30 ms front end**, and both TFLM tensor
+arenas were being allocated `MALLOC_CAP_SPIRAM`. TFLM touches its arena on every operator, so
+arena placement is the lever on `Invoke`: internal SRAM is a direct access, PSRAM goes over
+the cached octal bus. `arena_alloc` (`firmware/main/arena.h`) now asks for
+`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT` first and falls back to PSRAM with a `WARN` line,
+logging free internal RAM either way. The budget, measured at boot rather than assumed: the
+S3's 512 KB of SRAM leaves **148,895 B free internal** by the time the models start, after
+the IDF, LVGL and the audio ring. Both arenas do not fit — the wake arena is 49,152 B and the
+command arena, as `kws-export` generates it, is 139,264 B. So the rule the task set applies:
+the **wake model, which runs continuously, gets internal RAM** (free internal 132,063 →
+**82,907 B**, comfortably above the 64 KB floor the UI and audio ring need) and the command
+arena stays in PSRAM, which the boot log now says out loud instead of leaving it to be
+guessed. Result: **wake 5 → 3 ms/step (−40 %)**; the command step is unchanged at 82–85 ms
+with `Invoke` at 52–53 ms.
+
+Worth recording because it is the obvious next optimisation and it is *not* blocked by the
+hardware: the command model's `Invoke` only ever uses **55,024 B of its 139,264 B arena**
+(TFLM's own `arena_used_bytes`). A right-sized arena would fit internal RAM with room to
+spare — but 148,895 − ~60,000 − 49,152 ≈ 40 KB free internal, under the 64 KB floor, so it
+trades the recogniser's latency against headroom for the UI, and the export step would have
+to emit an arena size derived from the measured need rather than the current fixed margin.
+That is a deliberate decision about the floor, not a free win, so it is left for its own
+change.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
