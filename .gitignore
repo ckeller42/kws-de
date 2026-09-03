@@ -22,6 +22,7 @@ firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
 firmware/dependencies.lock
+firmware/test/*.o
 
 # local training environments + data (train/mww etc.)
 train/**/.venv/

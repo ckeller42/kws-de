@@ -588,6 +588,52 @@ held-out data — **isolated-word accuracy 0.19** (`spk01`, 16 clips) and **0.27
 model reporting ~0.9 on its own held-out MSWC/TTS split recognises roughly a quarter of what
 the real microphone hears.
 
+**Exact 480-point FFT in the MFCC front end (2026-09-03).** The streaming command recogniser
+ran at **164–181 ms per step** on the CoreS3, and the front end, not the model, was the cost:
+`firmware/main/mfcc.c` computed each frame's 480-bin spectrum as a naive DFT — 241 bins ×
+480 samples ≈ 116k multiply-adds per frame, ~8.5 ms of the step per new frame. 480 = 2^5·3·5
+is not a power of two, which is why the DFT was there in the first place; it is, however, an
+exact kissfft mixed radix (`kiss_fftr` at nfft = 480 factors its 240-point complex half
+transform as 4,4,3,5, every stage a dedicated butterfly). The kissfft already vendored for
+the wake front end now serves the command front end too, through a small C-linkage shim
+(`firmware/main/mfcc_fft.cc`); the tempting alternative — zero-padding to 512 — was rejected
+because it changes the bin spacing and therefore the mel energies the models were trained on.
+Measured, same device, same firmware otherwise: step **164–181 ms → 82–85 ms**, and per new
+frame **8.5 ms → 3.0 ms** (fitting step time against the 9–15 frames each step consumes).
+Features did not move: host max |Δ| against the Python reference is **5.4e-4** absolute
+(1.3e-6 of the reference peak) both before and after — the residual is float32-vs-float64
+accumulation in the log/DCT stage, not the transform — and the int8 tensor actually fed to
+the command model is **identical (0 LSB)** to the one quantised from the Python features, a
+new assertion in `firmware/test/test_mfcc.c`. The wake path is untouched (5 ms/step before and
+after); it runs the TFLM microfrontend, not this code. What the FFT does *not* explain is the
+~54 ms fixed cost per step that the same fit exposes, independent of frame count — that is
+TFLM `Invoke`, and the next note takes it apart.
+
+**TFLM arenas in internal RAM (2026-09-03).** With the front end no longer dominant, the
+recogniser step decomposes as **52–53 ms `Invoke` + ~30 ms front end**, and both TFLM tensor
+arenas were being allocated `MALLOC_CAP_SPIRAM`. TFLM touches its arena on every operator, so
+arena placement is the lever on `Invoke`: internal SRAM is a direct access, PSRAM goes over
+the cached octal bus. `arena_alloc` (`firmware/main/arena.h`) now asks for
+`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT` first and falls back to PSRAM with a `WARN` line,
+logging free internal RAM either way. The budget, measured at boot rather than assumed: the
+S3's 512 KB of SRAM leaves **148,895 B free internal** by the time the models start, after
+the IDF, LVGL and the audio ring. Both arenas do not fit — the wake arena is 49,152 B and the
+command arena, as `kws-export` generates it, is 139,264 B. So the rule the task set applies:
+the **wake model, which runs continuously, gets internal RAM** (free internal 132,063 →
+**82,907 B**, comfortably above the 64 KB floor the UI and audio ring need) and the command
+arena stays in PSRAM, which the boot log now says out loud instead of leaving it to be
+guessed. Result: **wake 5 → 3 ms/step (−40 %)**; the command step is unchanged at 82–85 ms
+with `Invoke` at 52–53 ms.
+
+Worth recording because it is the obvious next optimisation and it is *not* blocked by the
+hardware: the command model's `Invoke` only ever uses **55,024 B of its 139,264 B arena**
+(TFLM's own `arena_used_bytes`). A right-sized arena would fit internal RAM with room to
+spare — but 148,895 − ~60,000 − 49,152 ≈ 40 KB free internal, under the 64 KB floor, so it
+trades the recogniser's latency against headroom for the UI, and the export step would have
+to emit an arena size derived from the measured need rather than the current fixed margin.
+That is a deliberate decision about the floor, not a free win, so it is left for its own
+change.
+
 **Quantisation-aware training, `--qat` (2026-09-03).** `tensorflow-model-optimization` (tfmot)
 only wraps `tf.keras` models built under Keras 2; TF 2.18's default `tf.keras` is Keras 3, which
 tfmot's `QuantizeWrapperV2` cannot wrap. Fix: `kws-train --qat` and `kws-export --qat` re-exec

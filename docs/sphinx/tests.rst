@@ -14,12 +14,27 @@ binary is a small ``assert``-based program built by
 .. test:: MFCC output matches the Python golden vector
    :id: TEST_MFCC_PARITY
    :status: passing
-   :links: REQ_FW_MFCC_PARITY, REQ_FW_HOST_TESTS_NO_IDF
+   :links: REQ_FW_MFCC_PARITY, REQ_FW_FRONTEND_FFT, REQ_FW_HOST_TESTS_NO_IDF
 
    ``firmware/test/test_mfcc.c``: runs ``mfcc_compute`` over a fixture PCM
    clip and asserts every coefficient is within ``1e-2`` of the
    ``kws_de.features.mfcc`` output for the same clip, exported as
-   ``gen/test_vectors.h`` (``TV_PCM``/``TV_MFCC``).
+   ``gen/test_vectors.h`` (``TV_PCM``/``TV_MFCC``). It prints that deviation
+   both absolutely and relative to the reference peak, which is how the
+   kissfft front end was shown to leave the features exactly where the naive
+   DFT had them (5.4e-4, 1.3e-6 of peak, identical before and after).
+
+.. test:: Quantised model input matches the Python features
+   :id: TEST_MFCC_MODEL_INPUT
+   :status: passing
+   :links: REQ_FW_FRONTEND_FFT, REQ_FW_MFCC_QUANTIZE, REQ_FW_HOST_TESTS_NO_IDF
+
+   ``firmware/test/test_mfcc.c``: quantises the C features and the Python
+   reference features with the exported command model's input
+   scale/zero-point and asserts the two int8 tensors differ by at most
+   1 LSB (measured: 0). This is what shows detection performance cannot move
+   when the front end's arithmetic changes — the model sees the same bytes
+   either way.
 
 .. test:: Streaming detector fire/gap/silence behaviour
    :id: TEST_STREAM_DETECTOR

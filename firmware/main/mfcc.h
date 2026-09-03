@@ -17,6 +17,14 @@ typedef struct {
 extern "C" {
 #endif
 
+/* Internal to the front end (mfcc_fft.cc): the 480-point real FFT mfcc.c runs
+   per frame. Declared here rather than in a private header so mfcc.c stays
+   plain C while the kissfft call sits in its own C++ translation unit. */
+/** @brief Build the kissfft config. Idempotent; called by mfcc_init(). */
+void mfcc_fft_init(void);
+/** @brief Power spectrum |X(k)|^2 of one windowed frame, KWS_N_BINS bins. */
+void mfcc_fft_power(const float in[KWS_WIN], float out[KWS_N_BINS]);
+
 /** @brief Reset an mfcc_state_t to empty. */
 void mfcc_init(mfcc_state_t *s);
 /** @brief Push exactly KWS_WIN samples (one analysis window; caller advances by KWS_HOP between calls). */
