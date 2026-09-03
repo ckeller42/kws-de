@@ -1,5 +1,8 @@
 #include "usb_drive.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_check.h"
 #include "storage.h"
 #include "tinyusb.h"
@@ -40,5 +43,15 @@ esp_err_t usb_drive_exit(void)
     ESP_RETURN_ON_ERROR(esp_tusb_deinit_console(TINYUSB_CDC_ACM_0), TAG, "cdc console teardown");
     ESP_RETURN_ON_ERROR(tusb_cdc_acm_deinit(TINYUSB_CDC_ACM_0), TAG, "cdc deinit");
     ESP_RETURN_ON_ERROR(tinyusb_driver_uninstall(), TAG, "tinyusb uninstall");
-    return storage_mount();
+    ESP_RETURN_ON_ERROR(storage_mount(), TAG, "remount");
+    /* ponytail: restart instead of re-initialising the USB PHY. Once TinyUSB
+       has released the PHY the USB-Serial-JTAG console does not re-enumerate
+       on the host (observed: no USB device at all until a re-plug), so the
+       device would be unreachable for the next remote ingest. A restart lands
+       on the menu in ~2 s with the JTAG console back - exactly what leaving
+       USB mode means. Upgrade path: usb_phy re-attach for the JTAG peripheral. */
+    ESP_LOGI(TAG, "leaving USB mode: restarting so the JTAG console re-enumerates");
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_restart();
+    return ESP_OK;
 }
