@@ -141,6 +141,99 @@ guards a real, already-recurring failure mode — a mode-collapsed export
 that looked fine by exit code — and passed for every model in the tables
 above, all 23 classes represented in predictions.
 
+Command model anatomy
+~~~~~~~~~~~~~~~~~~~~~~~
+
+DS-CNN at width 32 (:need:`REQ_FW_23_CLASSES`), read straight from
+``command_v3_qat.tflite`` (the QAT variant from the tables above) via
+``kws_de.model_graph`` -- the same module renders the wake model below, so
+neither diagram can drift from the ``.tflite`` that ships. Unlike the wake
+model, this is a *non-streaming* CNN: every Invoke reprocesses the full
+49x10 MFCC window from scratch, so there is no ring state to draw.
+
+.. graphviz:: _generated/command.dot
+
+.. note::
+
+   Regenerate after any command-model retrain, from the repo root:
+
+   .. code-block:: console
+
+      $ export KWS_DATA_ROOT=/path/to/data-root
+      $ uv run --no-sync kws-model-graph "$KWS_DATA_ROOT/models/command_v3_qat.tflite" \
+          --out docs/sphinx/_generated/command.dot --title "Command DS-CNN (v3, QAT)"
+
+.. list-table::
+   :header-rows: 1
+
+   * - Op
+     - Input
+     - Weights
+     - Output
+     - MACs
+   * - CONV_2D 3x3, 1->32 (stem)
+     - 1x49x10x1
+     - 32x3x3x1
+     - 1x49x10x32
+     - 141,120
+   * - DEPTHWISE_CONV_2D 3x3 x32 (block 1)
+     - 1x49x10x32
+     - 1x3x3x32
+     - 1x49x10x32
+     - 141,120
+   * - CONV_2D 1x1, 32->32 (block 1)
+     - 1x49x10x32
+     - 32x1x1x32
+     - 1x49x10x32
+     - 501,760
+   * - DEPTHWISE_CONV_2D 3x3 x32 (block 2)
+     - 1x49x10x32
+     - 1x3x3x32
+     - 1x49x10x32
+     - 141,120
+   * - CONV_2D 1x1, 32->32 (block 2)
+     - 1x49x10x32
+     - 32x1x1x32
+     - 1x49x10x32
+     - 501,760
+   * - DEPTHWISE_CONV_2D 3x3 x32 (block 3)
+     - 1x49x10x32
+     - 1x3x3x32
+     - 1x49x10x32
+     - 141,120
+   * - CONV_2D 1x1, 32->32 (block 3)
+     - 1x49x10x32
+     - 32x1x1x32
+     - 1x49x10x32
+     - 501,760
+   * - MEAN (global avg pool, head)
+     - 1x49x10x32
+     - --
+     - 1x32
+     - --
+   * - FULLY_CONNECTED 32->23 (head)
+     - 1x32
+     - 23x32
+     - 1x23
+     - 736
+   * - SOFTMAX (head)
+     - 1x23
+     - --
+     - 1x23
+     - --
+   * - **Total**
+     -
+     -
+     -
+     - **2,070,496**
+
+Every conv/depthwise weight is reused at all 490 output positions (49x10,
+the full spectrogram), which is why 4,960 weights cost 2,070,496 MACs --
+the opposite of the wake model below, where every weight fires exactly
+once per Invoke. There is no receptive-field growth to reason about either:
+the model sees the whole ~1 s command window on every call, not a rolling
+slice of it.
+
 Wake model ("Hey Bus")
 ------------------------
 
@@ -240,6 +333,145 @@ speaker's takes into the wake training set as their own weighted feature
 set — the same shape round 5 used for the first main user. See
 :doc:`pipeline` for the full ingest -> QC -> build -> train -> export
 loop and ``scripts/data-loop.sh`` for running it in one command.
+
+Wake model anatomy
+~~~~~~~~~~~~~~~~~~~~
+
+microWakeWord's streaming graph, read straight from ``hey_bus.tflite`` (the
+round-5 model measured above) via ``kws_de.model_graph`` -- one node per
+compute op, one "ring N x C" node per resource-variable state
+(:need:`REQ_FW_WAKE_FRONTEND_PARITY`; those rings are what let a 3-frame,
+30 ms Invoke see 1.85 s of context, see below).
+
+.. graphviz:: _generated/hey_bus.dot
+
+.. note::
+
+   Regenerate after any wake-model retrain (:need:`REQ_FW_RECORD_WAKE_SET`),
+   from the repo root:
+
+   .. code-block:: console
+
+      $ export KWS_DATA_ROOT=/path/to/data-root
+      $ uv run --no-sync kws-model-graph "$KWS_DATA_ROOT/models/hey_bus.tflite" \
+          --out docs/sphinx/_generated/hey_bus.dot --title "Hey Bus wake model (round 5)"
+
+.. list-table:: Layer table (compute and state ops of the 49 in the graph)
+   :header-rows: 1
+
+   * - Op
+     - Input
+     - Weights
+     - Output
+     - MACs
+   * - ring 0 (read -> concat -> write newest 2) [state]
+     - 2x40 + 3x40
+     - --
+     - 5x40
+     - -- (80 B state)
+   * - CONV_2D 5x1, 40->32 (stem)
+     - 1x5x1x40
+     - 32x5x1x40
+     - 1x1x1x32
+     - 6,400
+   * - ring 1 (block 1) [state]
+     - 4x32 + 1x32
+     - --
+     - 5x32
+     - -- (128 B state)
+   * - DEPTHWISE_CONV_2D 5x1 x32 (block 1)
+     - 1x5x1x32
+     - 1x5x1x32
+     - 1x1x1x32
+     - 160
+   * - CONV_2D 1x1, 32->64 (block 1)
+     - 1x1x1x32
+     - 64x1x1x32
+     - 1x1x1x64
+     - 2,048
+   * - ring 2 (block 2) [state]
+     - 8x64 + 1x64
+     - --
+     - 9x64
+     - -- (512 B state)
+   * - DEPTHWISE_CONV_2D 9x1 x64 (block 2)
+     - 1x9x1x64
+     - 1x9x1x64
+     - 1x1x1x64
+     - 576
+   * - CONV_2D 1x1, 64->64 (block 2)
+     - 1x1x1x64
+     - 64x1x1x64
+     - 1x1x1x64
+     - 4,096
+   * - ring 3 (block 3) [state]
+     - 12x64 + 1x64
+     - --
+     - 13x64
+     - -- (768 B state)
+   * - DEPTHWISE_CONV_2D 13x1 x64 (block 3)
+     - 1x13x1x64
+     - 1x13x1x64
+     - 1x1x1x64
+     - 832
+   * - CONV_2D 1x1, 64->64 (block 3)
+     - 1x1x1x64
+     - 64x1x1x64
+     - 1x1x1x64
+     - 4,096
+   * - ring 4 (block 4) [state]
+     - 20x64 + 1x64
+     - --
+     - 21x64
+     - -- (1,280 B state)
+   * - DEPTHWISE_CONV_2D 21x1 x64 (block 4)
+     - 1x21x1x64
+     - 1x21x1x64
+     - 1x1x1x64
+     - 1,344
+   * - CONV_2D 1x1, 64->64 (block 4)
+     - 1x1x1x64
+     - 64x1x1x64
+     - 1x1x1x64
+     - 4,096
+   * - ring 5 (head) [state]
+     - 16x64 + 1x64
+     - --
+     - 17x64 -> 1,088
+     - -- (1,024 B state)
+   * - FULLY_CONNECTED 1088->1 (head)
+     - 1x1,088
+     - 1x1,088
+     - 1x1
+     - 1,088
+   * - LOGISTIC -> QUANTIZE (head)
+     - 1x1
+     - --
+     - 1x1 uint8
+     - --
+   * - **Per Invoke** (plus 6 VAR_HANDLE, 6 READ/ASSIGN pairs, 6 STRIDED_SLICE, 2 RESHAPE, CALL_ONCE)
+     -
+     -
+     -
+     - **24,736** (+ 3,792 B state)
+
+**Why every weight is one MAC.** Each Invoke produces exactly one output
+row per layer: the stem reads 5 rows and emits 1, every depthwise block
+reads its ring plus that 1 new row and emits 1. So a weight is used once
+per step, and the 24,736 weights are the 24,736 MACs -- the opposite of the
+command model above, where every weight is reused at 490 spatial positions.
+
+**1.85 s of context from 3 new frames.** Temporal reach adds up through the
+rings: the head sees 17 stem-rate rows, block 4 stretches each by 20,
+block 3 by 12, block 2 by 8, block 1 by 4 -- 61 rows at one row per 30 ms
+step, each row covering 5 input frames -- about ``60 x 30 ms + 50 ms ~=
+1.85 s``. Enough for "Hey Bus" plus the pause before it; state resets on
+mode entry.
+
+**MACs equals weights, only here.** The wake model's output spatial size is
+always 1x1 (a streaming model advances the ring by one row per Invoke
+instead of recomputing a window), so MACs = weights count exactly, unlike
+the command model's 49x10 = 490x multiplier above.
 
 Data provenance
 -----------------
