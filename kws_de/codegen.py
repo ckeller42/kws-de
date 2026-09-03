@@ -258,6 +258,16 @@ def plan_arena(plan: Plan, scratch_bytes: int = 0) -> Arena:
             if graph.tensors[t].data is None:
                 last[t] = max(last.get(t, step), step)
 
+    # A graph output has no consumer op -- its interval would otherwise
+    # collapse to [producer_step, producer_step] and free its slot the
+    # instant it's written, letting a later op's result land on the same
+    # bytes and clobber the output before the caller reads it.
+    end_step = len(plan.ops) - 1
+    for t in graph.outputs:
+        t = plan.alias.get(t, t)
+        if t in first:
+            last[t] = end_step
+
     candidates = [
         t
         for t in sorted(first, key=lambda t: (-tensor_bytes(graph, t), t))

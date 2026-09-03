@@ -201,3 +201,112 @@ def test_wake_arena_holds_every_live_activation():
                 continue
             end = arena.offsets[t] + codegen.tensor_bytes(g, t)
             assert end <= arena.size
+
+
+def _output_clobber_graph():
+    """op0's output is the graph's own output; op1 runs after and produces an
+    unrelated tensor. A planner that frees a graph output's slot the instant
+    it's written would hand op1 the same offset, clobbering the output before
+    the caller ever reads it post-invoke()."""
+    tensors = {0: _tensor(0, (1, 4)), 1: _tensor(1, (1, 4)), 2: _tensor(2, (1, 4))}
+    ops = (
+        tflite_graph.Op(0, "OP0", (0,), (1,), {}),
+        tflite_graph.Op(1, "OP1", (), (2,), {}),
+    )
+    graph = tflite_graph.Graph(
+        ops=ops, tensors=tensors, inputs=(0,), outputs=(1,), variables={}, init_subgraph=None
+    )
+    return codegen.Plan(graph=graph, ops=ops, rings=(), alias={})
+
+
+def _overlapping_lifetimes_graph():
+    """op2 reads both op0's and op1's outputs, so those two are alive at the
+    same time and must never share bytes."""
+    tensors = {
+        0: _tensor(0, (1, 4)),
+        1: _tensor(1, (1, 4)),
+        2: _tensor(2, (1, 4)),
+        3: _tensor(3, (1, 4)),
+    }
+    ops = (
+        tflite_graph.Op(0, "OP0", (0,), (1,), {}),
+        tflite_graph.Op(1, "OP1", (0,), (2,), {}),
+        tflite_graph.Op(2, "OP2", (1, 2), (3,), {}),
+    )
+    graph = tflite_graph.Graph(
+        ops=ops, tensors=tensors, inputs=(0,), outputs=(3,), variables={}, init_subgraph=None
+    )
+    return codegen.Plan(graph=graph, ops=ops, rings=(), alias={})
+
+
+def _live_ranges(plan):
+    """Ground truth tensor lifetimes, computed independently of
+    `plan_arena`: [op that writes it, last op that reads it], with graph
+    outputs forced live through the final op."""
+    graph = plan.graph
+    first: dict[int, int] = {}
+    last: dict[int, int] = {}
+    for step, op in enumerate(plan.ops):
+        for t in op.outputs:
+            first.setdefault(t, step)
+            last[t] = max(last.get(t, step), step)
+        for t in op.inputs:
+            t = plan.alias.get(t, t)
+            last[t] = max(last.get(t, step), step)
+    end = len(plan.ops) - 1
+    for t in graph.outputs:
+        t = plan.alias.get(t, t)
+        if t in first:
+            last[t] = end
+    return {t: (first[t], last[t]) for t in first}
+
+
+def _overlaps(plan, arena):
+    """Pairs of arena-resident tensors whose lifetimes *and* byte ranges
+    overlap -- real corruption, found without touching `plan_arena`'s
+    internals so this check can't share a bug with the code it's checking."""
+    live = _live_ranges(plan)
+    tensors = [t for t in arena.offsets if t in live]
+    bad = []
+    for i, a in enumerate(tensors):
+        for b in tensors[i + 1 :]:
+            fa, la = live[a]
+            fb, lb = live[b]
+            if la < fb or lb < fa:
+                continue  # lifetimes don't overlap -- sharing an offset is fine
+            oa, ea = arena.offsets[a], arena.offsets[a] + codegen.tensor_bytes(plan.graph, a)
+            ob, eb = arena.offsets[b], arena.offsets[b] + codegen.tensor_bytes(plan.graph, b)
+            if oa < eb and ob < ea:
+                bad.append((a, b))
+    return bad
+
+
+def test_arena_keeps_graph_output_live_to_the_end():
+    plan = _output_clobber_graph()
+    arena = codegen.plan_arena(plan)
+    assert arena.offsets[1] != arena.offsets[2]
+    assert _overlaps(plan, arena) == []
+
+
+def test_arena_disjoint_ranges_for_overlapping_lifetimes():
+    plan = _overlapping_lifetimes_graph()
+    arena = codegen.plan_arena(plan)
+    assert _overlaps(plan, arena) == []
+    assert all(offset % 16 == 0 for offset in arena.offsets.values())
+
+
+def test_overlap_checker_rejects_a_broken_offset0_allocator():
+    """The checker used above must actually catch a broken allocator, not
+    just always pass -- force everything to offset 0 and confirm it fires."""
+    plan = _overlapping_lifetimes_graph()
+    broken = codegen.Arena(offsets={1: 0, 2: 0, 3: 0}, size=16)
+    assert _overlaps(plan, broken) != []
+
+
+@needs_wake
+def test_wake_arena_has_zero_pairwise_overlaps():
+    g = tflite_graph.read_graph(WAKE.read_bytes())
+    plan = codegen.rewrite_streaming(g)
+    arena = codegen.plan_arena(plan)
+    assert _overlaps(plan, arena) == []
+    assert all(offset % 16 == 0 for offset in arena.offsets.values())
