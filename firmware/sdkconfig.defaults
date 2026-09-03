@@ -31,3 +31,4 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 # own. The tick ISR is in IRAM and driven by the systimer, so 10x the ticks costs
 # well under 1% of a core.
 CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP32S3_DATA_CACHE_64KB=y

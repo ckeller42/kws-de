@@ -68,8 +68,13 @@ void app_main(void)
     char label[12] = {0};
     if (f_getlabel("0:", label, NULL) == FR_OK && label[0] == '\0') f_setlabel("0:KWSREC");
     audio_start();
-    recognise_start();
+    /* Wake before recognise: only one TFLM arena fits internal SRAM, and the
+       first caller takes it. The wake model is the always-on one and gains far
+       more from being there (3x a step) than the recogniser does (5%), so it
+       gets first claim rather than whichever happened to start first. Taking
+       the smaller arena first also leaves room for both tasks' 16 KB stacks. */
     wake_start();
+    recognise_start();
     record_start();                    /* starts paused (REC_IDLE) until Record is chosen */
     console_start();
     ui_show_menu();
