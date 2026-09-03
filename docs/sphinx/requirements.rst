@@ -577,3 +577,19 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    ``"user-customised, in-training"`` (a speaker-level match against the
    training manifest's ``train`` split). The two are always reported as
    separate sections, never combined into one number.
+
+.. req:: Every long pipeline stage prints an ETA that improves from history
+   :id: REQ_PIPE_ETA
+   :status: implemented
+
+   ``kws_de.eta`` keeps a JSON-lines ledger (one record per finished stage:
+   stage, size, seconds, an 8-hex-char hashed machine tag, timestamp, note)
+   and predicts a stage's duration as the median of its last 10 per-unit
+   (seconds/size) rates on the current machine, scaled by the requested
+   size, with the 20th/80th-percentile rates as a low/high band; a stage
+   with no history yet reports "ETA unknown" instead of guessing. Every
+   stage in ``scripts/data-loop.sh`` (QC, dataset build, train, export,
+   eval) and a direct ``kws-train`` invocation record their measured wall
+   time, so predictions improve run over run. A run that raises is recorded
+   with note ``"failed"`` and excluded from future predictions. The machine
+   tag is never the raw hostname, so the ledger is safe to commit or share.
