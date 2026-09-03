@@ -66,7 +66,7 @@ static void handle_line(char *line)
         printf("mode %s\n", mode_name(m));
         printf("models command=%s wake=%s\n", KWS_MODEL_ID, KWS_WAKE_MODEL_ID);
         /* Which volume the takes land on, and how much of a session still fits.
-           MB for a card, KB for the 10 MB flash partition — the units are the
+           MB for a card, KB for the 12 MB flash partition — the units are the
            quickest tell of which medium is live. */
         unsigned div = storage_is_sdcard() ? 1024 * 1024 : 1024;
         printf("storage %s %llu/%llu %s\n", storage_is_sdcard() ? "sd" : "flash",

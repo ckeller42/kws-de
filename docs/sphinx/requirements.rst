@@ -148,7 +148,7 @@ Recorder
 
    ``wav_write_header`` (``firmware/main/wav.c``) writes a standard 44-byte
    RIFF/WAVE/fmt/data header for mono 16-bit PCM at the capture sample rate
-   (16000 Hz); every saved take on ``/rec`` uses this exact header.
+   (16000 Hz); every saved take uses this exact header.
 
 .. req:: Recording filenames are ASCII slugs
    :id: REQ_FW_RECORD_FILENAME_SLUG
@@ -173,7 +173,8 @@ Recorder
    :status: implemented
 
    Every take appends one row (``prompt,file,ms,peak_dbfs,set,seed,ts``) to
-   ``/rec/<speaker>/session.csv`` on save, giving a per-speaker audit trail
+   ``<root>/<speaker>/session.csv`` on save (``<root>`` = ``storage_root()``),
+   giving a per-speaker audit trail
    that ``scripts/pull-recordings.sh`` merges into
    ``data/recordings/sessions.csv``.
 
@@ -240,7 +241,7 @@ Storage / USB
    even after the one-time format attempt, or with one that mounts but
    fails the write-and-read-back probe, the device behaves exactly as it
    did before microSD support: ``storage_root()`` is ``/rec`` on the
-   internal 10 MB wear-levelled FAT partition, recordings and logs are
+   internal 12 MB wear-levelled FAT partition, recordings and logs are
    written there, USB-drive mode exports that partition, and ``status``
    answers ``storage flash <free>/<total> KB``. This is not an error
    state — it is the normal configuration for a device with no card, and
@@ -266,14 +267,16 @@ Storage / USB
    200 KB (``storage.h``); the USB drive mode remains available regardless,
    so recordings already saved can still be pulled off.
 
-.. req:: /rec has exactly one owner at a time
+.. req:: The recording volume has exactly one owner at a time
    :id: REQ_FW_USB_SINGLE_OWNER
    :status: implemented
 
-   Entering USB drive mode unmounts ``/rec`` from the app before exposing
-   the partition as a USB MSC device (``usb_drive_enter``); leaving it
-   stops the MSC device and remounts ``/rec`` for the app
-   (``usb_drive_exit``). The app and the host PC never hold the FAT
+   Entering USB drive mode unmounts the recording volume from the app
+   before exposing it as a USB MSC device (``usb_drive_enter``); leaving it
+   stops the MSC device and remounts the volume for the app
+   (``usb_drive_exit``). This holds for either medium — the microSD or the
+   flash partition — because both are mounted through the same esp_tinyusb
+   media handle (:need:`REQ_FW_STORAGE_SD`). The app and the host PC never hold the FAT
    filesystem open at the same time.
 
 .. req:: Host pull script copies, merges, and clears recordings
@@ -363,7 +366,7 @@ Recogniser
    :status: implemented
 
    Toggling "Log" in recognise mode appends ``ts,word,conf,ms`` per
-   detection to ``/rec/recognise.log``; the log format is exactly what's
+   detection to ``recognise.log`` on the recording volume; the log format is exactly what's
    needed to replay through ``kws_de.stream.KeywordStream`` on the host
    and compare event-for-event against the on-device detector.
 
@@ -393,7 +396,7 @@ Wake word ("Hey Bus")
    ``WAKE_MIN_CONSECUTIVE`` (2) consecutive steps, after which
    ``WAKE_REFRACTORY_MS`` (1500) suppresses further fires, so one spoken
    "Hey Bus" produces exactly one fire. Each fire is logged to
-   ``/rec/wake.log`` as ``[Wake] <ms> <prob>``.
+   ``wake.log`` on the recording volume as ``[Wake] <ms> <prob>``.
 
 .. req:: A wake detection is confirmed on screen and by ear
    :id: REQ_FW_WAKE_BEEP

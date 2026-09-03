@@ -68,8 +68,8 @@ void app_main(void)
     bsp_i2c_init();
     bsp_display_start();
     bsp_display_backlight_on();
-    /* microSD if one is in the slot (a guided session is ~10 MB, the flash
-       partition holds barely one), the flash partition otherwise. */
+    /* microSD if one is in the slot (a guided session is ~9.5 MB, the 12 MB
+       flash partition holds barely one), the flash partition otherwise. */
     ESP_ERROR_CHECK(storage_mount());
     /* Which models this image actually carries. A firmware binary outlives the
        checkout that built it, so the stamp (name@sha8 date, generated into the

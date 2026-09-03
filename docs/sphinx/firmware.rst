@@ -129,7 +129,7 @@ it, which is what lets USB-drive mode export exactly the volume the
 recorder writes to.
 
 The card is worth having because of the size gap: the flash ``storage``
-partition is 10 MB — about one guided session — while a card holds hours.
+partition is 12 MB — about one guided session — while a card holds hours.
 A card that carries no filesystem is formatted FAT once at first use
 (``CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL``), which erases whatever was on it;
 the internal partition is never formatted. The FAT label is forced to

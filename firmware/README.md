@@ -131,7 +131,7 @@ and USB mode exports whichever volume that is.
 | | mount point | size | holds |
 |---|---|---|---|
 | microSD in the slot | `/sdcard` | the card | hours of sessions |
-| no card (fallback) | `/rec` | 10 MB partition | about one guided session |
+| no card (fallback) | `/rec` | 12 MB partition | about one guided session |
 
 - **microSD is preferred and needs no setup.** A card that mounts is used
   as-is. A card that probes but carries no filesystem is formatted FAT

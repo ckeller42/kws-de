@@ -840,10 +840,10 @@ bar (91.2 % → 88.7 %, a 2.5-point drop) and both narrower widths lose isolated
 recognition, not just a synthetic-test-set fraction of a point. `export.assert_model_healthy`
 still passed for every exported width; the export health gate itself was not touched.
 
-### 2026-09-03 — recording storage: microSD instead of a 10 MB flash partition
+### 2026-09-03 — recording storage: microSD instead of a 12 MB flash partition
 
-The CoreS3 recorder wrote to the internal wear-levelled FAT partition, 10 MB — about
-one guided session (~50 takes at 6 s, 16 kHz mono int16 ≈ 190 KB each) before REC_FULL,
+The CoreS3 recorder wrote to the internal wear-levelled FAT partition, 12 MB — about
+one guided session (~9.5 MB of takes; a full sentence+negative set has already run it dry),
 so every session needed a USB pull before the next speaker could sit down. Recordings now
 go to a microSD when one is present (`storage_root()`), which turns that ceiling into
 hours: a 32 GB card holds ~47 000 takes, i.e. ~3 000x the flash budget, and the session
