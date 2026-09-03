@@ -8,13 +8,9 @@ on:
     paths:
       - 'docs/**'
       - '.github/workflows/docs.yml'
+  # No path filter on pull requests: docs-build and firmware-docs are required
+  # status checks on main, so they must report on every PR.
   pull_request:
-    paths:
-      - 'docs/sphinx/**'
-      - 'firmware/main/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
