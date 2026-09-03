@@ -271,6 +271,13 @@ opens a 2.5 s window for the recogniser on each wake fire. Measured with one int
 and the ratio scales with interaction rate (at one interaction a minute it is ~16 ms/s, a 20x
 cut). Both modes emit the same `KWS_DUTY` log line so the two are directly comparable.
 
+**Shipped model (2026-09-03).** The final firmware carries the QAT v3 command model
+(`kws-export --qat --prefix features_v3`), **INT8 test accuracy 0.9123**, against 0.7475 for
+the v2 post-training-quantised model the optimisation work was measured on. Same architecture
+and width, so the timings are unchanged (`Invoke` 41.4 ms, step 45–46 ms, front end 0.485 ms
+per frame, wake step 1.95 ms) — the accuracy comes from QAT and the v3 dataset, not from
+anything in this wave, and the wave's numbers are not affected by the swap.
+
 **Net across wave 2: recogniser step 85 → 46 ms, front end 3.09 → 0.46 ms per frame, wake
 step 3.48 → 1.90 ms — and the duty-cycle design takes always-on inference cost from 315 to
 97 ms/s at one interaction per 10 s.**
