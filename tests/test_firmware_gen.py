@@ -60,6 +60,20 @@ def test_c_tables_reproduce_librosa_mfcc():
     assert np.allclose(got, ref, atol=1e-3)
 
 
+def test_mel_bands_reproduce_the_dense_filterbank_exactly():
+    """The banded form drops only exact zeros, so the mel energies it produces
+    must be bit-identical to the dense matmul, not merely close."""
+    _, mel, _ = firmware_gen.mfcc_tables()
+    start, length, weights = firmware_gen.mel_bands(mel)
+    assert weights.size == int(length.sum())
+    rebuilt = np.zeros_like(mel)
+    off = 0
+    for m in range(mel.shape[0]):
+        rebuilt[m, start[m] : start[m] + length[m]] = weights[off : off + length[m]]
+        off += length[m]
+    assert np.array_equal(rebuilt, mel)
+
+
 def test_generate_is_deterministic_and_complete(tmp_path):
     firmware_gen.generate(tmp_path)
     firmware_gen.generate(tmp_path / "again")
@@ -71,7 +85,9 @@ def test_generate_is_deterministic_and_complete(tmp_path):
     assert f"#define KWS_SILENCE_INDEX {config.COMMAND_LABELS.index('_silence_')}" in labels
     assert f"#define KWS_UNKNOWN_INDEX {config.COMMAND_LABELS.index('_unknown_')}" in labels
     fc = (tmp_path / "features_config.h").read_text()
-    assert "#define KWS_N_BINS 241" in fc and "KWS_MEL[40][241]" in fc
+    assert "#define KWS_N_BINS 241" in fc
+    assert "KWS_MEL_START[40]" in fc and "KWS_MEL_LEN[40]" in fc
+    assert "#define KWS_MEL_NNZ 459" in fc and "KWS_MEL_W[459]" in fc
     tv = (tmp_path / "test_vectors.h").read_text()
     assert "TV_PCM[16000]" in tv and "TV_MFCC[49][10]" in tv
 
