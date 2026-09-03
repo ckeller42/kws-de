@@ -238,6 +238,14 @@ for the app - the normal console port returns once that command completes.
 Flashing still needs the original JTAG/console port, not the CDC one (it
 only exists while USB mode is active).
 
+## Storage
+
+The recordings partition (`storage`, FAT with wear levelling) is 12 MB of the 16 MB
+flash: about one full guided session (≈ 120 takes ≈ 9.5 MB) plus wake sessions. Pull
+after every session — the ingest script does — or the recorder stops with "flash
+full" (nothing is lost; takes already on the flash stay until pulled). Changing the
+partition table erases the partition on the next flash, so pull first.
+
 ## Manual test checklist
 
 On-device manual checklist: from the menu, tap **Record** → the session
