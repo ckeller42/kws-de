@@ -10,15 +10,11 @@ Design & rationale (with algorithm citations): `docs/superpowers/specs/`.
 
 ## Documentation
 
-Built and deployed on every push to `main`: **<https://ckeller42.github.io/kws-de/>**
-(architecture, LikeC4 diagrams, paper, eval reports) — build locally with
-`pip install -r docs/requirements.txt && python -m sphinx -b html docs docs/_build/html`
-(node ≥ 20 required). The firmware/model requirements-traceability pages
-([`docs/sphinx/firmware.rst`](docs/sphinx/firmware.rst),
-[`docs/sphinx/models.rst`](docs/sphinx/models.rst), and the rest of
-`docs/sphinx/`) are a separate Sphinx project built by CI as an artifact,
-not yet published; build locally with
-`uv run --no-sync sphinx-build -b html docs/sphinx docs/sphinx/_build/html`.
+Built and deployed on every push to `main`:
+
+- Architecture and paper docs: **<https://ckeller42.github.io/kws-de/>**
+- Firmware, models, recording pipeline, requirements traceability and the C API
+  (Sphinx + sphinx-needs + Doxygen): **<https://ckeller42.github.io/kws-de/sphinx/>**
 
 ## Status (2026-09-03)
 

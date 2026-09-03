@@ -5,7 +5,7 @@ The two on-device models — command recogniser and wake word — as trained
 and measured today, with the data they're trained on. Full experiment
 log, method, and every number's provenance: ``docs/paper-notes.md``
 (dated entries). Architecture diagrams and the paper: the project's
-`docs site <https://ckeller42.github.io/kws-de/>`_.
+`published docs <https://ckeller42.github.io/kws-de/sphinx/>`_.
 
 Command model
 --------------

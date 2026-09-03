@@ -8,7 +8,7 @@ measurements. Build/flash instructions and the full manual test checklist
 stay in ``firmware/README.md``; this page is the "what it does and what it
 measures" companion, cross-referenced to the :doc:`requirements` it
 implements. Architecture diagrams and the paper live on the project's
-`docs site <https://ckeller42.github.io/kws-de/>`_.
+`published docs <https://ckeller42.github.io/kws-de/sphinx/>`_.
 
 Boot menu
 ---------
