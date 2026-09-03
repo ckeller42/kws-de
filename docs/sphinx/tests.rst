@@ -252,6 +252,21 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
    the model file it measured, data-root-relative, and a second run rewrites
    its section in place instead of appending a second copy.
 
+.. test:: Stage-duration ETA: ledger, prediction math, Timed, and the CLI
+   :id: TEST_ETA
+   :status: passing
+   :links: REQ_PIPE_ETA
+
+   ``tests/test_eta.py``: ``record``/``predict`` round-trip through a
+   ``tmp_path`` ledger, hashing the machine tag (never the raw hostname);
+   the median/percentile-rate prediction math is checked against
+   hand-computed numbers, only the last 10 same-stage/same-host records are
+   used, and a run recorded with note ``"failed"`` (as ``Timed`` records an
+   exception) is excluded and the exception still propagates. The
+   ``kws-eta`` CLI (``predict``/``record``/``run``/``watch --once``) is
+   exercised end to end via ``subprocess``, including a failing ``run``
+   command's exit code passing through and being recorded as failed.
+
 .. test:: v3 dataset build reads the approved tree and records provenance
    :id: TEST_V3_PROVENANCE
    :status: passing

@@ -20,6 +20,7 @@ import numpy as np  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
 from kws_de import config  # noqa: E402
+from kws_de.eta import Timed  # noqa: E402
 from kws_de.model import build_dscnn  # noqa: E402
 
 
@@ -144,6 +145,11 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     out_name = args.out or ("command.keras" if args.v2 else "kws.keras")
     float_path = config.MODELS_DIR / out_name
     data = np.load(config.DATA_DIR / f"{prefix}_train.npz")
+    size = args.epochs * data["X"].shape[0]
+    with Timed("train", size=size, note=prefix):
+        model, history = train(data["X"], data["y"], epochs=args.epochs, num_classes=num_classes)
+    model.save(config.MODELS_DIR / out_name)
+    print(f"final train accuracy: {history['accuracy'][-1]:.4f}")
 
     if args.qat and float_path.exists():
         # Reuse the already-trained float model's weights (a same-architecture
