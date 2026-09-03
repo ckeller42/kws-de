@@ -4,6 +4,7 @@
 #include "bsp/esp-bsp.h"
 #include "diskio_impl.h"
 #include "diskio_sdmmc.h"
+#include "diskio_wl.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_partition.h"
@@ -89,21 +90,29 @@ const char *storage_root(void) { return s_card ? BSP_SD_MOUNT_POINT : "/rec"; }
 
 bool storage_is_sdcard(void) { return s_card != NULL; }
 
+/* Force the FAT volume label. It is what the host mounts in USB-drive mode and
+   what the ingest script probes for, so it is set on both media rather than
+   only when blank: a pre-formatted card arrives carrying the vendor's label.
+   The drive number has to be asked for, not assumed to be 0 — a failed microSD
+   attempt before the flash mount can leave the flash volume on drive 1, and a
+   label written to the wrong drive is silently dropped. */
+static void set_label(void)
+{
+    BYTE pdrv = s_card ? ff_diskio_get_pdrv_card(s_card) : ff_diskio_get_pdrv_wl(s_wl);
+    char drv[16];
+    char label[12] = {0};
+    snprintf(drv, sizeof drv, "%u:", pdrv);
+    if (f_getlabel(drv, label, NULL) != FR_OK) { ESP_LOGW(TAG, "no label on drive %u:", pdrv); return; }
+    if (strcmp(label, STORAGE_LABEL) == 0) return;
+    snprintf(drv, sizeof drv, "%u:" STORAGE_LABEL, pdrv);
+    FRESULT res = f_setlabel(drv);
+    ESP_LOGI(TAG, "label \"%s\" -> \"%s\" on drive %u: (%d)", label, STORAGE_LABEL, pdrv, res);
+}
+
 static esp_err_t mount_root(void)
 {
     esp_err_t err = tinyusb_msc_storage_mount(storage_root());
-    if (err == ESP_OK) {
-        /* The label is what the host mounts in USB-drive mode and what the
-         * ingest script probes for, so it is forced on both media rather than
-         * only set when blank: a pre-formatted card arrives with the vendor's
-         * label. It is a FAT property, not a USB descriptor. Only one FAT
-         * volume is ever mounted on this device, so its FatFs pdrv is 0.
-         * ponytail: hardcoded "0:" drive, revisit if a second volume is added */
-        char label[12] = {0};
-        if (f_getlabel("0:", label, NULL) == FR_OK && strcmp(label, STORAGE_LABEL) != 0) {
-            f_setlabel("0:" STORAGE_LABEL);
-        }
-    }
+    if (err == ESP_OK) set_label();
     ESP_LOGI(TAG, "mount %s (%s): %s, %llu of %llu KB free", storage_root(),
              storage_is_sdcard() ? "microSD" : "flash", esp_err_to_name(err),
              storage_free_bytes() / 1024, storage_total_bytes() / 1024);
