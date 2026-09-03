@@ -566,6 +566,28 @@ def test_wake_infer_step_has_no_alignment_assert():
     assert "assert(((uintptr_t) in & 15) == 0);" not in source
 
 
+@needs_wake
+def test_check_is_clean_against_the_committed_headers():
+    stale = codegen.check(WAKE, "wake", GEN)
+    assert stale == [], f"stale generated files: {stale}"
+
+
+@needs_wake
+def test_write_then_check_roundtrips(tmp_path):
+    info = codegen.write(WAKE, "wake", tmp_path)
+    assert info["arena_bytes"] > 0 and info["ring_bytes"] == 3792
+    assert (tmp_path / "wake_infer.c").exists()
+    assert (tmp_path / "wake_infer.h").exists()
+    assert codegen.check(WAKE, "wake", tmp_path) == []
+
+
+@needs_wake
+def test_check_reports_a_stale_file(tmp_path):
+    codegen.write(WAKE, "wake", tmp_path)
+    (tmp_path / "wake_infer.c").write_text("/* stale */\n")
+    assert codegen.check(WAKE, "wake", tmp_path) == ["wake_infer.c"]
+
+
 def test_padding_same_and_valid():
     assert codegen.padding_hw(49, 10, 3, 3, 1, 1, "SAME") == (1, 1, 49, 10)
     assert codegen.padding_hw(5, 1, 5, 1, 3, 1, "VALID") == (0, 0, 1, 1)

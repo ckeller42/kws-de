@@ -12,6 +12,7 @@ generator does not understand is an error naming the op and tensor, never a
 silent approximation.
 """
 
+import argparse
 import dataclasses
 import math
 import pathlib
@@ -1227,4 +1228,92 @@ def write_infer_vectors(name: str, clips, gen_dir) -> None:
         f"static const uint16_t {upper}_CLIP_STEPS[{len(clips)}] = {{{steps}}};\n"
         + _c_rows(f"{upper}_IN", "int8_t", inputs)
         + _c_rows(f"{upper}_EXPECT", ctype, expect)
+    )
+
+
+def write(tflite_path, name: str, out_dir) -> dict[str, int]:
+    """Generate <name>_infer.{c,h} into out_dir. Returns a small report.
+
+    Deliberately does not stamp the model id into the header comment: the
+    existing whole-model parity tests (tests/test_codegen_parity.py) also
+    write straight from `generate()` into this same directory as a build
+    step, with no stamping. Anything `write()` added on top of plain
+    `generate()` output would flip between "stamped" and "not" depending on
+    which of these two callers ran last, which is exactly the kind of
+    non-determinism `check()` exists to catch -- so both paths emit the same
+    bytes. A stale header is already visible the strong way: `check()` fails.
+    """
+    blob = pathlib.Path(tflite_path).read_bytes()
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = generate(blob, name)
+    for filename, text in files.items():
+        (out_dir / filename).write_text(text)
+    graph = tflite_graph.read_graph(blob)
+    plan = rewrite_streaming(graph)
+    scratch = max((scratch_bytes(graph, op) for op in plan.ops), default=0)
+    arena = plan_arena(plan, scratch_bytes=scratch)
+    return {
+        "arena_bytes": arena.size,
+        # Persistent-history bytes only (r.bytes), not the full C array size
+        # (r.bytes + r.new_rows*r.channels) that WAKE_INFER_STATE_BYTES /
+        # state_bytes() report -- see kws_de/codegen.py's _render for that
+        # split (task-5-fix1-report.md S-6). Both are real numbers for
+        # different questions; this one is what the brief's roundtrip test
+        # pins (3792 for the wake model).
+        "ring_bytes": sum(r.bytes for r in plan.rings),
+        "state_bytes": sum(r.bytes + r.new_rows * r.channels for r in plan.rings),
+        "ops": len(plan.ops),
+    }
+
+
+def check(tflite_path, name: str, committed_dir) -> list[str]:
+    """Names of committed generated files that differ from a fresh generation.
+
+    Byte-exact, unlike kws-fwgen's tolerance-based check: everything here is
+    integer arithmetic on the model's own bytes, so any difference is a real
+    difference -- a changed model, a changed generator, or a stale commit.
+    """
+    blob = pathlib.Path(tflite_path).read_bytes()
+    committed_dir = pathlib.Path(committed_dir)
+    stale = []
+    for filename, text in generate(blob, name).items():
+        path = committed_dir / filename
+        if not path.exists() or path.read_text() != text:
+            stale.append(filename)
+    return stale
+
+
+def main() -> None:  # pragma: no cover - I/O wrapper
+    ap = argparse.ArgumentParser(
+        description="Generate C inference (esp-nn calls) from a .tflite model."
+    )
+    ap.add_argument("model", help="path to a .tflite file")
+    ap.add_argument(
+        "--name",
+        required=True,
+        choices=("wake", "command"),
+        help="generated symbol prefix and file stem",
+    )
+    ap.add_argument("--out", default="firmware/main/gen", help="output directory")
+    ap.add_argument(
+        "--check",
+        metavar="DIR",
+        help="verify committed generated files in DIR are current "
+        "instead of writing; exit 1 on mismatch",
+    )
+    args = ap.parse_args()
+    model = pathlib.Path(args.model)
+    if not model.exists():
+        print(f"WARNING: {model} absent -- skipping (models are not committed)")
+        return
+    if args.check:
+        stale = check(model, args.name, args.check)
+        if stale:
+            raise SystemExit("stale generated inference: " + ", ".join(stale))
+        return
+    info = write(model, args.name, args.out)
+    print(
+        f"{args.name}: {info['ops']} ops, arena {info['arena_bytes']} B, "
+        f"rings {info['ring_bytes']} B"
     )

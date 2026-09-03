@@ -26,7 +26,7 @@ firmware/test/*.o
 
 # host parity harness: the pinned esp-nn clone plus the probe, generated models
 # and vector headers the parity tests write — build fixtures, not shipped
-# firmware (Task 6 is what commits a generated model)
+# firmware, except the wake inference Task 6 commits as the firmware artefact
 firmware/test/.esp-nn/
 firmware/test/test_infer_parity
 firmware/test/test_wake_parity
@@ -35,6 +35,9 @@ firmware/main/gen/conv_probe*
 firmware/main/gen/*_infer.c
 firmware/main/gen/*_infer.h
 firmware/main/gen/*_infer_vectors.h
+!firmware/main/gen/wake_infer.c
+!firmware/main/gen/wake_infer.h
+!firmware/main/gen/wake_infer_vectors.h
 
 # local training environments + data (train/mww etc.)
 train/**/.venv/

@@ -47,6 +47,11 @@ jobs:
           # tolerance that clears hardware last-digit noise but catches any real
           # config/generator change. See kws_de.firmware_gen.check.
           uv run kws-fwgen --check firmware/main/gen
+          # The generated inference C is pure integer arithmetic over the model's
+          # own bytes, so its check is byte-exact — but the models are not in the
+          # repo, so this only bites where a model is present (a dev machine or
+          # the data host). Absent model: kws-codegen warns and exits 0.
+          uv run kws-codegen models/hey_bus.tflite --name wake --check firmware/main/gen
   host-test:
     runs-on: ubuntu-latest
     steps:
