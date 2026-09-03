@@ -146,10 +146,12 @@ extern "C" void recognise_start(void)
     s_lock = xSemaphoreCreateMutex();
     s_arena = arena_alloc(TAG, "command", KWS_MODEL_ARENA_BYTES);
     assert(s_arena);
-    /* Priority 3: BELOW the LVGL task (4, same core). Inference is heavy and
-       best-effort; if it outranked LVGL it starved touch handling, so the
-       Record button on the recognise screen never registered. */
-    xTaskCreatePinnedToCore(recognise_task, "recognise", 16384, nullptr, 3, nullptr, 1);
+    /* Core 0, priority 3. LVGL (priority 4, 5 ms tick) and the audio task own
+       core 1, and LVGL preempted a 40 ms Invoke several times over. Core 0
+       carries only main (finished by now) and the console task (priority 1).
+       The priority stays at 3 — it was chosen to keep touch responsive on a
+       shared core, and raising it is a separate change with its own reasons. */
+    xTaskCreatePinnedToCore(recognise_task, "recognise", 16384, nullptr, 3, nullptr, 0);
 }
 extern "C" void recognise_set_active(bool on) { s_active = on; if (!on && s_log) { fclose(s_log); s_log = nullptr; } }
 extern "C" void recognise_get_status(recognise_status_t *out) { xSemaphoreTake(s_lock, portMAX_DELAY); *out = s_st; xSemaphoreGive(s_lock); }

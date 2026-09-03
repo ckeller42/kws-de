@@ -182,9 +182,9 @@ extern "C" void wake_start(void)
     s_lock = xSemaphoreCreateMutex();
     s_arena = arena_alloc(TAG, "wake", KWS_WAKE_ARENA_BYTES);
     assert(s_arena);
-    /* Priority 3, core 1 — same slot as the recogniser: below the LVGL task (4)
-       so touch stays responsive. Only one of the two is ever active. */
-    xTaskCreatePinnedToCore(wake_task, "wake", 16384, nullptr, 3, nullptr, 1);
+    /* Core 0, priority 3 — same slot as the recogniser, off LVGL's core.
+       Only one of the two is ever active. */
+    xTaskCreatePinnedToCore(wake_task, "wake", 16384, nullptr, 3, nullptr, 0);
 }
 
 extern "C" void wake_set_active(bool on)
