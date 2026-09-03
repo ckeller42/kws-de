@@ -542,3 +542,23 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    ``"user-customised, in-training"`` (a speaker-level match against the
    training manifest's ``train`` split). The two are always reported as
    separate sections, never combined into one number.
+
+Training (host workflow)
+-------------------------
+
+.. req:: Quantisation-aware training is available for the command model
+   :id: REQ_MODEL_QAT
+   :status: implemented
+
+   ``kws-train --qat`` fine-tunes the (built-or-loaded) float command model
+   with ``tensorflow_model_optimization.quantization.keras.quantize_model``
+   (per-tensor fake-quant on every activation, per-channel on conv/dense
+   kernels) for ``--qat-epochs`` (default 10) epochs at a low learning rate,
+   and saves the result as a SavedModel dir named ``<out>_qat`` alongside
+   the plain float ``<out>.keras`` — the PTQ path's own artefact is
+   untouched, so the two can be compared on the same architecture and data.
+   ``kws-export --qat`` loads that model back (under the same
+   ``TF_USE_LEGACY_KERAS=1`` runtime tfmot requires, via a module-level
+   re-exec in both CLIs before TensorFlow is imported) and converts it to
+   INT8 TFLite using its baked-in fake-quant ranges, writing
+   ``command<suffix>_qat.tflite`` next to the plain PTQ export.
