@@ -15,6 +15,8 @@ Built and deployed on every push to `main`:
 - Architecture and paper docs: **<https://ckeller42.github.io/kws-de/>**
 - Firmware, models, recording pipeline, requirements traceability and the C API
   (Sphinx + sphinx-needs + Doxygen): **<https://ckeller42.github.io/kws-de/sphinx/>**
+- Model architecture diagrams, generated from the shipped `.tflite` files:
+  [`docs/sphinx/models.rst`](docs/sphinx/models.rst) ("anatomy" sections)
 
 ## Status (2026-09-03)
 

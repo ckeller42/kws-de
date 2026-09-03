@@ -1,0 +1,67 @@
+digraph model {
+  rankdir=TB;
+  node [shape=box, style=filled, fillcolor="#F3E3BF", color="#C98A1E", fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=9];
+  IN [label="input 1x3x40\nint8", shape=oval, style=filled, fillcolor=white, color="#C98A1E"];
+  OUT [label="output", shape=oval, style=filled, fillcolor="#F6D3CB", color="#C94B32"];
+  subgraph cluster_0 {
+    label="Stem"; style=dashed; color="#C98A1E"; fontsize=11;
+    op14 [label="conv 5x1, 40->32\n6,400 MAC"];
+    ring3 [label="ring 2x40", shape=cylinder, style=filled, fillcolor="#CFEBE6", color="#2F9E8F"];
+  }
+  subgraph cluster_1 {
+    label="Block 1 -- depthwise 5x1"; style=dashed; color="#C98A1E"; fontsize=11;
+    op17 [label="depthwise 5x1 x32\n160 MAC"];
+    op18 [label="conv 1x1, 32->64\n2,048 MAC"];
+    ring2 [label="ring 4x32", shape=cylinder, style=filled, fillcolor="#CFEBE6", color="#2F9E8F"];
+  }
+  subgraph cluster_2 {
+    label="Block 2 -- depthwise 9x1"; style=dashed; color="#C98A1E"; fontsize=11;
+    op23 [label="depthwise 9x1 x64\n576 MAC"];
+    op24 [label="conv 1x1, 64->64\n4,096 MAC"];
+    ring1 [label="ring 8x64", shape=cylinder, style=filled, fillcolor="#CFEBE6", color="#2F9E8F"];
+  }
+  subgraph cluster_3 {
+    label="Block 3 -- depthwise 13x1"; style=dashed; color="#C98A1E"; fontsize=11;
+    op29 [label="depthwise 13x1 x64\n832 MAC"];
+    op30 [label="conv 1x1, 64->64\n4,096 MAC"];
+    ring0 [label="ring 12x64", shape=cylinder, style=filled, fillcolor="#CFEBE6", color="#2F9E8F"];
+  }
+  subgraph cluster_4 {
+    label="Block 4 -- depthwise 21x1"; style=dashed; color="#C98A1E"; fontsize=11;
+    op32 [label="depthwise 21x1 x64\n1,344 MAC"];
+    op33 [label="conv 1x1, 64->64\n4,096 MAC"];
+    ring5 [label="ring 20x64", shape=cylinder, style=filled, fillcolor="#CFEBE6", color="#2F9E8F"];
+  }
+  subgraph cluster_5 {
+    label="Head"; style=dashed; color="#C98A1E"; fontsize=11;
+    op36 [label="dense 1088->1\n1,088 MAC"];
+    op37 [label="sigmoid"];
+    ring4 [label="ring 16x64", shape=cylinder, style=filled, fillcolor="#CFEBE6", color="#2F9E8F"];
+  }
+  IN -> op14 [color="#C98A1E"];
+  IN -> ring3 [style=dashed, color="#2F9E8F"];
+  op14 -> op17 [color="#C98A1E"];
+  op14 -> ring2 [style=dashed, color="#2F9E8F"];
+  op17 -> op18 [color="#C98A1E"];
+  op18 -> op23 [color="#C98A1E"];
+  op18 -> ring1 [style=dashed, color="#2F9E8F"];
+  op23 -> op24 [color="#C98A1E"];
+  op24 -> op29 [color="#C98A1E"];
+  op24 -> ring0 [style=dashed, color="#2F9E8F"];
+  op29 -> op30 [color="#C98A1E"];
+  op30 -> op32 [color="#C98A1E"];
+  op30 -> ring5 [style=dashed, color="#2F9E8F"];
+  op32 -> op33 [color="#C98A1E"];
+  op33 -> op36 [color="#C98A1E"];
+  op33 -> ring4 [style=dashed, color="#2F9E8F"];
+  op36 -> op37 [color="#C98A1E"];
+  op37 -> OUT [color="#C94B32", penwidth=2];
+  ring0 -> op29 [style=dashed, color="#2F9E8F"];
+  ring1 -> op23 [style=dashed, color="#2F9E8F"];
+  ring2 -> op17 [style=dashed, color="#2F9E8F"];
+  ring3 -> op14 [style=dashed, color="#2F9E8F"];
+  ring4 -> op36 [style=dashed, color="#2F9E8F"];
+  ring5 -> op32 [style=dashed, color="#2F9E8F"];
+  labelloc="b"; fontsize=11; fontname="Helvetica"; label="Hey Bus wake model (round 5)\n\n49 ops, 71 tensors, 24,736 weights, 24,736 MACs, 3,792 B state, 58,080 B file";
+}
