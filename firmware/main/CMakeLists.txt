@@ -24,7 +24,7 @@ set(MICROFRONTEND_SRCS
     "microfrontend/kissfft/tools/kiss_fftr.cc")
 
 idf_component_register(
-  SRCS "main.c" "audio.c" "storage.c" "vad.c" "record.c" "mfcc.c" "stream.c" "wav.c" "prompts.c" "recognise.cc"
+  SRCS "main.c" "audio.c" "storage.c" "vad.c" "record.c" "mfcc.c" "mfcc_fft.cc" "stream.c" "wav.c" "prompts.c" "recognise.cc"
        "wake.cc" "wakefront.c" "beep.c" "console.c" ${MICROFRONTEND_SRCS}
        "ui/ui_menu.c" "ui/ui_record.c" "ui/ui_usb.c" "ui/ui_recognise.c" "ui/ui_wake.c" "ui/font_prompt_28.c" "usb_drive.c"
   INCLUDE_DIRS "." "microfrontend" "microfrontend/kissfft"

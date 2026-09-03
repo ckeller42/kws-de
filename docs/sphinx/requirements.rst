@@ -22,6 +22,20 @@ Front end (MFCC)
    ``firmware/main/gen/features_config.h`` — never hard-coded a second time
    in C.
 
+.. req:: MFCC front end uses an exact 480-point FFT
+   :id: REQ_FW_FRONTEND_FFT
+   :status: implemented
+
+   The per-frame spectrum is a real FFT over the vendored kissfft
+   (``firmware/main/mfcc_fft.cc``, ``kiss_fftr`` at nfft = 480 = 2^5*3*5, an
+   exact mixed radix), never a zero-padded 512-point transform: padding
+   changes the bin spacing and hence the mel energies the models were
+   trained on. Feature parity with the Python front end
+   (:need:`REQ_FW_MFCC_PARITY`) is unaffected by the transform — max
+   absolute deviation 5.4e-4, and 0 LSB on the int8 tensor fed to the
+   command model. The measured front-end cost on the CoreS3 is 3.0 ms per
+   new frame, against 8.5 ms for the naive DFT it replaced.
+
 .. req:: MFCC int8 quantisation matches the model's input scale/zero-point
    :id: REQ_FW_MFCC_QUANTIZE
    :status: implemented

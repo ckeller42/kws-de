@@ -588,6 +588,27 @@ held-out data — **isolated-word accuracy 0.19** (`spk01`, 16 clips) and **0.27
 model reporting ~0.9 on its own held-out MSWC/TTS split recognises roughly a quarter of what
 the real microphone hears.
 
+**Exact 480-point FFT in the MFCC front end (2026-09-03).** The streaming command recogniser
+ran at **164–181 ms per step** on the CoreS3, and the front end, not the model, was the cost:
+`firmware/main/mfcc.c` computed each frame's 480-bin spectrum as a naive DFT — 241 bins ×
+480 samples ≈ 116k multiply-adds per frame, ~8.5 ms of the step per new frame. 480 = 2^5·3·5
+is not a power of two, which is why the DFT was there in the first place; it is, however, an
+exact kissfft mixed radix (`kiss_fftr` at nfft = 480 factors its 240-point complex half
+transform as 4,4,3,5, every stage a dedicated butterfly). The kissfft already vendored for
+the wake front end now serves the command front end too, through a small C-linkage shim
+(`firmware/main/mfcc_fft.cc`); the tempting alternative — zero-padding to 512 — was rejected
+because it changes the bin spacing and therefore the mel energies the models were trained on.
+Measured, same device, same firmware otherwise: step **164–181 ms → 82–85 ms**, and per new
+frame **8.5 ms → 3.0 ms** (fitting step time against the 9–15 frames each step consumes).
+Features did not move: host max |Δ| against the Python reference is **5.4e-4** absolute
+(1.3e-6 of the reference peak) both before and after — the residual is float32-vs-float64
+accumulation in the log/DCT stage, not the transform — and the int8 tensor actually fed to
+the command model is **identical (0 LSB)** to the one quantised from the Python features, a
+new assertion in `firmware/test/test_mfcc.c`. The wake path is untouched (5 ms/step before and
+after); it runs the TFLM microfrontend, not this code. What the FFT does *not* explain is the
+~54 ms fixed cost per step that the same fit exposes, independent of frame count — that is
+TFLM `Invoke`, and the next note takes it apart.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
