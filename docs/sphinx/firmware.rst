@@ -144,6 +144,7 @@ checkout that built it, so this is what makes "which models is this device
 running" answerable from the device rather than by rebuilding and comparing
 bytes. The digest is over the exact flatbuffer that becomes the C array, so
 the stamp changes when and only when the model does.
+
 - Every command ends with ``ok`` or ``err <reason>`` on its own line, so a
   host script can tell when it finished.
 
