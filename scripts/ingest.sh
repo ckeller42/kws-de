@@ -3,6 +3,7 @@
 # data root: put the device in USB-drive mode over its serial console, run the
 # host-side pull script, rsync the result here, return the device to the menu.
 # Usage: ingest.sh -H host [-p /dev/cu.usbmodemNNN] [-d recordings_root] [-n]
+# Env:   KWSREC_HOST_PYTHON  python on the host with pyserial (default python3)
 #   host: ssh name of the machine the CoreS3 is plugged into (never hard-coded here)
 set -euo pipefail
 
@@ -40,14 +41,40 @@ wait_for() {
   return 1
 }
 
+
+# Send one console line over the device's serial port on the host. The port is the
+# ESP32-S3's USB-Serial-JTAG: a shell redirect (`printf > port`) toggles DTR/RTS on
+# open and resets the chip, losing the command. pyserial with both lines held low
+# does not. KWSREC_HOST_PYTHON names a python on the host that has pyserial
+# (default: python3).
+serial_send() {
+  local py=${KWSREC_HOST_PYTHON:-python3}
+  # shellcheck disable=SC2029 # $port/$1 expand client-side on purpose
+  run ssh "$host" "$py - <<'PYEOF'
+import serial, time
+s = serial.Serial(); s.port = '$port'; s.baudrate = 115200; s.timeout = 1
+s.dtr = False; s.rts = False; s.open(); s.dtr = False; s.rts = False
+time.sleep(2.5); s.read(1 << 20)
+s.write(b'$1\\n'); s.flush(); time.sleep(0.8)
+try:
+    s.read(1 << 16); s.close()
+except Exception:
+    pass  # the port vanishes when the device switches USB mode: expected
+PYEOF"
+}
+
 if [[ -z $port ]]; then
   ssh_probe 'ls /dev/cu.usbmodem* 2>/dev/null | head -1'
   port=$reply
   [[ -n $port ]] || { echo "no /dev/cu.usbmodem* on $host — device unplugged or already in USB-drive mode" >&2; exit 1; }
 fi
 # 1. device -> USB drive mode (serial link disappears while the drive is exported)
-# shellcheck disable=SC2029 # $port must expand client-side: it names the file on the remote we write to
-run ssh "$host" "printf 'mode usb\n' > '$port'"
+ssh_probe 'ls -d /Volumes/KWSREC 2>/dev/null'
+if [[ -n $reply ]]; then
+  echo "KWSREC already mounted on $host — device is in USB-drive mode, not switching"
+else
+  serial_send "mode usb"
+fi
 wait_for 'ls /Volumes/KWSREC 2>/dev/null' || { echo "KWSREC did not mount on $host within 20 s" >&2; exit 3; }
 # 2. copy the pull script over (the host need not carry a kws-de checkout) and run it
 #    there into a stamped stage dir. Never wipe the host stage ourselves — it is the
@@ -85,6 +112,5 @@ if wait_for 'ls /dev/cu.usbmodem* 2>/dev/null | head -1'; then
 else
   echo "warning: no /dev/cu.usbmodem* on $host within 20 s — still using '$port'" >&2
 fi
-# shellcheck disable=SC2029 # $port must expand client-side: it names the file on the remote we write to
-run ssh "$host" "printf 'mode menu\n' > '$port'" || echo "warning: could not send 'mode menu' — tap Menu on the device" >&2
+serial_send "mode menu" || echo "warning: could not send 'mode menu' — tap Menu on the device" >&2
 echo "ingested $local_wavs takes -> $dest"
