@@ -222,6 +222,20 @@ def main() -> None:  # pragma: no cover - I/O wrapper
         "INT8 conversion, instead of a plain float model + post-training "
         "quantisation; output artefacts get an extra _qat suffix",
     )
+    ap.add_argument(
+        "--width",
+        type=int,
+        default=32,
+        help="conv/depthwise-separable channel count the model was built with "
+        "(default 32, the shipped size); non-default widths get a _w<N> suffix "
+        "on every output artefact",
+    )
+    ap.add_argument(
+        "--stats",
+        action="store_true",
+        help="print params and MACs of the exported model (kws_de.budgets.estimate_macs) "
+        "and exit without writing any files",
+    )
     args = ap.parse_args()
     if args.firmware:
         args.v2 = True
@@ -239,6 +253,8 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     suffix = prefix.removeprefix("features")
     if suffix == "_v2" or not args.v2:  # v2 IS the stock command model: no suffix
         suffix = ""
+    if args.width != 32:
+        suffix += f"_w{args.width}"
     if args.qat:
         suffix += "_qat"
     qat_tag = "_qat" if args.qat else ""
@@ -252,8 +268,20 @@ def main() -> None:  # pragma: no cover - I/O wrapper
             model = tf.keras.models.load_model(config.MODELS_DIR / model_name)
     else:
         model = tf.keras.models.load_model(config.MODELS_DIR / model_name)
+    if args.stats:
+        from kws_de.budgets import estimate_macs
+
+        macs = estimate_macs(model)
+        params = model.count_params()
+        print(f"[stats] {model_name}: {params:,} params, {macs:,} MACs")
+        return
     d = np.load(config.DATA_DIR / f"{prefix}_train.npz")
     blob = to_int8_tflite(model, balanced_calibration(d["X"], d["y"]))
+    test_path = config.DATA_DIR / f"{prefix}_test.npz"
+    if test_path.exists():
+        t = np.load(test_path)
+        acc = float((_tflite_predict(blob, t["X"]) == t["y"]).mean())
+        print(f"INT8 test accuracy: {acc:.4f}")
     (out / tflite_name).write_bytes(blob)
     write_c_array(blob, out / header_name)
     print(f"[export] wrote {tflite_name} + {header_name} from {model_name} ({prefix})")
