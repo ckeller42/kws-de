@@ -1,5 +1,6 @@
 #include "wake.h"
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include "arena.h"
 #include "audio.h"
@@ -12,6 +13,7 @@
 #include "freertos/task.h"
 #include "gen/wake_model_config.h"
 #include "gen/wake_model_data.h"
+#include "nn_timers.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/micro_resource_variable.h"
@@ -114,10 +116,14 @@ static void wake_task(void *)
 
             int64_t t0 = esp_timer_get_time();
             wakefront_take(KWS_WAKE_FRAMES, in->data.int8);
+            NN_TIMERS_RESET();
+            int64_t t_invoke = esp_timer_get_time();
             if (interp.Invoke() != kTfLiteOk) { ESP_LOGE(TAG, "Invoke failed"); continue; }
+            int64_t invoke_us = esp_timer_get_time() - t_invoke;
             /* uint8 output: prob = (q - zero_point) * scale, i.e. q/256. */
             float prob = (out->data.uint8[0] - KWS_WAKE_OUTPUT_ZERO_POINT) * KWS_WAKE_OUTPUT_SCALE;
-            uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+            int64_t step_us = esp_timer_get_time() - t0;
+            uint32_t ms = (uint32_t)(step_us / 1000);
 
             consecutive = (prob >= WAKE_THRESHOLD) ? consecutive + 1 : 0;
             bool fired = false;
@@ -130,13 +136,22 @@ static void wake_task(void *)
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             /* Tuning trace: the peak probability of the last 2 s, so the serial
                log alone shows whether the model *hears* the phrase (peak near 1)
-               or the threshold/consecutive gate is what stops it firing. */
+               or the threshold/consecutive gate is what stops it firing.
+               Step cost is reported as mean +/- sd in microseconds over the same
+               window: preemption by the LVGL task shows up as spread, not as a
+               higher mean, so a single sample cannot tell the two apart. */
             static float peak = 0; static uint32_t nsteps = 0, last_trace = 0;
+            static int64_t sum_us = 0, sumsq_us = 0;
             if (prob > peak) peak = prob;
             nsteps++;
+            sum_us += step_us; sumsq_us += step_us * step_us;
             if (now_ms - last_trace >= 2000) {
-                ESP_LOGI(TAG, "peak %.3f over %lu steps, %lu ms/step", (double)peak, (unsigned long)nsteps, (unsigned long)ms);
-                peak = 0; nsteps = 0; last_trace = now_ms;
+                int64_t mean = sum_us / (int64_t)nsteps;
+                int64_t var = sumsq_us / (int64_t)nsteps - mean * mean;
+                ESP_LOGI(TAG, "peak %.3f over %lu steps, step %lld +/- %lld us (invoke %lld us: " NN_TIMERS_FMT ")",
+                         (double)peak, (unsigned long)nsteps, mean, (int64_t)std::sqrt((double)(var > 0 ? var : 0)),
+                         invoke_us, NN_TIMERS_ARGS(invoke_us));
+                peak = 0; nsteps = 0; last_trace = now_ms; sum_us = sumsq_us = 0;
             }
             xSemaphoreTake(s_lock, portMAX_DELAY);
             s_st.prob = prob;

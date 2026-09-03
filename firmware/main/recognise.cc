@@ -15,6 +15,7 @@
 #include "gen/model_config.h"
 #include "gen/model_data.h"
 #include "mfcc.h"
+#include "nn_timers.h"
 #include "stream.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
@@ -80,19 +81,22 @@ static void recognise_task(void *)
            with start advancing by KWS_HOP, the same layout as mfcc_compute(), so
            the features are bit-identical (the host test checks streaming == one-shot). */
         int pushed = 0;
+        int64_t t_fe = esp_timer_get_time();
         while (audio_write_pos() >= frame_start + KWS_WIN && pushed < KWS_N_FRAMES) {
             audio_read(frame_start + KWS_WIN, frame, KWS_WIN);
             mfcc_push_frame(&mstate, frame);
             frame_start += KWS_HOP;
             pushed++;
         }
+        int64_t fe_us = esp_timer_get_time() - t_fe;
         if (audio_write_pos() > frame_start + 2 * KWS_SAMPLE_RATE) { primed = false; continue; }  /* stalled: resync */
         if (mstate.count < KWS_N_FRAMES) continue;         /* not a full 1 s of frames yet */
         mfcc_finish(&mstate, feats);
         mfcc_quantize(feats, in->data.int8, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
+        NN_TIMERS_RESET();
         int64_t t_invoke = esp_timer_get_time();
         if (interp.Invoke() != kTfLiteOk) { ESP_LOGE(TAG, "Invoke failed"); continue; }
-        uint32_t invoke_ms = (uint32_t)((esp_timer_get_time() - t_invoke) / 1000);
+        int64_t invoke_us = esp_timer_get_time() - t_invoke;
         int best = 0;
         for (int i = 0; i < KWS_NUM_LABELS; i++) {
             probs[i] = (out->data.int8[i] - KWS_MODEL_OUTPUT_ZERO_POINT) * KWS_MODEL_OUTPUT_SCALE;
@@ -101,8 +105,9 @@ static void recognise_task(void *)
         int fired = stream_push(&stream, probs);
         uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
         if ((++steps % 50) == 0)                           /* ~every 5 s: front-end + inference cost */
-            ESP_LOGI(TAG, "step %lu ms (invoke %lu ms, %d new frames)",
-                     (unsigned long)ms, (unsigned long)invoke_ms, pushed);
+            ESP_LOGI(TAG, "step %lu ms (front-end %lld us over %d new frames, invoke %lld us: " NN_TIMERS_FMT ")",
+                     (unsigned long)ms, pushed ? fe_us / pushed : (int64_t)0, pushed,
+                     invoke_us, NN_TIMERS_ARGS(invoke_us));
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_st.infer_ms = ms; s_st.arena_used = interp.arena_used_bytes();
