@@ -75,15 +75,16 @@ static void nvs_bump_speaker(void)
     nvs_close(h);
 }
 
-/* /rec/spk03/licht/001.wav | /rec/spk03/hey-bus/001.wav | /rec/spk03/_phrase_/licht-hinten-an_001.wav | /rec/spk03/_neg_/... */
+/* <root>/spk03/licht/001.wav | <root>/spk03/hey-bus/001.wav | <root>/spk03/_phrase_/licht-hinten-an_001.wav | <root>/spk03/_neg_/...
+   where <root> is storage_root(): /sdcard with a card in the slot, /rec on flash. */
 static int next_path(char *out, size_t n)
 {
     char dir[64];
     int slugdir = s_prompts.set == PROMPT_WORDS || s_prompts.set == PROMPT_WAKE;
     const char *sub = slugdir ? prompt_slug(&s_prompts)
                     : s_prompts.set == PROMPT_SENTENCES ? "_phrase_" : "_neg_";
-    snprintf(dir, sizeof dir, "/rec/%s", s_st.speaker);            mkdir(dir, 0777);
-    snprintf(dir, sizeof dir, "/rec/%s/%s", s_st.speaker, sub);    mkdir(dir, 0777);
+    snprintf(dir, sizeof dir, "%s/%s", storage_root(), s_st.speaker);         mkdir(dir, 0777);
+    snprintf(dir, sizeof dir, "%s/%s/%s", storage_root(), s_st.speaker, sub); mkdir(dir, 0777);
     for (int i = 1; i < 1000; i++) {
         struct stat st;
         if (slugdir) snprintf(out, n, "%s/%03d.wav", dir, i);
@@ -96,12 +97,14 @@ static int next_path(char *out, size_t n)
 static void append_session_csv(const char *path, uint32_t ms, float peak_dbfs)
 {
     char csv[64];
-    snprintf(csv, sizeof csv, "/rec/%s/session.csv", s_st.speaker);
+    snprintf(csv, sizeof csv, "%s/%s/session.csv", storage_root(), s_st.speaker);
     struct stat st; int fresh = stat(csv, &st) != 0;
     FILE *f = fopen(csv, "a");
     if (!f) { ESP_LOGE(TAG, "csv open failed"); return; }
     if (fresh) fputs("prompt,file,ms,peak_dbfs,set,seed,ts\n", f);
-    fprintf(f, "\"%s\",%s,%lu,%.1f,%s,%lu,%lld\n", prompt_text(&s_prompts), path + 5 /* strip /rec/ */,
+    /* the file column stays root-relative (spkNN/...), so the host-side ingest
+       reads the same rows whichever volume the take was written to */
+    fprintf(f, "\"%s\",%s,%lu,%.1f,%s,%lu,%lld\n", prompt_text(&s_prompts), path + strlen(storage_root()) + 1,
             (unsigned long)ms, peak_dbfs, prompt_set_name(s_prompts.set), (unsigned long)s_prompts.seed,
             esp_timer_get_time() / 1000);
     fclose(f);

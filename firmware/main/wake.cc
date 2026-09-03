@@ -16,6 +16,7 @@
 #include "gen/wake_model_data.h"
 #include "nn_timers.h"
 #include "recognise.h"
+#include "storage.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/micro_resource_variable.h"
@@ -54,7 +55,11 @@ static volatile bool s_inject;       /* console-injected fire, see wake_inject_f
 static void log_fire(uint32_t ms, float prob)
 {
     if (!s_active) return;
-    if (!s_log) s_log = fopen("/rec/wake.log", "a");
+    if (!s_log) {
+        char p[32];
+        snprintf(p, sizeof p, "%s/wake.log", storage_root());
+        s_log = fopen(p, "a");
+    }
     if (!s_log) return;
     fprintf(s_log, "[Wake] %lu %.3f\n", (unsigned long)ms, (double)prob);
     fflush(s_log);

@@ -28,5 +28,5 @@ idf_component_register(
        "wake.cc" "wakefront.c" "assist_gate.c" "beep.c" "console.c" ${MICROFRONTEND_SRCS}
        "ui/ui_menu.c" "ui/ui_record.c" "ui/ui_usb.c" "ui/ui_recognise.c" "ui/ui_wake.c" "ui/ui_assist.c" "ui/font_prompt_28.c" "usb_drive.c"
   INCLUDE_DIRS "." "microfrontend" "microfrontend/kissfft"
-  REQUIRES fatfs wear_levelling nvs_flash esp_timer esp_partition esp_tinyusb driver
+  REQUIRES fatfs wear_levelling nvs_flash esp_timer esp_partition esp_tinyusb driver sdmmc
   PRIV_REQUIRES esp-tflite-micro)

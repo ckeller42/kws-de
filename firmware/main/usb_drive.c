@@ -18,8 +18,10 @@ esp_err_t usb_drive_enter(void)
     /* Composite MSC + CDC-ACM device. Default descriptors are enough: esp_tinyusb
        builds the composite config descriptor (and picks the IAD-compatible
        device class) from CONFIG_TINYUSB_{MSC,CDC}_ENABLED, so no custom
-       descriptor set is needed here. Label "KWSREC" is a FAT property, set at
-       first mount (storage.c). */
+       descriptor set is needed here. The media exported is whichever one
+       storage.c registered with esp_tinyusb — the microSD if a card is in the
+       slot, the flash partition otherwise — and the label "KWSREC" is a FAT
+       property forced on both at mount (storage.c). */
     const tinyusb_config_t cfg = {0};
     ESP_RETURN_ON_ERROR(tinyusb_driver_install(&cfg), TAG, "tinyusb install");
 
@@ -34,7 +36,7 @@ esp_err_t usb_drive_enter(void)
        console.c polls the CDC port directly while this mode is active. */
     ESP_RETURN_ON_ERROR(esp_tusb_init_console(TINYUSB_CDC_ACM_0), TAG, "cdc console");
 
-    ESP_LOGI(TAG, "exposed /rec as MSC, console moved to CDC-ACM");
+    ESP_LOGI(TAG, "exposed %s as MSC, console moved to CDC-ACM", storage_root());
     return ESP_OK;
 }
 

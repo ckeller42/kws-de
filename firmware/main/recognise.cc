@@ -17,6 +17,7 @@
 #include "gen/test_vectors.h"
 #include "mfcc.h"
 #include "nn_timers.h"
+#include "storage.h"
 #include "stream.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
@@ -38,7 +39,11 @@ static volatile int64_t s_off_at_us;   /* assist window deadline, 0 = run until 
 static void log_fire(const char *word, float conf)
 {
     if (!s_active) return;
-    if (!s_log) s_log = fopen("/rec/recognise.log", "a");
+    if (!s_log) {
+        char p[32];
+        snprintf(p, sizeof p, "%s/recognise.log", storage_root());
+        s_log = fopen(p, "a");
+    }
     if (!s_log) return;
     fprintf(s_log, "[Log] %lld %s %.2f\n", esp_timer_get_time() / 1000, word, conf);
     fflush(s_log);
