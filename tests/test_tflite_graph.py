@@ -1,7 +1,12 @@
+import dataclasses
+
+import flatbuffers
 import numpy as np
 import pytest
 
 tf = pytest.importorskip("tensorflow")
+
+from tensorflow.lite.python import schema_py_generated as schema  # noqa: E402
 
 from kws_de import tflite_graph  # noqa: E402 -- import after importorskip, on purpose
 
@@ -71,6 +76,37 @@ def test_graph_io_and_no_variables(tiny_tflite):
     assert g.init_subgraph is None
 
 
+def test_opname_reports_custom_code():
+    """Custom ops (e.g. TFLite-Micro's PLACEHOLDER_FOR_GREATER_OP_CODES escape
+    hatch) must name the op so refusals are actionable, not just "CUSTOM"."""
+    model = schema.ModelT()
+    model.version = 3
+    code = schema.OperatorCodeT()
+    code.builtinCode = schema.BuiltinOperator.CUSTOM
+    code.customCode = b"MyCustomOp"
+    model.operatorCodes = [code]
+    t = schema.TensorT()
+    t.shape = [1]
+    t.type = schema.TensorType.INT8
+    t.name = b"t0"
+    t.buffer = 0
+    op = schema.OperatorT()
+    op.opcodeIndex = 0
+    op.inputs = [0]
+    op.outputs = [0]
+    sg = schema.SubGraphT()
+    sg.tensors = [t]
+    sg.operators = [op]
+    sg.inputs = [0]
+    sg.outputs = [0]
+    model.subgraphs = [sg]
+    model.buffers = [schema.BufferT()]
+    builder = flatbuffers.Builder(1024)
+    builder.Finish(model.Pack(builder), b"TFL3")
+    g = tflite_graph.read_graph(bytes(builder.Output()))
+    assert g.ops[0].name == "CUSTOM:MyCustomOp"
+
+
 def test_probe_model_reproduces_one_op(tiny_tflite):
     """A single-op model rebuilt from one op runs on the interpreter with the
     same quantisation -- this is how bit-exact activation tables are derived."""
@@ -83,3 +119,14 @@ def test_probe_model_reproduces_one_op(tiny_tflite):
     assert tuple(int(d) for d in inp["shape"]) == g.tensors[conv.inputs[0]].shape
     assert tuple(int(d) for d in out["shape"]) == g.tensors[conv.outputs[0]].shape
     assert float(out["quantization"][0]) == pytest.approx(g.tensors[conv.outputs[0]].scales[0])
+
+
+def test_probe_model_handles_missing_output(tiny_tflite):
+    """The -1 sentinel (an op's optional output not produced) must pass through
+    untouched, the same way probe_model already handles it on inputs."""
+    g = tflite_graph.read_graph(tiny_tflite)
+    conv = g.ops[0]
+    op = dataclasses.replace(conv, outputs=(-1,))
+    probe = tflite_graph.probe_model(tiny_tflite, op)
+    m = schema.ModelT.InitFromPackedBuf(bytearray(probe), 0)
+    assert list(m.subgraphs[0].operators[0].outputs) == [-1]

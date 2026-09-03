@@ -99,7 +99,11 @@ class Graph:
 
 def _opname(model, opcode_index: int) -> str:
     code = model.operatorCodes[opcode_index]
-    return _OP_NAMES[max(int(code.builtinCode), int(code.deprecatedBuiltinCode))]
+    name = _OP_NAMES[max(int(code.builtinCode), int(code.deprecatedBuiltinCode))]
+    if name == "CUSTOM":
+        custom = bytes(code.customCode).decode() if code.customCode is not None else "?"
+        return f"CUSTOM:{custom}"
+    return name
 
 
 def _options(op) -> dict[str, object]:
@@ -252,7 +256,7 @@ def probe_model(tflite: bytes, op: Op, subgraph: int = 0) -> bytes:
         return idx
 
     new_inputs = [add_tensor(int(i)) if int(i) >= 0 else -1 for i in op.inputs]
-    new_outputs = [add_tensor(int(i)) for i in op.outputs]
+    new_outputs = [add_tensor(int(i)) if int(i) >= 0 else -1 for i in op.outputs]
 
     new_sg = schema.SubGraphT()
     new_sg.tensors = tensors
