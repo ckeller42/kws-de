@@ -492,6 +492,13 @@ consecutive steps, 1.5 s refractory); a synthetic clip played through a laptop s
 Real "Hey Bus" takes from the recording session are the next positives; false-accept rate on
 real speech is still unmeasured.
 
+**Leaving USB mode (2026-09-03).** First fully remote ingest: `mode usb` over the JTAG console,
+the CDC-ACM port appears next to the mounted drive, pull, `mode menu` over CDC — and then no USB
+device at all on the host: once TinyUSB releases the PHY the USB-Serial-JTAG peripheral does not
+re-enumerate until a physical re-plug. Leaving USB mode now restarts the chip (menu in ~2 s,
+console back), which is what the command means anyway; a PHY re-attach for the JTAG peripheral
+is the cleaner upgrade.
+
 ### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
 
 Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the
