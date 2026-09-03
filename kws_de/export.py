@@ -10,6 +10,8 @@ if "--qat" in sys.argv and os.environ.get("TF_USE_LEGACY_KERAS") != "1":
     os.execv(sys.executable, [sys.executable, "-m", "kws_de.export", *sys.argv[1:]])
 
 import argparse  # noqa: E402
+import datetime  # noqa: E402
+import hashlib  # noqa: E402
 import json  # noqa: E402
 import pathlib  # noqa: E402
 
@@ -64,6 +66,21 @@ COMMAND_ARENA_BYTES = 65536  # device reports 55,024 B used
 WAKE_ARENA_BYTES = 40960  # device reports 31,396 B used
 
 
+def model_stamp(blob: bytes, source) -> str:
+    """`<file name>@<first 8 hex of sha256> <mtime as YYYY-MM-DD>`.
+
+    Baked into the generated config headers so the device can say which model
+    it is actually running. A firmware image outlives the checkout that built
+    it, and "which model is on the CoreS3 right now" was previously answerable
+    only by rebuilding and comparing bytes. The digest is over the exact
+    flatbuffer that becomes the C array, so the stamp changes when and only
+    when the model does.
+    """
+    source = pathlib.Path(source)
+    day = datetime.date.fromtimestamp(source.stat().st_mtime).isoformat()
+    return f"{source.name}@{hashlib.sha256(blob).hexdigest()[:8]} {day}"
+
+
 def write_c_array(tflite: bytes, path, name: str = "g_model") -> None:
     body = ", ".join(str(b) for b in tflite)
     with open(path, "w") as fh:
@@ -72,7 +89,7 @@ def write_c_array(tflite: bytes, path, name: str = "g_model") -> None:
         fh.write(f"const unsigned int {name}_len = {len(tflite)};\n")
 
 
-def write_model_config(tflite: bytes, path) -> dict:
+def write_model_config(tflite: bytes, path, source) -> dict:
     """Quantisation params + the TFLM arena size for firmware/main/gen/model_config.h.
 
     The arena is COMMAND_ARENA_BYTES — the device's measured `arena_used_bytes()`
@@ -98,12 +115,14 @@ def write_model_config(tflite: bytes, path) -> dict:
         f"#define KWS_MODEL_OUTPUT_ZERO_POINT {int(out['quantization'][1])}",
         f"#define KWS_MODEL_ARENA_BYTES {arena}",
         f"#define KWS_MODEL_NUM_CLASSES {int(out['shape'][-1])}",
+        f'#define KWS_MODEL_ID "{model_stamp(tflite, source)}"',
+        f"#define KWS_MODEL_BYTES {len(tflite)}",
     ]
     pathlib.Path(path).write_text("\n".join(lines) + "\n")
     return {"arena_bytes": arena, "input_scale": float(inp["quantization"][0])}
 
 
-def write_wake_config(tflite: bytes, path) -> dict:
+def write_wake_config(tflite: bytes, path, source) -> dict:
     """Quantisation params + arena estimate for firmware/main/gen/wake_model_config.h.
 
     The "Hey Bus" model is a microWakeWord *streaming* model: it is trained
@@ -134,6 +153,8 @@ def write_wake_config(tflite: bytes, path) -> dict:
         f"#define KWS_WAKE_ARENA_BYTES {arena}",
         f"#define KWS_WAKE_FRAMES {frames}",
         f"#define KWS_WAKE_FEATURES {features}",
+        f'#define KWS_WAKE_MODEL_ID "{model_stamp(tflite, source)}"',
+        f"#define KWS_WAKE_MODEL_BYTES {len(tflite)}",
     ]
     pathlib.Path(path).write_text("\n".join(lines) + "\n")
     return {"arena_bytes": arena, "frames": frames, "features": features}
@@ -150,7 +171,7 @@ def write_wake_headers(tflite_path, gen_dir) -> dict | None:
     blob = tflite_path.read_bytes()
     gen_dir = pathlib.Path(gen_dir)
     write_c_array(blob, gen_dir / "wake_model_data.h", name="g_wake_model")
-    info = write_wake_config(blob, gen_dir / "wake_model_config.h")
+    info = write_wake_config(blob, gen_dir / "wake_model_config.h", tflite_path)
     print(
         f"wake model: {len(blob)} B, arena {info['arena_bytes']} B, "
         f"input {info['frames']}x{info['features']}"
@@ -318,7 +339,7 @@ def main() -> None:  # pragma: no cover - I/O wrapper
         gen = pathlib.Path("firmware/main/gen")
         gen.mkdir(parents=True, exist_ok=True)
         write_c_array(blob, gen / "model_data.h")
-        write_model_config(blob, gen / "model_config.h")
+        write_model_config(blob, gen / "model_config.h", out / tflite_name)
         write_wake_headers(config.MODELS_DIR / "hey_bus.tflite", gen)
 
 

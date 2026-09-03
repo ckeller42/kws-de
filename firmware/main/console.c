@@ -7,6 +7,8 @@
 #include "tusb_cdc_acm.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "gen/model_config.h"
+#include "gen/wake_model_config.h"
 #include "record.h"
 #include "ui/ui.h"
 
@@ -61,6 +63,7 @@ static void handle_line(char *line)
     } else if (strcmp(cmd, "status") == 0) {
         ui_mode_t m = app_get_mode();
         printf("mode %s\n", mode_name(m));
+        printf("models command=%s wake=%s\n", KWS_MODEL_ID, KWS_WAKE_MODEL_ID);
         if (m == UI_MODE_RECORD || m == UI_MODE_RECORD_WAKE) {
             record_status_t st;
             record_get_status(&st);

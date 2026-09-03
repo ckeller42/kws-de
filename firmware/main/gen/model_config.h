@@ -6,3 +6,5 @@
 #define KWS_MODEL_OUTPUT_ZERO_POINT -128
 #define KWS_MODEL_ARENA_BYTES 65536
 #define KWS_MODEL_NUM_CLASSES 23
+#define KWS_MODEL_ID "command_v3_qat.tflite@fc36da9f 2026-09-03"
+#define KWS_MODEL_BYTES 17880

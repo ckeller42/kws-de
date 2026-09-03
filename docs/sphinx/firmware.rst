@@ -121,13 +121,29 @@ The console port accepts newline-terminated commands
 
 .. code-block:: text
 
-   mode menu|record|recordwake|recognise|wake|usb
+   mode menu|record|recordwake|recognise|wake|assist|usb
    status
+   wakefire
 
 - ``mode <name>`` switches the app mode, same as tapping the matching
   menu/back button.
-- ``status`` prints the current mode, and in record/record-wake mode also
+- ``status`` prints the current mode, the model stamps as
+  ``models command=<id> wake=<id>``, and in record/record-wake mode also
   the recorder's phase/index/count/speaker.
+- ``wakefire`` injects one synthetic wake fire down the same path as a real
+  one — a measurement hook for the assist-mode duty cycle
+  (:need:`REQ_FW_ASSIST_GATE`), not a feature.
+
+A **model stamp** is ``<file name>@<first 8 hex of the tflite's sha256>
+<date>``, for example ``command_v3_qat.tflite@fc36da9f 2026-09-03``.
+``kws-export --firmware`` generates it into ``gen/model_config.h`` and
+``gen/wake_model_config.h`` alongside ``KWS_MODEL_BYTES`` /
+``KWS_WAKE_MODEL_BYTES``, and the firmware logs both once at boot
+(``main: models: command <id>, wake <id>``). A firmware image outlives the
+checkout that built it, so this is what makes "which models is this device
+running" answerable from the device rather than by rebuilding and comparing
+bytes. The digest is over the exact flatbuffer that becomes the C array, so
+the stamp changes when and only when the model does.
 - Every command ends with ``ok`` or ``err <reason>`` on its own line, so a
   host script can tell when it finished.
 

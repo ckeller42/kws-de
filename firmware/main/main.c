@@ -10,6 +10,8 @@
 #include "wake.h"
 #include "usb_drive.h"
 #include "console.h"
+#include "gen/model_config.h"
+#include "gen/wake_model_config.h"
 #include "ui/ui.h"
 
 static const char *TAG = "main";
@@ -72,6 +74,10 @@ void app_main(void)
      * ponytail: hardcoded "0:" drive, revisit if a second FAT volume is ever added */
     char label[12] = {0};
     if (f_getlabel("0:", label, NULL) == FR_OK && label[0] == '\0') f_setlabel("0:KWSREC");
+    /* Which models this image actually carries. A firmware binary outlives the
+       checkout that built it, so the stamp (name@sha8 date, generated into the
+       model config headers) is the only way to answer that from the device. */
+    ESP_LOGI(TAG, "models: command %s, wake %s", KWS_MODEL_ID, KWS_WAKE_MODEL_ID);
     audio_start();
     /* Wake before recognise: only one TFLM arena fits internal SRAM, and the
        first caller takes it. The wake model is the always-on one and gains far
