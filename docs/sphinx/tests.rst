@@ -94,6 +94,48 @@ binary is a small ``assert``-based program built by
    config or the requantisation drifted. Also asserts the 3-row
    ``wakefront_take`` block the model consumes is oldest-row-first.
 
+.. test:: Generated inference matches the interpreter byte for byte
+   :id: TEST_INFER_PARITY
+   :status: passing
+   :links: REQ_FW_INFER_GENERATED, REQ_FW_HOST_TESTS_NO_IDF
+
+   ``firmware/test/test_wake_smoke.c``: compiles the committed generated wake
+   inference (``gen/wake_infer.c``) against esp-nn's ANSI-C reference kernels
+   and replays the 64 synthetic feature windows of
+   ``gen/wake_smoke_vectors.h``, asserting every step's output byte equals the
+   reference interpreter's answer frozen in the same header. Model-free and
+   data-free, so this is the one that runs in CI: ``wake smoke: 0/64 steps
+   differ``.
+
+   Two wider comparisons run only where the models and recordings are present
+   (a developer machine with ``KWS_DATA_ROOT``, never CI):
+   ``firmware/test/test_wake_parity.c`` replays the ten approved "Hey Bus"
+   takes plus the golden vector through the same generated code
+   (``wake parity: 0/635 steps differ (11 clips, 4200 B state)``), and
+   ``tests/test_codegen_parity.py`` extends the byte-for-byte comparison to
+   the command model (``command parity: 0/1564 bytes differ``). Both generate
+   their vectors into a scratch directory, never into the committed
+   ``firmware/main/gen``. Zero LSB difference is the pass condition
+   throughout; one differing byte fails.
+
+   On the device the same comparison runs once per wake-mode entry with
+   ``CONFIG_KWS_INFER_PARITY_LOG=y``, on live microphone features, and is
+   logged as ``parity: generated <a>, interpreter <b>``.
+
+.. test:: Generated arena stays within the TFLM arena
+   :id: TEST_INFER_ARENA
+   :status: passing
+   :links: REQ_FW_INFER_GENERATED, REQ_FW_ARENA_PLACEMENT
+
+   ``tests/test_codegen.py``: the first-fit lifetime planner's arena for each
+   model is asserted to be at or below the ``KWS_WAKE_ARENA_BYTES`` /
+   ``KWS_MODEL_ARENA_BYTES`` the firmware allocates for TFLM today, read from
+   the committed ``firmware/main/gen/`` headers, and the per-op esp-nn scratch
+   sizes are pinned to hand-derived
+   ``esp_nn_get_*_scratch_size_esp32s3`` values. The device confirms that
+   scratch figure at boot by asking the real esp-nn on the real chip for the
+   model's widest convolution and logging what it answers.
+
 Python tests (pytest)
 ----------------------
 

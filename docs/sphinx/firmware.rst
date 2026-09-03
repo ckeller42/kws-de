@@ -58,6 +58,24 @@ probability, and a fire counter. A fire turns the background green for
 ``[Wake] <ms> <prob>`` to ``wake.log`` on the recording volume. Back path: back button ->
 menu.
 
+The model itself runs on the generated inference path by default
+(:need:`REQ_FW_INFER_GENERATED`). Measured on the CoreS3 in one session, same
+build otherwise, two minutes of the peak trace per path: **wake step
+1.95 -> 1.26 ms** (median of the 2 s trace windows; the model evaluation
+alone, 1.76 -> 1.21 ms) and the within-window spread drops from ±469 to
+±129 µs. It costs **15,680 B of transient arena plus 4,200 B of ring state**,
+against the 40,960 B TFLM arena (31,388 B of it used) that stays allocated as
+the fallback — the boot line reads ``inference: generated (esp-nn), 15680 B
+arena + 4200 B state, esp-nn conv scratch 15552 B queried; TFLM arena 40960 B
+kept as fallback``, where the scratch figure is what the real
+``esp_nn_get_conv_scratch_size_esp32s3`` answers on the chip for this model's
+widest convolution — exactly the size the generator reserved. On entering the
+mode the two paths are run on the same live features and both answers logged
+(``parity: generated 71, interpreter 71``): identical, as the host tests
+require. Note the per-kernel esp-nn timers in the trace read zero on this
+path — they are esp-tflite-micro's wrappers, which the generated code does not
+go through; its cost is reported as the residual.
+
 Record
 ~~~~~~~
 
