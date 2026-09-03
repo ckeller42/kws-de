@@ -90,6 +90,8 @@ def rewrite_streaming(graph: tflite_graph.Graph) -> Plan:
                 f"op {op.index} {op.name} (-> t{out}) is not in the supported set"
             )
         for t in (*op.inputs, *op.outputs):
+            if t < 0:
+                continue  # TFLite's "absent optional tensor"; the emitters refuse it
             tensor = graph.tensors[t]
             if any(d <= 0 for d in tensor.shape):
                 raise UnsupportedGraph(
@@ -257,7 +259,7 @@ def plan_arena(plan: Plan, scratch_bytes: int = 0) -> Arena:
             last[t] = max(last.get(t, step), step)
         for t in op.inputs:
             t = plan.alias.get(t, t)
-            if graph.tensors[t].data is None:
+            if t >= 0 and graph.tensors[t].data is None:
                 last[t] = max(last.get(t, step), step)
 
     # A graph output has no consumer op -- its interval would otherwise
@@ -390,6 +392,146 @@ def padding_hw(in_h, in_w, k_h, k_w, s_h, s_w, padding) -> tuple[int, int, int, 
     return pad_h, pad_w, out_h, out_w
 
 
+# esp-nn's ESP32-S3 kernels do not allocate: the caller hands them a scratch
+# buffer and esp_nn_get_{conv,depthwise_conv}_scratch_size_esp32s3() says how
+# big. The host build links the ANSI kernels, whose _ansi variants return 0, so
+# the host can never discover the device's requirement -- an arena sized by the
+# host would overrun on the S3. These are ports of the S3 functions (esp-nn
+# v1.3.0 `src/convolution/esp_nn_conv_esp32s3.c` and
+# `src/convolution/esp_nn_depthwise_conv_s8_esp32s3.c`), branch for branch, so
+# the generated arena is sized for what actually runs on the device.
+_ESP_NN_ALIGN_MARGIN = 64  # alignment (16) + assembly pre/post access margin (48)
+
+
+def _conv_scratch(in_hw_c, out_hw_c, k_hw, stride, pad) -> int:
+    """Port of esp_nn_get_conv_scratch_size_esp32s3."""
+    in_h, in_w, in_c = in_hw_c
+    out_h, out_w, out_c = out_hw_c
+    k_h, k_w = k_hw
+    s_h, s_w = stride
+    pad_h, pad_w = pad
+    if (k_w, k_h, pad_w, pad_h, s_w, s_h) == (1, 1, 0, 0, 1, 1):
+        new_c = (in_c + 7) & ~7
+        transpose = 0 if in_w * in_h < 8 else 2 * (8 * new_c)
+        input_scratch = in_w * in_h * new_c if in_c % 8 else 0
+        return input_scratch + new_c * out_c + transpose + _ESP_NN_ALIGN_MARGIN
+    filter_row = k_w * in_c
+    window = k_w * k_h * in_c
+    if filter_row < 16 <= window:  # im2col path
+        aligned = (window + 15) & ~15
+        return out_c * 4 + 16 + out_c * aligned + 16 + aligned + _ESP_NN_ALIGN_MARGIN
+    new_c = (in_c + 15) & ~15
+    pad_right = max(0, (out_w - 1) * s_w + k_w - pad_w - in_w)
+    pad_bottom = max(0, (out_h - 1) * s_h + k_h - pad_h - in_h)
+    if (pad_w, pad_h, pad_right, pad_bottom) == (0, 0, 0, 0):
+        input_scratch = 0
+    else:
+        input_scratch = (in_w + pad_w + pad_right) * (in_h + pad_h + pad_bottom) * in_c
+    filter_scratch = k_w * k_h * new_c * out_c
+    aligned_row = ((filter_row + 15) // 16) * 16
+    return (
+        input_scratch
+        + filter_scratch
+        + aligned_row * k_h * out_c
+        + _ESP_NN_ALIGN_MARGIN
+        + out_c * 4
+    )
+
+
+def _depthwise_scratch(in_hw_c, out_hw_c, k_hw, stride, pad, ch_mult) -> int:
+    """Port of esp_nn_get_depthwise_conv_scratch_size_esp32s3."""
+    in_h, in_w, channels = in_hw_c
+    out_h, out_w, _ = out_hw_c
+    k_h, k_w = k_hw
+    s_h, s_w = stride
+    pad_h, pad_w = pad
+    filter_size = k_w * k_h * channels * ch_mult
+    input_size = in_w * in_h * channels
+    if ch_mult == 1 and channels % 8 == 0:
+        if (k_w, k_h) != (3, 3):
+            total_s16 = 2 * (filter_size + input_size)
+            if total_s16 <= 48 * 1024:
+                return total_s16 + 32
+            return 2 * filter_size + 2 * in_w * k_h * channels + 32  # tiled
+        if channels % 16 == 0 and (pad_w, pad_h) in ((1, 1), (0, 0)):
+            if pad_w or pad_h:
+                pad_width, pad_height = pad_w * 2, pad_h * 2
+            else:
+                pad_width = (out_w * s_w + k_w - 1) - in_w
+                pad_height = (out_h * s_h + k_h - 1) - in_h
+            if not (pad_width or pad_height):
+                return filter_size + 16
+            full_input = (in_w + pad_width) * (in_h + pad_height) * channels
+            if full_input <= 40 * 1024:
+                return filter_size + full_input + 16
+            return filter_size + (in_w + pad_width) * k_h * channels + 16  # tiled
+        if channels >= 12:
+            new_ch = (channels + 15) & ~15
+            total_pad_wd = pad_w * 2 + max(0, (out_w * s_w + 2) - in_w)
+            total_pad_ht = pad_h * 2 + max(0, (out_h * s_h + 2) - in_h)
+            new_input = (in_w + total_pad_wd) * (in_h + total_pad_ht) * new_ch
+            return 9 * new_ch + new_input + out_w * out_h * new_ch + 64
+        return 2 * (filter_size + input_size) + 32  # channels == 8: s16 path
+    if ch_mult == 1 and channels > 3:
+        padded = (channels + 7) & ~7
+        input_start = (k_w * k_h * padded * 2 + 15) & ~15
+        out_start = (input_start + in_w * in_h * padded * 2 + 15) & ~15
+        bias_start = (out_start + out_w * out_h * padded + 15) & ~15
+        return bias_start + 3 * padded * 4 + 16
+    if ch_mult % 4 == 0:
+        return 2 * (filter_size + input_size) + 32
+    return 32
+
+
+def scratch_bytes(graph, op) -> int:
+    """Scratch bytes esp-nn's ESP32-S3 kernels need for `op` (0 if none)."""
+    if op.name in ("CONV_2D", "DEPTHWISE_CONV_2D"):
+        in_hw_c, out_hw_c, (k_h, k_w, _), stride, pad = _conv_geometry(graph, op)
+        if op.name == "CONV_2D":
+            return _conv_scratch(in_hw_c, out_hw_c, (k_h, k_w), stride, pad)
+        ch_mult = int(op.options.get("depth_multiplier", 1))
+        return _depthwise_scratch(in_hw_c, out_hw_c, (k_h, k_w), stride, pad, ch_mult)
+    if op.name == "SOFTMAX":
+        # esp_nn_get_softmax_scratch_size_esp32s3: one int32 per depth column.
+        return 4 * int(graph.tensors[op.inputs[0]].shape[-1])
+    return 0
+
+
+def _check_u16(op, **values: int) -> None:
+    """esp-nn narrows several kernel arguments to uint16_t. A model that
+    overflows one would wrap silently at the call boundary, so refuse it here."""
+    for name, value in values.items():
+        if not 0 < int(value) <= 0xFFFF:
+            raise UnsupportedGraph(
+                f"op {op.index} {op.name}: {name}={value} does not fit the "
+                "uint16_t esp-nn narrows it to"
+            )
+
+
+def _bias(ctx: "Emitter", op, tag: str) -> str:
+    """The op's bias table. TFLite encodes an absent optional bias as tensor
+    index -1, which would index Python's *last* tensor -- somebody else's
+    buffer emitted as this op's bias. Refuse instead."""
+    if len(op.inputs) < 3 or op.inputs[2] < 0:
+        raise UnsupportedGraph(
+            f"op {op.index} {op.name}: no bias tensor (input 2 is absent); "
+            "only biased ops are emitted"
+        )
+    return ctx.const_i32(f"{tag}_b", tflite_graph.constant(ctx.plan.graph, op.inputs[2], "int32"))
+
+
+# esp-nn's Kconfig can turn on CONFIG_NN_SKIP_NUDGE ("use fast (non-bit-exact)
+# requantization"), which silently stops matching TFLM's reference arithmetic.
+# Every generated translation unit carries this so an sdkconfig flip is a build
+# failure on the device, not a quiet loss of parity.
+NUDGE_GUARD = (
+    "#if defined(SKIP_NUDGE) || defined(CONFIG_NN_SKIP_NUDGE)\n"
+    '#error "esp-nn SKIP_NUDGE requantisation is not bit-exact; '
+    'this model was generated for the exact path"\n'
+    "#endif\n"
+)
+
+
 @dataclasses.dataclass
 class Emitter:
     """Accumulates the pieces of one generated .c file."""
@@ -469,7 +611,7 @@ def _conv_constants(ctx: Emitter, op) -> tuple[str, str, str, str, str]:
     g = ctx.plan.graph
     tag = f"op{op.index}"
     weights = ctx.const_i8(f"{tag}_w", tflite_graph.constant(g, op.inputs[1]))
-    bias = ctx.const_i32(f"{tag}_b", tflite_graph.constant(g, op.inputs[2], "int32"))
+    bias = _bias(ctx, op, tag)
     mults, shifts = per_channel_multipliers(g, op)
     return (
         tag,
@@ -487,6 +629,7 @@ def emit_conv(ctx: Emitter, op) -> None:
     )
     tag, weights, bias, mult, shift = _conv_constants(ctx, op)
     act_min, act_max = activation_range(g, op)
+    _check_u16(op, in_h=in_h, in_w=in_w, in_c=in_c, out_h=out_h, out_w=out_w, out_c=out_c)
     in_zp = int(g.tensors[op.inputs[0]].zero_points[0])
     out_zp = int(g.tensors[op.outputs[0]].zero_points[0])
     ctx.emit("{")
@@ -523,6 +666,7 @@ def emit_depthwise(ctx: Emitter, op) -> None:
         )
     tag, weights, bias, mult, shift = _conv_constants(ctx, op)
     act_min, act_max = activation_range(g, op)
+    _check_u16(op, in_h=in_h, in_w=in_w, in_c=in_c, out_h=out_h, out_w=out_w, out_c=out_c)
     in_zp = int(g.tensors[op.inputs[0]].zero_points[0])
     out_zp = int(g.tensors[op.outputs[0]].zero_points[0])
     ctx.emit("{")
@@ -564,9 +708,10 @@ def emit_fully_connected(ctx: Emitter, op) -> None:
             f"op {op.index} FULLY_CONNECTED: output {out_t.shape} is {batches} batches; "
             "only a single batch is emitted"
         )
+    _check_u16(op, accum_depth=accum_depth, out_depth=out_depth)
     tag = f"op{op.index}"
     weights = ctx.const_i8(f"{tag}_w", tflite_graph.constant(g, op.inputs[1]))
-    bias = ctx.const_i32(f"{tag}_b", tflite_graph.constant(g, op.inputs[2], "int32"))
+    bias = _bias(ctx, op, tag)
     act_min, act_max = activation_range(g, op)
     in_zp = int(in_t.zero_points[0])
     w_zp = int(w.zero_points[0])
@@ -596,8 +741,6 @@ EMITTERS = {
     "FULLY_CONNECTED": emit_fully_connected,
 }
 
-_PROBE_SCRATCH = 8192  # host-only: esp-nn's ANSI kernels ask for no scratch at all
-
 
 def write_probe_vectors(tflite: bytes, op, inputs, expect, gen_dir) -> None:
     """Emit gen/conv_probe.c plus gen/conv_probe_vectors.h: one op wrapped in a
@@ -616,6 +759,8 @@ def write_probe_vectors(tflite: bytes, op, inputs, expect, gen_dir) -> None:
     (gen_dir / "conv_probe.c").write_text(
         "/* generated by kws-codegen -- do not edit */\n"
         '#include <stdint.h>\n#include "esp_nn.h"\n\n'
+        + NUDGE_GUARD
+        + "\n"
         + "\n".join(ctx.consts)
         + "\n\nvoid conv_probe(const int8_t *in, int8_t *out, void *scratch)\n{\n"
         # FULLY_CONNECTED takes no scratch buffer; the harness passes one anyway.
@@ -628,7 +773,10 @@ def write_probe_vectors(tflite: bytes, op, inputs, expect, gen_dir) -> None:
     (gen_dir / "conv_probe_vectors.h").write_text(
         "/* generated by kws-codegen -- do not edit */\n#pragma once\n#include <stdint.h>\n"
         f"#define CONV_PROBE_OUT_LEN {np.size(expect)}\n"
-        f"#define CONV_PROBE_SCRATCH {_PROBE_SCRATCH}\n"
+        # The size the device's S3 kernel would ask for, not a host guess: the
+        # ANSI kernels linked here need none, so only this makes the harness
+        # exercise a realistic buffer.
+        f"#define CONV_PROBE_SCRATCH {max(scratch_bytes(graph, op), 16)}\n"
         f"static const int8_t CONV_PROBE_IN[{np.size(inputs)}] = {{{flat_in}}};\n"
         f"static const int8_t CONV_PROBE_EXPECT[{np.size(expect)}] = {{{flat_expect}}};\n"
     )

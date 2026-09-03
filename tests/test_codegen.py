@@ -333,6 +333,68 @@ def test_activation_range_relu_uses_round_half_away_from_zero():
     assert codegen.activation_range(g, relu) == (-128, 127)
 
 
+def _emitter(plan):
+    return codegen.Emitter(prefix="t", plan=plan, arena=codegen.plan_arena(plan))
+
+
+@needs_wake
+def test_scratch_sizes_come_from_the_esp32s3_formulas():
+    """esp-nn's ANSI kernels ask for no scratch, so a host-measured size proves
+    nothing. These are hand-derived from esp_nn_get_*_scratch_size_esp32s3.
+
+    op 14 (5x1x40 -> 32, VALID, no padding needed): general path with in_ch
+    padded to 48, so 5*48*32 filter + 5*48*32 aligned filter rows + 64 margin
+    + 32*4 offset accumulators. op 32 (21x1 depthwise, 64 channels, ch_mult 1):
+    the non-3x3 s16 path, 2 * (filter 21*64 + input 21*64) + 32.
+    """
+    g = tflite_graph.read_graph(WAKE.read_bytes())
+    conv, depthwise = g.ops[14], g.ops[32]
+    assert codegen.scratch_bytes(g, conv) == 5 * 48 * 32 + 48 * 5 * 32 + 64 + 32 * 4 == 15552
+    assert codegen.scratch_bytes(g, depthwise) == 2 * (21 * 64 + 21 * 64) + 32 == 5408
+    assert codegen.scratch_bytes(g, g.ops[37]) == 0  # LOGISTIC needs none
+
+
+def test_absent_bias_is_refused_instead_of_indexing_the_last_tensor():
+    """TFLite writes an absent optional bias as index -1; tensors[-1] is a real
+    (wrong) tensor in Python, so the generator must refuse it by name."""
+    g = _streaming_graph()
+    ops = list(g.ops)
+    ops[5] = dataclasses.replace(ops[5], inputs=(3, 6, -1))
+    plan = codegen.rewrite_streaming(dataclasses.replace(g, ops=tuple(ops)))
+    with pytest.raises(codegen.UnsupportedGraph, match="no bias tensor"):
+        codegen.emit_depthwise(_emitter(plan), plan.ops[0])
+
+
+def _fc_plan(accum_depth):
+    tensors = {
+        0: _tensor(0, (1, accum_depth)),
+        1: _tensor(1, (1, accum_depth), data=bytes(accum_depth)),
+        2: _tensor(2, (1,), dtype="int32", data=bytes(4)),
+        3: _tensor(3, (1, 1)),
+    }
+    op = tflite_graph.Op(0, "FULLY_CONNECTED", (0, 1, 2), (3,), {})
+    graph = tflite_graph.Graph(
+        ops=(op,), tensors=tensors, inputs=(0,), outputs=(3,), variables={}, init_subgraph=None
+    )
+    return codegen.Plan(graph=graph, ops=(op,), rings=(), alias={})
+
+
+def test_fully_connected_refuses_dimensions_that_would_wrap_uint16():
+    """esp_nn_fully_connected_s8 takes row_len as uint16_t; 70000 would wrap to
+    4464 with no diagnostic on either side."""
+    plan = _fc_plan(70000)
+    with pytest.raises(codegen.UnsupportedGraph, match="accum_depth=70000"):
+        codegen.emit_fully_connected(_emitter(plan), plan.ops[0])
+    codegen.emit_fully_connected(_emitter(_fc_plan(64)), _fc_plan(64).ops[0])  # in range
+
+
+def test_generated_sources_refuse_to_build_with_skip_nudge():
+    """A sdkconfig flip to CONFIG_NN_SKIP_NUDGE swaps esp-nn's requantisation
+    for a faster, non-bit-exact one. Every generated .c must break the build."""
+    assert "CONFIG_NN_SKIP_NUDGE" in codegen.NUDGE_GUARD
+    assert codegen.NUDGE_GUARD.count("#error") == 1
+
+
 def test_padding_same_and_valid():
     assert codegen.padding_hw(49, 10, 3, 3, 1, 1, "SAME") == (1, 1, 49, 10)
     assert codegen.padding_hw(5, 1, 5, 1, 3, 1, "VALID") == (0, 0, 1, 1)
