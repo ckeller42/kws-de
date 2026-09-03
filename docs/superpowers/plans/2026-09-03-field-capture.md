@@ -730,24 +730,23 @@ Expected: `Project build complete.` and a `kws_de_fw.bin` size line; no new warn
 
 - [ ] **Step 9: Flash and check on the device**
 
-The CoreS3 hangs off the remote Mac, so flashing and the console go through the helper scripts (referenced here only — never in a committed doc):
+The CoreS3 hangs off a remote host, so flashing and the console go through the executor's local helper scripts. Below, `FLASH` stands for the helper that flashes and tails the boot log, and `CONSOLE` for the helper that sends one console command and prints the reply (`-l N` = also capture N s of log):
 
 ```bash
-S=~/.claude/skills/flashing-cores3-on-bar
-$S/flash-bar.sh -l 8                        # flash + 8 s of boot log
-$S/console-bar.sh status                    # expect: "field off takes 0 dropped 0" ... "ok"
-$S/console-bar.sh 'field on'                # expect: "ok"
-$S/console-bar.sh -l 4 'mode assist'        # expect: "ok"; the screen shows the REC badge
-$S/console-bar.sh -l 12 wakefire            # inject one fire, then say a command
-$S/console-bar.sh status                    # expect: "field on takes 1 dropped 0"
+FLASH -l 8                        # flash + 8 s of boot log
+CONSOLE status                    # expect: "field off takes 0 dropped 0" ... "ok"
+CONSOLE 'field on'                # expect: "ok"
+CONSOLE -l 4 'mode assist'        # expect: "ok"; the screen shows the REC badge
+CONSOLE -l 12 wakefire            # inject one fire, then say a command
+CONSOLE status                    # expect: "field on takes 1 dropped 0"
 ```
 
-Then power-cycle the device (unplug/replug) and run `$S/console-bar.sh status` again: expect `field on` — the toggle survived the reboot.
+Then power-cycle the device (unplug/replug) and run `CONSOLE status` again: expect `field on` — the toggle survived the reboot.
 
 Check the three things the spec asks for:
 
 1. the toggle persists (the `status` line after the power cycle);
-2. a take appears — put the device in USB mode (`$S/console-bar.sh 'mode usb'`) and confirm `field/spkNN/<boot-ms>.wav` plus `field.csv` on the `KWSREC` drive;
+2. a take appears — put the device in USB mode (`CONSOLE 'mode usb'`) and confirm `field/spkNN/<boot-ms>.wav` plus `field.csv` on the `KWSREC` drive;
 3. the recognise step time does not change during the window — in the 12 s log from the `wakefire` line, the `recognise` task's `step <N> ms` lines inside the window must stay in their usual range (~46 ms), with no 100–300 ms outlier, which is what "no I/O during the window" means in practice. Record the observed range; it is the number Task 6 writes into `docs/paper-notes.md`.
 
 - [ ] **Step 10: Commit**
