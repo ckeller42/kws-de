@@ -298,6 +298,20 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
    whose *train* split carries the device speaker and counts it as a
    recording.
 
+.. test:: QAT flag trains, exports, and beats chance end to end
+   :id: TEST_MODEL_QAT
+   :status: passing
+   :links: REQ_MODEL_QAT
+
+   ``tests/test_train_qat.py``: on a tiny synthetic 2-class npz (no real
+   data), runs ``kws-train --v2 --qat`` and ``kws-export --v2 --qat`` as
+   subprocesses (both CLIs re-exec themselves under
+   ``TF_USE_LEGACY_KERAS=1``, which would blow away an in-process pytest
+   run), then asserts: the plain float ``.keras`` artefact is untouched,
+   the QAT SavedModel dir lands at the expected ``_qat``-suffixed path,
+   the exported ``command_..._qat.tflite`` is INT8 in/out, and its
+   predictions on the toy test set clear chance by a wide margin.
+
 CI build/gate jobs
 -------------------
 

@@ -590,6 +590,17 @@ re-enumerate until a physical re-plug. Leaving USB mode now restarts the chip (m
 console back), which is what the command means anyway; a PHY re-attach for the JTAG peripheral
 is the cleaner upgrade.
 
+**Wake model round 5: real positives, user-customised by design (2026-09-03).** Ten real "Hey Bus"
+takes (two sessions of a main user, pulled and QC-approved by the remote loop) were added to the
+round-4 recipe as their own feature set (sampling weight 5). Through the firmware int8 feature
+path at the device gate (0.85 × 2 steps): round 4 fires on 4 of 10 real takes, round 5 on **10 of
+10** (peak 0.996 on every clip); a variant trained on one session only fires 5 of 5 on the other,
+unseen session. The TTS non-wake worst peak fell 0.988 → 0.758. The price is generic-voice
+margin: a synthetic Piper "hey bus" clip played through a laptop speaker drops from 3 of 3 fires
+(0.96–0.99) to 0 of 3 (0.59–0.64). This is the intended trade: the wake model is customised to
+the device's main users, the same "user-customised, in-training" policy the command model
+follows, and each new speaker's five takes go through the same loop.
+
 ### On-device wake word — isolated "Hey Bus" test mode (feat/wake-test-mode)
 
 Added a dedicated `UI_MODE_WAKE` that runs **only** the microWakeWord streaming model, so the
@@ -724,6 +735,79 @@ trades the recogniser's latency against headroom for the UI, and the export step
 to emit an arena size derived from the measured need rather than the current fixed margin.
 That is a deliberate decision about the floor, not a free win, so it is left for its own
 change.
+
+**Quantisation-aware training, `--qat` (2026-09-03).** `tensorflow-model-optimization` (tfmot)
+only wraps `tf.keras` models built under Keras 2; TF 2.18's default `tf.keras` is Keras 3, which
+tfmot's `QuantizeWrapperV2` cannot wrap. Fix: `kws-train --qat` and `kws-export --qat` re-exec
+themselves once under `TF_USE_LEGACY_KERAS=1` (the `tf_keras` shim) before TensorFlow is imported
+anywhere in the process — the env var has to be set pre-import, so this has to happen at module
+load, not inside `main()`. `kws-train --qat` loads the existing float `command_v3.keras`'s weights
+(`model.load_weights` round-trips across the Keras 2/3 boundary even though a full `load_model`
+does not — confirmed empirically, not assumed) into a freshly-built architecture under the legacy
+runtime, wraps it with `tfmot.quantization.keras.quantize_model` (per-tensor fake-quant on every
+activation, per-channel on conv/dense kernels), and fine-tunes 10 epochs at `Adam(1e-5)`. The
+QAT model is saved as a SavedModel dir (`command_v3_qat/`), not `.keras` — reloading a
+`quantize_model`-wrapped model from the `.keras` zip format hit a real, reproduced tfmot/Keras-3
+variable-naming bug (`Layer 'quantize_layer' expected 5 variables, but received 3`) on the exact
+same architecture that round-trips cleanly through `save_format="tf"`. `kws-export --qat` reloads
+it under `tfmot.quantization.keras.quantize_scope()` and converts with the same `to_int8_tflite`
+PTQ conversion already uses — the QAT model's baked-in fake-quant ranges do the work, no separate
+code path needed for the TFLite conversion itself.
+
+Same architecture (`build_dscnn`, 23 classes), same `features_v3` data, same `features_v3_test`
+held-out split:
+
+| Model | Test accuracy | Size |
+|---|---|---|
+| Float (`command_v3.keras`) | 89.4 % | 178 142 B |
+| INT8 PTQ (`command_v3.tflite`, today's baseline) | 88.0 % | 18 296 B |
+| INT8 QAT (`command_v3_qat.tflite`, 10 fine-tune epochs) | **91.2 %** | 17 880 B |
+
+QAT recovers all of PTQ's 1.4-point INT8 accuracy loss and adds another 1.8 points on top of
+the *float* model — the fake-quant fine-tune found a better minimum for the quantised graph,
+not just a less-lossy one. Real-recordings isolated-word accuracy (`kws-eval --recordings`,
+same two device speakers, `user-customised, in-training`, same manifest) moves the same
+direction, not just the synthetic test set:
+
+| Speaker | Words (n) | PTQ acc | QAT acc | Negatives (n) | PTQ FA rate | QAT FA rate |
+|---|---|---|---|---|---|---|
+| spk01 | 13 | 0.538 | **0.615** | 0 | n/a | n/a |
+| spk02 | 38 | 0.553 | **0.737** | 10 | 0.000 | 0.000 |
+
+False-accept rate is unchanged (0/10, both models) and isolated-word accuracy improves for both
+speakers — QAT does not trade detection performance for the quantisation-error recovery; it
+improves both. `export.assert_model_healthy` (50 % accuracy floor, ≥ 10 predicted classes) passes
+for both INT8 models with all 23 classes represented in predictions. Held-out phrase accuracy
+(4 clips, 1 speaker) is 0/4 for both models — too small an n to read anything into; the isolated-
+word and false-accept figures above are the ones with enough clips to mean something.
+
+**DS-CNN width sweep (2026-09-03).** `build_dscnn` gained a `width` parameter (default 32,
+the shipped size) on every conv/depthwise-separable-block channel count, plumbed through
+`kws-train --width` and `kws-export --width` (non-default widths get a `_w<N>` export-name
+suffix, e.g. `command_v3_w16_qat.tflite`); `kws-export --stats` prints params + MACs
+(`kws_de.budgets.estimate_macs`, already used by `kws-benchmark`) for a loaded model.
+Widths 24 and 16 were trained on `features_v3` with the same recipe as the width-32 QAT
+baseline above (40 epochs, `--qat --qat-epochs 10`); width 12 was skipped per the stopping
+rule below since width 16 already missed by a wide margin. Distillation from the width-32
+model was skipped: `kws_de.distill.distill()` only supports a KWT teacher for the fixed-width
+DS-CNN student (no `width` param on the student side), a different use case than a same-
+architecture narrower student — not worth threading through for widths that fail on their
+own. MACs/params are architecture-only (independent of trained weights), computed directly
+from `build_dscnn`; the recordings figures reuse the same two device speakers as the
+baseline table, `user-customised, in-training`, isolated-word accuracy:
+
+| Width | INT8 test acc | Params | MACs | Size | spk01 acc (n=13) | spk02 acc (n=38) | False accepts (n=10) |
+|---|---|---|---|---|---|---|---|
+| 32 (baseline) | **91.2 %** | 5,879 | 2,070,496 | 17,880 B | **0.615** | **0.737** | 0 |
+| 24 | 88.7 % | 3,839 | 1,270,632 | 14,528 B | 0.462 | 0.605 | 0 |
+| 16 | 84.7 % | 2,183 | 658,928 | 11,528 B | 0.385 | 0.500 | 0 |
+| 12 | skipped (16 already missed the recommendation bar) | 1,499 | 423,636 | — | — | — | — |
+
+Recommendation: **keep width 32.** Width 24 already misses the ≤ 1.0-point INT8-test-accuracy
+bar (91.2 % → 88.7 %, a 2.5-point drop) and both narrower widths lose isolated-word accuracy on
+*both* real speakers versus the baseline — narrowing the channel count trades real-voice
+recognition, not just a synthetic-test-set fraction of a point. `export.assert_model_healthy`
+still passed for every exported width; the export health gate itself was not touched.
 
 ## Open questions
 

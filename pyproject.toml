@@ -37,6 +37,11 @@ qc = ["mlx-whisper>=0.4"]
 # Python extension. Only needed to regenerate the wake front-end golden vector
 # (`kws-fwgen`); the committed header and the firmware need nothing extra.
 wake = ["pymicro-features>=2.0.2"]
+# Quantisation-aware training (`kws-train --qat` / `kws-export --qat`).
+# tensorflow-model-optimization only wraps tf.keras models built under Keras 2;
+# `tf_keras` pinned to the tensorflow pin's minor (above) keeps `uv sync` from
+# dragging `tensorflow` itself onto a newer minor to satisfy tf_keras's own pin.
+qat = ["tensorflow-model-optimization>=0.8", "tf_keras>=2.18,<2.19"]
 
 [project.scripts]
 kws-data = "kws_de.data:main"
@@ -50,6 +55,7 @@ kws-transducer = "kws_de.transducer:main"
 kws-distill = "kws_de.distill:main"
 kws-qc = "kws_de.qc:main"
 kws-eta = "kws_de.eta:main"
+kws-model-graph = "kws_de.model_graph:main"
 
 [tool.pytest.ini_options]
 # data/ is a gitignored local cache (raw MSWC/ESC-50 clips); ESC-50 ships its own

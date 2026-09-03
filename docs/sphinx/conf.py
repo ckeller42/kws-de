@@ -21,11 +21,17 @@ project = "kws-de"
 copyright = "kws-de contributors"
 author = "kws-de contributors"
 
-extensions = ["breathe", "sphinx_needs"]
+extensions = ["breathe", "sphinx_needs", "sphinx.ext.graphviz"]
 
 exclude_patterns = ["_build"]
 
 html_theme = "alabaster"
+
+# -- graphviz (model-architecture diagrams, docs/sphinx/_generated/*.dot) ---
+# SVGs scale cleanly at any zoom and stay text-searchable/selectable, unlike
+# the default PNG output. `dot` itself must be on PATH (installed alongside
+# doxygen in CI; see .github/workflows/docs.yml).
+graphviz_output_format = "svg"
 
 # -- breathe (Doxygen C API reference) --------------------------------------
 _here = os.path.dirname(os.path.abspath(__file__))

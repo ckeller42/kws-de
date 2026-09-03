@@ -1,0 +1,44 @@
+digraph model {
+  rankdir=TB;
+  node [shape=box, style=filled, fillcolor="#F3E3BF", color="#C98A1E", fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=9];
+  IN [label="input 1x49x10x1\nint8", shape=oval, style=filled, fillcolor=white, color="#C98A1E"];
+  OUT [label="output", shape=oval, style=filled, fillcolor="#F6D3CB", color="#C94B32"];
+  subgraph cluster_0 {
+    label="Stem"; style=dashed; color="#C98A1E"; fontsize=11;
+    op0 [label="conv 3x3, 1->32\n141,120 MAC"];
+  }
+  subgraph cluster_1 {
+    label="Block 1 -- depthwise 3x3"; style=dashed; color="#C98A1E"; fontsize=11;
+    op1 [label="depthwise 3x3 x32\n141,120 MAC"];
+    op2 [label="conv 1x1, 32->32\n501,760 MAC"];
+  }
+  subgraph cluster_2 {
+    label="Block 2 -- depthwise 3x3"; style=dashed; color="#C98A1E"; fontsize=11;
+    op3 [label="depthwise 3x3 x32\n141,120 MAC"];
+    op4 [label="conv 1x1, 32->32\n501,760 MAC"];
+  }
+  subgraph cluster_3 {
+    label="Block 3 -- depthwise 3x3"; style=dashed; color="#C98A1E"; fontsize=11;
+    op5 [label="depthwise 3x3 x32\n141,120 MAC"];
+    op6 [label="conv 1x1, 32->32\n501,760 MAC"];
+  }
+  subgraph cluster_4 {
+    label="Head"; style=dashed; color="#C98A1E"; fontsize=11;
+    op7 [label="mean (global avg pool) -> 32"];
+    op8 [label="dense 32->23\n736 MAC"];
+    op9 [label="softmax"];
+  }
+  IN -> op0 [color="#C98A1E"];
+  op0 -> op1 [color="#C98A1E"];
+  op1 -> op2 [color="#C98A1E"];
+  op2 -> op3 [color="#C98A1E"];
+  op3 -> op4 [color="#C98A1E"];
+  op4 -> op5 [color="#C98A1E"];
+  op5 -> op6 [color="#C98A1E"];
+  op6 -> op7 [color="#C98A1E"];
+  op7 -> op8 [color="#C98A1E"];
+  op8 -> op9 [color="#C98A1E"];
+  op9 -> OUT [color="#C94B32", penwidth=2];
+  labelloc="b"; fontsize=11; fontname="Helvetica"; label="Command DS-CNN (v3, QAT)\n\n11 ops, 28 tensors, 4,960 weights, 2,070,496 MACs, 0 B state, 17,880 B file";
+}
