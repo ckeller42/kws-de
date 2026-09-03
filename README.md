@@ -7,8 +7,38 @@ Trains a tiny INT8 DS-CNN on public German speech data, exports a
 and ships a minimal ESP-IDF demo that shows the recognised word on the CoreS3 display.
 
 Design & rationale (with algorithm citations): `docs/superpowers/specs/`.
-**Docs site** (architecture + LikeC4 diagrams + eval reports): <https://ckeller42.github.io/kws-de/>
-— build locally with `pip install -r docs/requirements.txt && python -m sphinx -b html docs docs/_build/html` (node ≥ 20 required).
+
+## Documentation
+
+Built and deployed on every push to `main`:
+
+- Architecture and paper docs: **<https://ckeller42.github.io/kws-de/>**
+- Firmware, models, recording pipeline, requirements traceability and the C API
+  (Sphinx + sphinx-needs + Doxygen): **<https://ckeller42.github.io/kws-de/sphinx/>**
+
+## Status (2026-09-03)
+
+What the command model measures on the two device speakers' own real
+recordings as each stage lands, and the wake model's real-take result.
+Full numbers and provenance: [`docs/sphinx/models.rst`](docs/sphinx/models.rst).
+
+| | spk01 word acc. | spk02 word acc. | False accepts |
+|---|---|---|---|
+| Command, v2 stock (no device recordings) | 0.19 (held-out) | 0.27 (held-out) | 0/6 |
+| Command, v3 PTQ (device recordings in train) | 0.538 (user-customised) | 0.553 (user-customised) | 0/10 |
+| Command, v3 QAT | **0.615** (user-customised) | **0.737** (user-customised) | 0/10 |
+
+- **Wake, round 5** (real "Hey Bus" takes added, weighted): 10 of 10 real
+  takes fire at the device gate (round 4: 4 of 10); see
+  [`docs/sphinx/models.rst`](docs/sphinx/models.rst) for the generic-voice
+  trade-off that comes with it.
+- **Recogniser step** (CoreS3, per streaming step): 164–181 ms → **82–85 ms**
+  after the exact 480-point FFT front end; see
+  [`docs/sphinx/firmware.rst`](docs/sphinx/firmware.rst) for the full
+  on-device measurement table.
+- **On the device today:** the 23-class INT8 QAT command model (17,880 B) and
+  the round-5 wake model, both flashed and running; boot menu = Recognition,
+  Hey Bus, Record, Hey Bus aufnehmen, USB.
 
 ## Scope
 
@@ -74,11 +104,15 @@ for reproducibility; scripts only ever write to `<root>/data` and `<root>/models
 
 ## Firmware (M5Stack CoreS3)
 
-`firmware/` is an ESP-IDF app with two modes: a guided recorder that
-collects word/sentence/negative takes onto the device's flash (pulled over
-USB with `scripts/pull-recordings.sh`), and an on-device recogniser running
-the int8 model with the same MFCC front-end and detector as `kws_de.stream`.
-Build, flash, and the manual test checklist: [firmware/README.md](firmware/README.md).
+`firmware/` is an ESP-IDF app with a 5-button boot menu — Recognition, Hey
+Bus, Record, Hey Bus aufnehmen, USB — covering the guided recorder (word/
+sentence/negative and wake-word takes onto the device's flash, pulled over
+USB with `scripts/pull-recordings.sh`), the on-device command recogniser
+(same MFCC front-end and detector as `kws_de.stream`), and an isolated wake
+word test mode. Build, flash, and the manual test checklist:
+[firmware/README.md](firmware/README.md); the device as it behaves, the
+serial console protocol, and on-device measurements:
+[`docs/sphinx/firmware.rst`](docs/sphinx/firmware.rst).
 
 ## Recording data loop
 
@@ -96,11 +130,20 @@ scripts/data-loop.sh -H <device-host>   # or: export KWSREC_HOST=<device-host>
 ```
 
 `-H`/`KWSREC_HOST` is the SSH name of the machine the CoreS3 is plugged
-into — never hard-coded in the repo. Details, the data layout, and the two
-eval figures: [docs/sphinx/pipeline.rst](docs/sphinx/pipeline.rst). Every
-stage prints an ETA before it starts and records its actual duration after,
-improving future predictions (`kws_de.eta`, "How long will it take" in that
-same doc).
+into — never hard-coded in the repo; `KWSREC_HOST_PYTHON` names a python on
+that host with `pyserial` installed if it isn't `python3` on `PATH`. Details,
+the data layout, and the two eval figures:
+[docs/sphinx/pipeline.rst](docs/sphinx/pipeline.rst). Every stage prints an
+ETA before it starts and records its actual duration after, improving
+future predictions (`kws_de.eta`, `kws-eta predict/record/run/watch`, "How
+long will it take" in that same doc).
+
+`kws-train --qat` / `kws-export --qat` add a quantisation-aware fine-tune on
+top of the plain INT8 export — see
+[`docs/sphinx/models.rst`](docs/sphinx/models.rst) for the accuracy numbers.
+`--width N` (both CLIs, default 32) resizes every conv/depthwise-separable
+channel count in the command model; the same page has the width-sweep
+results and why 32 stays the recommendation.
 
 ## Development
 
@@ -115,8 +158,12 @@ markdownlint (+ gitleaks if installed), **pre-push** runs the tests — the same
 so a break is caught locally. Bypass a hook with `--no-verify`. Claude Code sessions also lint
 each edited file via a `.claude/` PostToolUse hook.
 
-CI (`.github/workflows/ci.yml`): ruff + pytest/coverage, markdownlint, gitleaks. Work on a
-branch, open a PR, wait for CI + CodeRabbit, then merge — never commit straight to `main`.
+`main` is protected: every change goes through a PR, and the branch must be
+up to date with `main` before merging. Required checks are the CI jobs —
+`test`, `markdownlint`, `gitleaks` (`ci.yml`); `build`, `gen-fresh`,
+`host-test` (`firmware.yml`); `build`, `firmware-docs` (`docs.yml`) — the
+same gates the local hooks above mirror. Work on a branch, open a PR, wait
+for CI + CodeRabbit, then merge — never commit straight to `main`.
 
 ## References
 
