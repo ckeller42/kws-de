@@ -25,8 +25,8 @@ set(MICROFRONTEND_SRCS
 
 idf_component_register(
   SRCS "main.c" "audio.c" "storage.c" "vad.c" "record.c" "mfcc.c" "mfcc_fft.cc" "stream.c" "wav.c" "prompts.c" "recognise.cc"
-       "wake.cc" "wakefront.c" "beep.c" "console.c" ${MICROFRONTEND_SRCS}
-       "ui/ui_menu.c" "ui/ui_record.c" "ui/ui_usb.c" "ui/ui_recognise.c" "ui/ui_wake.c" "ui/font_prompt_28.c" "usb_drive.c"
+       "wake.cc" "wakefront.c" "assist_gate.c" "beep.c" "console.c" ${MICROFRONTEND_SRCS}
+       "ui/ui_menu.c" "ui/ui_record.c" "ui/ui_usb.c" "ui/ui_recognise.c" "ui/ui_wake.c" "ui/ui_assist.c" "ui/font_prompt_28.c" "usb_drive.c"
   INCLUDE_DIRS "." "microfrontend" "microfrontend/kissfft"
   REQUIRES fatfs wear_levelling nvs_flash esp_timer esp_partition esp_tinyusb driver
   PRIV_REQUIRES esp-tflite-micro)

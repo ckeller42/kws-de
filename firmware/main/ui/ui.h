@@ -32,11 +32,18 @@ void ui_recognise_refresh(const recognise_status_t *st);
 void ui_show_wake(void);
 /** @brief Refresh the wake screen from a status snapshot. Called from the wake task; takes bsp_display_lock. */
 void ui_wake_refresh(const wake_status_t *st);
+/** @brief Switch the display to the assistant (wake-gated) screen. */
+void ui_show_assist(void);
+/** @brief Refresh the assistant screen: wake probability while idle, the recognised
+ * word while the gate is open. Called from the wake and recognise tasks; takes bsp_display_lock. */
+void ui_assist_refresh(const wake_status_t *wst, const recognise_status_t *rst, bool listening);
 
 /** @brief Top-level app mode, one screen/consumer task active at a time.
  * UI_MODE_RECORD_WAKE is the guided-recorder's "Hey Bus"-only session (PROMPT_WAKE);
- * UI_MODE_WAKE is the unrelated wake-*model* test screen ("Hey Bus" demo button). */
-typedef enum { UI_MODE_RECORD, UI_MODE_RECORD_WAKE, UI_MODE_USB, UI_MODE_RECOGNISE, UI_MODE_WAKE, UI_MODE_MENU } ui_mode_t;
+ * UI_MODE_WAKE is the unrelated wake-*model* test screen ("Hey Bus" demo button).
+ * UI_MODE_ASSIST is the deployment shape both of those measure: the wake model
+ * runs continuously and a fire opens a short window for the recogniser. */
+typedef enum { UI_MODE_RECORD, UI_MODE_RECORD_WAKE, UI_MODE_USB, UI_MODE_RECOGNISE, UI_MODE_WAKE, UI_MODE_ASSIST, UI_MODE_MENU } ui_mode_t;
 /** @brief Switch app mode. Defined in main.c; the only place that suspends/resumes consumer tasks. */
 void app_set_mode(ui_mode_t m);
 /** @brief Current app mode. Defined in main.c; used by the serial console's `status` command. */

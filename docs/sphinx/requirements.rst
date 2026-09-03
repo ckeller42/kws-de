@@ -33,11 +33,24 @@ Front end (MFCC)
    trained on. Feature parity with the Python front end
    (:need:`REQ_FW_MFCC_PARITY`) is unaffected by the transform — max
    absolute deviation 5.4e-4, and 0 LSB on the int8 tensor fed to the
-   command model. The measured front-end cost on the CoreS3 is 3.0 ms per
-   new frame, against 8.5 ms for the naive DFT it replaced: a streaming
-   recogniser step of 82-85 ms for the 9-10 frames a step consumes, of which
-   52-53 ms is the command model's TFLM ``Invoke``
-   (:need:`REQ_FW_ARENA_PLACEMENT`) and the remainder the front end.
+   command model. The measured front-end cost on the CoreS3 is **0.46 ms per
+   new frame**, against 8.5 ms for the naive DFT this replaced: the exact
+   FFT took it to 3.0 ms, quad-I/O flash to 2.0 ms, and the banded mel
+   filterbank (:need:`REQ_FW_MEL_BANDED`) to 0.46 ms.
+
+.. req:: Mel filterbank ships as non-zero bands, not a dense matrix
+   :id: REQ_FW_MEL_BANDED
+   :status: implemented
+
+   ``kws-fwgen`` emits the mel filterbank as ``KWS_MEL_START``,
+   ``KWS_MEL_LEN`` and 459 concatenated weights rather than a dense
+   ``[40][241]`` matrix, and ``mfcc.c`` walks the bands. A triangular filter
+   is non-zero over 4-33 of the 241 bins, so the dense form was 95% exact
+   zeros — 38.5 KB of flash rodata read in full for every frame. Only exact
+   zeros are dropped and the surviving terms accumulate in the same order,
+   so the mel energies are bit-identical, not approximated;
+   ``firmware_gen.mel_bands`` refuses to compress a filter whose non-zeros
+   are not one contiguous run. Measured: front end 2.0 -> 0.46 ms per frame.
 
 .. req:: MFCC int8 quantisation matches the model's input scale/zero-point
    :id: REQ_FW_MFCC_QUANTIZE
@@ -265,13 +278,22 @@ Recogniser
    ``heap_caps_get_free_size(MALLOC_CAP_INTERNAL)`` before and after either
    way — arena placement, not the model, is what sets ``Invoke`` time, and
    the log has to say which heap was used rather than leaving it to be
-   guessed. At least 64 KB of internal RAM stays free after the arenas, for
-   the UI and the audio ring. Measured on the CoreS3: 148,895 B free
-   internal when the models start, which fits the 49,152 B wake arena but
-   not also the 139,264 B command arena, so the **wake** arena — the model
-   that runs continuously — takes internal RAM (82,907 B left free) and the
-   command arena stays in PSRAM. Effect: wake 5 -> 3 ms/step; the command
-   model's ``Invoke`` unchanged at 52-53 ms.
+   guessed. At least 24 KB of internal RAM stays free after the arenas, for
+   the UI, the audio ring and both model tasks' 16 KB stacks.
+
+   Only one arena fits: the largest contiguous DRAM region is about 76 KB
+   against a 64 KB command arena and a 40 KB wake arena, whichever order
+   they are requested in. ``main.c`` therefore starts the wake task **first**
+   so the choice is deliberate — the wake model is the one that runs
+   continuously, and with a 64 KB data cache it gains far more from internal
+   SRAM (2.6x a step) than the recogniser loses by going to PSRAM (5%).
+   Measured on the CoreS3: 116,875 B free internal when the models start,
+   47,539 B free after both arenas; wake step 4.91 -> 1.90 ms, recogniser
+   step 43 -> 46 ms.
+
+   Arena sizes are the device's measured ``arena_used_bytes()`` plus
+   headroom (``kws_de.export``), not the desktop interpreter's
+   sum-of-tensors, which overestimates TFLM's planner by about 2.5x.
 
 .. req:: TFLite Micro op resolver is the exact gated set
    :id: REQ_FW_TFLM_OPSET
@@ -567,6 +589,35 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    global speaker-disjoint draw. The manifest records the outcome per split
    (``sources`` counts by origin plus the device ``speakers``), which is
    what the eval's labelling reads.
+
+.. req:: Assist mode gates the recogniser behind a wake fire
+   :id: REQ_FW_ASSIST_GATE
+   :status: implemented
+
+   ``UI_MODE_ASSIST`` is the deployment shape the always-on recognise mode
+   only measures: the wake model runs continuously at ~1.9 ms per 30 ms of
+   audio, and a wake fire opens a 2.5 s window
+   (``ASSIST_WINDOW_MS``) in which the command recogniser runs. A fire
+   inside an open window extends it rather than opening a second — one
+   interaction, not two.
+
+   The window is decided by ``firmware/main/assist_gate.c``, which is pure
+   C over caller-supplied milliseconds (no clock, no globals, no FreeRTOS)
+   and is host-tested by ``firmware/test/test_assist_gate.c``, including the
+   32-bit millisecond wrap. The **deadline is enforced by the recognise task
+   itself** (``recognise_listen_for``), not only by the wake task that
+   opened it: the recogniser is the expensive task, and a window that could
+   only be closed by another task let it starve its own off switch — with
+   both model tasks on core 0 the window never closed and the task watchdog
+   fired. The recognise task also runs one priority below the wake task for
+   the same reason.
+
+   Duty is reported in the log once per 10 s, in both modes and in the same
+   format (``KWS_DUTY``): the fraction of wall time the recogniser was
+   active, and the measured inference CPU per wall second. Measured on the
+   CoreS3, one interaction per 10 s: assist 253/1000 of wall and 97 ms of
+   inference per wall second, against 1000/1000 and 315 ms/s for the
+   always-on recognise mode.
 
 .. req:: Recordings-based eval never mixes held-out and in-training figures
    :id: REQ_PIPE_EVAL_LABELS
