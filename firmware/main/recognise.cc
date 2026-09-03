@@ -33,6 +33,7 @@ static recognise_status_t s_st;
 static volatile bool s_active;
 static uint8_t *s_arena;
 static FILE *s_log;
+static volatile int64_t s_off_at_us;   /* assist window deadline, 0 = run until told otherwise */
 
 static void log_fire(const char *word, float conf)
 {
@@ -41,6 +42,32 @@ static void log_fire(const char *word, float conf)
     if (!s_log) return;
     fprintf(s_log, "[Log] %lld %s %.2f\n", esp_timer_get_time() / 1000, word, conf);
     fflush(s_log);
+}
+
+/* Duty accounting, logged once per 10 s of wall time.
+ *
+ * The always-on recognise mode is a measurement baseline, not a deployment:
+ * the recogniser costs ~46 ms of CPU per 100 ms step, so running it
+ * continuously is ~460 ms of inference per wall second. Assist mode gates it
+ * behind a wake fire, and the gap between the two lines this prints is exactly
+ * what the wake-gated design buys. Both modes emit the same line so they can be
+ * compared straight out of the log.
+ *
+ * `busy_us` is the measured step cost, so this reports real CPU rather than an
+ * estimate from a step count.
+ */
+static void duty_log(bool was_active, int64_t interval_us, int64_t busy_us)
+{
+    static int64_t win_us, act_us, cpu_us;
+    win_us += interval_us;
+    if (was_active) act_us += interval_us;
+    cpu_us += busy_us;
+    if (win_us < 10 * 1000 * 1000) return;
+    ESP_LOGI(TAG, "KWS_DUTY mode %s: recogniser active %lu/1000 of wall, inference %lu ms per wall second",
+             app_get_mode() == UI_MODE_ASSIST ? "assist" : "recognise",
+             (unsigned long)(act_us * 1000 / win_us),
+             (unsigned long)(cpu_us * 1000 / win_us));
+    win_us = act_us = cpu_us = 0;
 }
 
 static void recognise_task(void *)
@@ -82,7 +109,20 @@ static void recognise_task(void *)
     static bool primed = false;
     static uint32_t steps = 0;
 
+    /* Duty accounting closes the *previous* iteration at the top of this one, so
+       the several `continue`s below cannot skip it. */
+    int64_t prev_us = 0, step_us = 0;
+    bool prev_active = false;
+
     for (;;) {
+        int64_t now_us = esp_timer_get_time();
+        if (prev_us) duty_log(prev_active, now_us - prev_us, step_us);
+        prev_us = now_us;
+        prev_active = s_active;
+        step_us = 0;
+        /* Self-imposed window deadline: see recognise_listen_for(). */
+        if (s_active && s_off_at_us && now_us >= s_off_at_us) recognise_set_active(false);
+
         if (!s_active) { vTaskDelay(pdMS_TO_TICKS(50)); stream_reset(&stream); primed = false; continue; }
         if (!primed) {                                     /* (re)entering: window = the last second up to now */
             mfcc_init(&mstate);
@@ -120,8 +160,9 @@ static void recognise_task(void *)
             if (probs[i] > probs[best]) best = i;
         }
         int fired = stream_push(&stream, probs);
-        uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
-        if ((++steps % 50) == 0)                           /* ~every 5 s: front-end + inference cost */
+        step_us = esp_timer_get_time() - t0;
+        uint32_t ms = (uint32_t)(step_us / 1000);
+        if ((++steps % 50) == 0)                         /* ~every 5 s: front-end + inference cost */
             ESP_LOGI(TAG, "step %lu ms (front-end %lld us over %d new frames, invoke %lld us: " NN_TIMERS_FMT ")",
                      (unsigned long)ms, pushed ? fe_us / pushed : (int64_t)0, pushed,
                      invoke_us, NN_TIMERS_ARGS(invoke_us));
@@ -137,7 +178,11 @@ static void recognise_task(void *)
         recognise_status_t copy = s_st;
         xSemaphoreGive(s_lock);
         if (fired >= 0) { ESP_LOGI(TAG, "fired %s %.2f (%lu ms)", KWS_LABELS[fired], (double)probs[fired], (unsigned long)ms); log_fire(KWS_LABELS[fired], probs[fired]); }
-        ui_recognise_refresh(&copy);
+        /* Only when the recognise screen is actually on display. In assist mode
+           the wake task owns the screen (ui_assist_refresh) and this screen's
+           LVGL objects were never created — painting them took the display lock
+           and never gave it back, which stalled both model tasks. */
+        if (app_get_mode() == UI_MODE_RECOGNISE) ui_recognise_refresh(&copy);
     }
 }
 
@@ -146,12 +191,22 @@ extern "C" void recognise_start(void)
     s_lock = xSemaphoreCreateMutex();
     s_arena = arena_alloc(TAG, "command", KWS_MODEL_ARENA_BYTES);
     assert(s_arena);
-    /* Core 0, priority 3. LVGL (priority 4, 5 ms tick) and the audio task own
-       core 1, and LVGL preempted a 40 ms Invoke several times over. Core 0
-       carries only main (finished by now) and the console task (priority 1).
-       The priority stays at 3 — it was chosen to keep touch responsive on a
-       shared core, and raising it is a separate change with its own reasons. */
-    xTaskCreatePinnedToCore(recognise_task, "recognise", 16384, nullptr, 3, nullptr, 0);
+    /* Core 0, priority 2. LVGL (priority 4, 5 ms tick) and the audio task own
+       core 1, and LVGL preempted a 40 ms Invoke several times over.
+       Priority 2 puts this BELOW the wake task (3), which shares core 0 in
+       assist mode: the wake model is always on and costs 1.7 ms per 30 ms,
+       while this one is a best-effort burst costing 46 ms per step. At equal
+       priority the burst starved the detector. */
+    xTaskCreatePinnedToCore(recognise_task, "recognise", 16384, nullptr, 2, nullptr, 0);
 }
-extern "C" void recognise_set_active(bool on) { s_active = on; if (!on && s_log) { fclose(s_log); s_log = nullptr; } }
+extern "C" void recognise_set_active(bool on)
+{
+    s_active = on;
+    if (!on) { s_off_at_us = 0; if (s_log) { fclose(s_log); s_log = nullptr; } }
+}
+extern "C" void recognise_listen_for(uint32_t ms)
+{
+    s_off_at_us = esp_timer_get_time() + (int64_t)ms * 1000;
+    s_active = true;
+}
 extern "C" void recognise_get_status(recognise_status_t *out) { xSemaphoreTake(s_lock, portMAX_DELAY); *out = s_st; xSemaphoreGive(s_lock); }

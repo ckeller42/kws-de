@@ -19,6 +19,7 @@ static const char *mode_name(ui_mode_t m)
     case UI_MODE_USB:         return "usb";
     case UI_MODE_RECOGNISE:   return "recognise";
     case UI_MODE_WAKE:        return "wake";
+    case UI_MODE_ASSIST:      return "assist";
     }
     return "?";
 }
@@ -49,9 +50,13 @@ static void handle_line(char *line)
         else if (strcmp(arg, "recordwake") == 0) m = UI_MODE_RECORD_WAKE;
         else if (strcmp(arg, "recognise") == 0) m = UI_MODE_RECOGNISE;
         else if (strcmp(arg, "wake") == 0) m = UI_MODE_WAKE;
+        else if (strcmp(arg, "assist") == 0) m = UI_MODE_ASSIST;
         else if (strcmp(arg, "usb") == 0) m = UI_MODE_USB;
         else { printf("err unknown mode %s\n", arg); return; }
         app_set_mode(m);
+        printf("ok\n");
+    } else if (strcmp(cmd, "wakefire") == 0) {
+        wake_inject_fire();                /* measurement hook: see wake.h */
         printf("ok\n");
     } else if (strcmp(cmd, "status") == 0) {
         ui_mode_t m = app_get_mode();

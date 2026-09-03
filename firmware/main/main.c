@@ -34,6 +34,7 @@ void app_set_mode(ui_mode_t m)
     if (s_mode == UI_MODE_USB) ESP_ERROR_CHECK(usb_drive_exit());
     if (s_mode == UI_MODE_RECOGNISE) recognise_set_active(false);
     if (s_mode == UI_MODE_WAKE) wake_set_active(false);
+    if (s_mode == UI_MODE_ASSIST) { wake_set_active(false); recognise_set_active(false); }
     s_mode = m;
     if (m == UI_MODE_MENU) ui_show_menu();
     if (m == UI_MODE_USB) {
@@ -51,6 +52,10 @@ void app_set_mode(ui_mode_t m)
     /* Wake mode measures the wake model alone: the command recogniser stays off
        so nothing else competes for the mic, the CPU, or the screen. */
     if (m == UI_MODE_WAKE) { ui_show_wake(); recognise_set_active(false); wake_set_active(true); }
+    /* Assist: the wake model runs continuously and opens a window for the
+       recogniser on each fire, so the recogniser starts OFF and the wake
+       task turns it on. See assist_gate.h. */
+    if (m == UI_MODE_ASSIST) { ui_show_assist(); recognise_set_active(false); wake_set_active(true); }
 }
 
 ui_mode_t app_get_mode(void) { return s_mode; }

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include "arena.h"
+#include "assist_gate.h"
 #include "audio.h"
 #include "beep.h"
 #include "esp_heap_caps.h"
@@ -14,6 +15,7 @@
 #include "gen/wake_model_config.h"
 #include "gen/wake_model_data.h"
 #include "nn_timers.h"
+#include "recognise.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/micro_resource_variable.h"
@@ -45,6 +47,9 @@ static volatile bool s_restart;      /* set on activation: reset model + front-e
 static uint8_t *s_arena;
 static uint8_t s_var_arena[WAKE_VAR_ARENA_BYTES];
 static FILE *s_log;
+static assist_gate_t s_gate;         /* assist mode only: when the recogniser may run */
+static bool s_listening;             /* last state pushed to recognise_set_active() */
+static volatile bool s_inject;       /* console-injected fire, see wake_inject_fire() */
 
 static void log_fire(uint32_t ms, float prob)
 {
@@ -95,6 +100,8 @@ static void wake_task(void *)
             pos = audio_write_pos();
             consecutive = 0;
             deaf_until_us = 0;
+            assist_gate_reset(&s_gate);
+            if (s_listening) { s_listening = false; recognise_set_active(false); }
             s_restart = false;
         }
         vTaskDelay(pdMS_TO_TICKS(WAKE_POLL_MS));
@@ -132,6 +139,7 @@ static void wake_task(void *)
                 consecutive = 0;
                 fired = true;
             }
+            if (s_inject) { s_inject = false; fired = true; }
 
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             /* Tuning trace: the peak probability of the last 2 s, so the serial
@@ -161,14 +169,39 @@ static void wake_task(void *)
             wake_status_t copy = s_st;
             xSemaphoreGive(s_lock);
 
+            /* Assist mode: a fire opens a short window in which the command
+               recogniser runs, and it is switched off again when the window
+               closes. The gate is pure logic (assist_gate.c, host-tested); all
+               that happens here is turning the recogniser on and off at its
+               edges, so the expensive model runs for ~2.5 s per interaction
+               instead of continuously. */
+            bool assist = app_get_mode() == UI_MODE_ASSIST;
+            if (assist) {
+                if (fired) assist_gate_on_wake(&s_gate, now_ms);
+                bool listen = assist_gate_tick(&s_gate, now_ms);
+                if (listen != s_listening) {
+                    s_listening = listen;
+                    /* Opening the window hands the recogniser its own deadline
+                       so it stops even if this task stops being scheduled. */
+                    if (listen) recognise_listen_for(ASSIST_WINDOW_MS);
+                    else recognise_set_active(false);
+                    ESP_LOGI(TAG, "assist: recogniser %s (window %lu)", listen ? "on" : "off",
+                             (unsigned long)s_gate.windows);
+                }
+            }
+
             if (fired) {
                 ESP_LOGI(TAG, "wake! prob %.3f (%lu ms)", (double)prob, (unsigned long)ms);
                 log_fire(now_ms, prob);
-                ui_wake_refresh(&copy);       /* paint green before the tone blocks */
-                beep_play();
-            } else {
-                ui_wake_refresh(&copy);
             }
+            if (assist) {
+                recognise_status_t rst;
+                recognise_get_status(&rst);
+                ui_assist_refresh(&copy, &rst, s_listening);
+            } else {
+                ui_wake_refresh(&copy);       /* paint green before the tone blocks */
+            }
+            if (fired) beep_play();
             /* Yield inside the catch-up loop too: a backlog must never starve
                the LVGL task, or the Record button stops responding. */
             vTaskDelay(1);
@@ -193,6 +226,8 @@ extern "C" void wake_set_active(bool on)
     s_active = on;
     if (!on && s_log) { fclose(s_log); s_log = nullptr; }
 }
+
+extern "C" void wake_inject_fire(void) { s_inject = true; }
 
 extern "C" void wake_get_status(wake_status_t *out)
 {
