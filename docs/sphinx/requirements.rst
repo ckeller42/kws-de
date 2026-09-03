@@ -356,24 +356,34 @@ Recogniser
    input: requantisation multipliers and shifts are prepared with TFLM's own
    ``QuantizeMultiplier`` integer math, activation ranges with TFLM's own
    rounding, and ``LOGISTIC`` is a 256-entry table read out of the reference
-   kernel itself. The generated footprint is well below the TFLM arena the
-   same model needs — 15,680 B transient arena (activations plus esp-nn
-   scratch) plus 4,200 B of persistent ring state against a 40,960 B TFLM
-   arena (:need:`REQ_FW_ARENA_PLACEMENT`).
+   kernel itself. The generated footprint replaces, not supplements, the TFLM
+   arena in the default build — 15,680 B transient arena (activations plus
+   esp-nn scratch, of which 15,552 B is the reserved esp-nn scratch block) plus
+   4,200 B of persistent ring state in ``.bss``, against the 40,960 B arena the
+   interpreter allocates from internal RAM (:need:`REQ_FW_ARENA_PLACEMENT`).
+   The reserve is not taken on trust: at boot the firmware asks the chip's own
+   ``esp_nn_get_conv_scratch_size_esp32s3`` for the model's widest convolution
+   and refuses to run the generated path if the answer exceeds
+   ``WAKE_INFER_SCRATCH_BYTES`` from the generated header, since the failure it
+   guards against is a silent overrun into the ring state.
 
 .. req:: TFLite Micro stays as a build-time fallback
    :id: REQ_FW_INFER_FALLBACK
    :status: implemented
 
-   Both inference paths compile into one firmware family; ``menuconfig``'s
+   Both inference paths live in one firmware family; ``menuconfig``'s
    ``CONFIG_KWS_INFER_GENERATED`` (``firmware/main/Kconfig.projbuild``) picks
    one and the boot log prints which is active. A model that uses an op the
    generator refuses is a loud generation-time error naming the op and tensor,
-   and the interpreter build still runs it. ``CONFIG_KWS_INFER_PARITY_LOG``
-   logs both paths' output for the same input once per mode entry, on real
-   device audio. The gating semantics around the model are untouched by the
-   switch: threshold, consecutive-step count and refractory period
-   (:need:`REQ_FW_WAKE_DETECT`) see the same probability byte either way.
+   and the interpreter build still runs it. The default build compiles the
+   interpreter *out*: no ``MicroInterpreter``, no resource variables and no
+   40,960 B arena, which is the memory the generated path is there to save.
+   ``CONFIG_KWS_INFER_PARITY_LOG`` (default off) brings it back as an
+   on-device reference and logs both paths' output for the same input once per
+   mode entry, on real device audio — a developer-verification switch, not a
+   shipping one. The gating semantics around the model are untouched either
+   way: threshold, consecutive-step count and refractory period
+   (:need:`REQ_FW_WAKE_DETECT`) see the same probability byte.
 
 .. req:: Recogniser model is the 23-class v2 command model
    :id: REQ_FW_23_CLASSES
@@ -420,10 +430,12 @@ Wake word ("Hey Bus")
    :id: REQ_FW_WAKE_DETECT
    :status: implemented
 
-   ``wake.cc`` runs the streaming ``models/hey_bus.tflite`` interpreter
-   once per 3 feature rows (30 ms of audio), keeping the interpreter and
-   its resource variables alive between steps and resetting them when the
-   mode is entered. A detection needs ``WAKE_THRESHOLD`` (0.99) on
+   ``wake.cc`` runs the streaming ``models/hey_bus.tflite`` graph once per 3
+   feature rows (30 ms of audio) — by default on the generated path
+   (:need:`REQ_FW_INFER_GENERATED`), otherwise through the interpreter — and
+   keeps the streaming state (the generated ring buffers, or the interpreter's
+   resource variables) alive between steps, resetting it when the mode is
+   entered. A detection needs ``WAKE_THRESHOLD`` (0.85) on
    ``WAKE_MIN_CONSECUTIVE`` (2) consecutive steps, after which
    ``WAKE_REFRACTORY_MS`` (1500) suppresses further fires, so one spoken
    "Hey Bus" produces exactly one fire. Each fire is logged to

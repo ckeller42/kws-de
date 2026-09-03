@@ -59,22 +59,32 @@ probability, and a fire counter. A fire turns the background green for
 menu.
 
 The model itself runs on the generated inference path by default
-(:need:`REQ_FW_INFER_GENERATED`). Measured on the CoreS3 in one session, same
-build otherwise, two minutes of the peak trace per path: **wake step
-1.95 -> 1.26 ms** (median of the 2 s trace windows; the model evaluation
-alone, 1.76 -> 1.21 ms) and the within-window spread drops from ±469 to
-±129 µs. It costs **15,680 B of transient arena plus 4,200 B of ring state**,
-against the 40,960 B TFLM arena (31,388 B of it used) that stays allocated as
-the fallback — the boot line reads ``inference: generated (esp-nn), 15680 B
-arena + 4200 B state, esp-nn conv scratch 15552 B queried; TFLM arena 40960 B
-kept as fallback``, where the scratch figure is what the real
-``esp_nn_get_conv_scratch_size_esp32s3`` answers on the chip for this model's
-widest convolution — exactly the size the generator reserved. On entering the
-mode the two paths are run on the same live features and both answers logged
-(``parity: generated 71, interpreter 71``): identical, as the host tests
-require. Note the per-kernel esp-nn timers in the trace read zero on this
-path — they are esp-tflite-micro's wrappers, which the generated code does not
-go through; its cost is reported as the residual.
+(:need:`REQ_FW_INFER_GENERATED`), and the default build carries no interpreter
+at all. Measured on the CoreS3 in one session, same build otherwise, two
+minutes of the peak trace per path: **wake step 1.89 -> 1.28 ms** (mean
+of the 2 s trace windows), within-window spread ±502 -> ±151 µs, and
+**free internal RAM after the wake model is set up 58,511 -> 81,371 B** —
+the generated path's 15,680 B arena and 4,200 B of ring state are ``.bss``,
+and the interpreter's 40,960 B tensor arena is never allocated. The boot line
+reads ``inference: generated (esp-nn), 15680 B arena + 4200 B state, esp-nn
+conv scratch 15552 B queried / 15552 B reserved; TFLM not built in; free
+internal <n>``: the queried figure is what the chip's own
+``esp_nn_get_conv_scratch_size_esp32s3`` answers for this model's widest
+convolution, checked against what the generator reserved — a larger answer
+makes the firmware refuse the generated path rather than let the kernels
+overrun the arena into the ring state.
+
+``CONFIG_KWS_INFER_PARITY_LOG=y`` builds the interpreter back in as a
+reference (and re-allocates its arena): on entering the mode both paths run on
+the same live features and both answers are logged — ``parity: out byte
+generated 71, interpreter 71``, identical, as the host tests require. That one
+step also carries the extra ``Invoke``, so the first trace window after a mode
+entry reads a few ms high. Two more things when reading the trace on the
+generated path: the per-kernel esp-nn timers belong to esp-tflite-micro's
+wrappers, which the generated code does not go through, so they read zero and
+its cost lands in the residual; and the spec's "well under 1 ms" target is not
+reached — of the ~1.2 ms, ~1.1 ms is esp-nn kernel time for this model, so
+what remains is a model-size question, not a code-generation one.
 
 Record
 ~~~~~~~

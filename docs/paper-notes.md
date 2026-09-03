@@ -857,34 +857,51 @@ why the mount now ends with a write-and-read-back probe before the card is trust
 The wake model no longer runs through `tflite::MicroInterpreter`. `kws-codegen` emits the
 graph as a flat C function (`firmware/main/gen/wake_infer.c`) that calls esp-nn's ESP32-S3
 kernels directly, with the streaming ring buffers as plain static arrays;
-`CONFIG_KWS_INFER_GENERATED` picks the path and TFLM stays in the binary as the fallback.
-Both paths measured on the device in one session, same build otherwise, two minutes of the
-2 s peak trace each (medians over the trace windows):
+`CONFIG_KWS_INFER_GENERATED` picks the path, and in the default build the interpreter is
+compiled *out*: no `MicroInterpreter`, no resource variables, no 40 KB tensor arena. Both
+builds measured on the device in one session, same configuration otherwise, two minutes of
+the 2 s peak trace each (medians over the trace windows):
 
 | | TFLM interpreter | generated (esp-nn) |
 |---|---|---|
-| wake step | 1945 µs | **1257 µs** (−35 %) |
-| model evaluation alone | 1755 µs | **1208 µs** (−31 %) |
-| within-window spread | ±469 µs | **±129 µs** |
-| static footprint | 40,960 B arena (31,388 B used) | **15,680 B arena + 4,200 B ring state** |
-| app image | 1,165,840 B | 1,199,488 B (both paths and both model blobs linked in) |
-| output on live device audio | `parity: generated 71, interpreter 71` | identical |
+| wake step | 1891 µs | **1281 µs** (−32 %) |
+| model evaluation alone | 1735 µs | **1220 µs** (−30 %) |
+| within-window spread | ±502 µs | **±151 µs** |
+| model memory | 40,960 B heap arena (31,388 B used) + 1 KB variable arena | **15,680 B arena + 4,200 B ring state, all `.bss`** |
+| free internal RAM once wake is up | 58,511 B | **81,371 B** (+22,860 B) |
+| app image | 1,165,872 B | **1,098,992 B** (−66,880 B: no interpreter, no kernel set) |
+| output on live device audio | `parity: out byte generated 71, interpreter 71` | identical |
+
+The memory row is what changes the deployment shape: the tensor arena is not *also*
+allocated, it is gone, and the 22.9 KB that frees is internal SRAM — the scarce kind. (It did
+not buy the command model a seat: its 65,536 B arena needs one contiguous block and the
+largest is 31,744 B, so the recogniser still runs from PSRAM.) `CONFIG_KWS_INFER_PARITY_LOG=y`
+re-links the interpreter and re-allocates the arena — that is the developer-verification
+build, not the shipped one.
 
 **Why it is faster is not "better kernels" — they are the same esp-nn kernels.** The kernel
-timers say so: in the interpreter run, conv + depthwise + FC is ~1,090 µs of the 1,755 µs
+timers say so: in the interpreter run, conv + depthwise + FC is ~1,090 µs of the 1,735 µs
 `Invoke`, and the remaining ~640 µs is per-op dispatch, resource-variable bookkeeping and the
 reference-C glue ops (`CONCATENATION`, `STRIDED_SLICE`, `QUANTIZE`, `LOGISTIC`). The generated
 function keeps the ~1,090 µs of kernels, replaces the glue with `memcpy`/`memmove` on the rings
-and a 256-entry LUT, and lands at 1,208 µs total. **The interpreter's overhead was a third of
+and a 256-entry LUT, and lands at 1,220 µs total. **The interpreter's overhead was a third of
 the wake inference**, and the variance collapses with it: no allocator and no per-step tensor
 bookkeeping competing with the LVGL task.
+
+That also settles what is left of the spec's "wake step well under 1 ms" target: it is **not**
+met at 1.28 ms, and code generation cannot close the gap — ~1.1 ms of the 1.22 ms is esp-nn
+kernel time for *this* model, so the remaining lever is model size (channels, layers), not the
+inference runtime. Recorded as open rather than quietly restated.
 
 Bit-exactness is the point, and it is checked at three levels: `wake smoke: 0/64 steps differ`
 (synthetic vectors, model-free, runs in CI), `wake parity: 0/635 steps differ (11 clips,
 4200 B state)` (the ten approved "Hey Bus" takes, needs the data root), and on the device
 itself once per mode entry on live microphone features. The generated arena's esp-nn scratch
-block is sized by a Python port of `esp_nn_get_conv_scratch_size_esp32s3`; asking the real
-function on the real chip returns 15,552 B — exactly what the port reserved.
+block is sized by a Python port of `esp_nn_get_conv_scratch_size_esp32s3`, emitted into the
+header as `WAKE_INFER_SCRATCH_BYTES`; the firmware asks the real function on the real chip at
+boot, gets 15,552 B — exactly what the port reserved — and refuses to run the generated path
+if it ever comes back larger, because that failure mode is a silent overrun into the ring
+state rather than a crash.
 
 ## Open questions
 
