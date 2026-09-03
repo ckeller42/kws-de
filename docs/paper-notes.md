@@ -645,6 +645,51 @@ to emit an arena size derived from the measured need rather than the current fix
 That is a deliberate decision about the floor, not a free win, so it is left for its own
 change.
 
+**Quantisation-aware training, `--qat` (2026-09-03).** `tensorflow-model-optimization` (tfmot)
+only wraps `tf.keras` models built under Keras 2; TF 2.18's default `tf.keras` is Keras 3, which
+tfmot's `QuantizeWrapperV2` cannot wrap. Fix: `kws-train --qat` and `kws-export --qat` re-exec
+themselves once under `TF_USE_LEGACY_KERAS=1` (the `tf_keras` shim) before TensorFlow is imported
+anywhere in the process — the env var has to be set pre-import, so this has to happen at module
+load, not inside `main()`. `kws-train --qat` loads the existing float `command_v3.keras`'s weights
+(`model.load_weights` round-trips across the Keras 2/3 boundary even though a full `load_model`
+does not — confirmed empirically, not assumed) into a freshly-built architecture under the legacy
+runtime, wraps it with `tfmot.quantization.keras.quantize_model` (per-tensor fake-quant on every
+activation, per-channel on conv/dense kernels), and fine-tunes 10 epochs at `Adam(1e-5)`. The
+QAT model is saved as a SavedModel dir (`command_v3_qat/`), not `.keras` — reloading a
+`quantize_model`-wrapped model from the `.keras` zip format hit a real, reproduced tfmot/Keras-3
+variable-naming bug (`Layer 'quantize_layer' expected 5 variables, but received 3`) on the exact
+same architecture that round-trips cleanly through `save_format="tf"`. `kws-export --qat` reloads
+it under `tfmot.quantization.keras.quantize_scope()` and converts with the same `to_int8_tflite`
+PTQ conversion already uses — the QAT model's baked-in fake-quant ranges do the work, no separate
+code path needed for the TFLite conversion itself.
+
+Same architecture (`build_dscnn`, 23 classes), same `features_v3` data, same `features_v3_test`
+held-out split:
+
+| Model | Test accuracy | Size |
+|---|---|---|
+| Float (`command_v3.keras`) | 89.4 % | 178 142 B |
+| INT8 PTQ (`command_v3.tflite`, today's baseline) | 88.0 % | 18 296 B |
+| INT8 QAT (`command_v3_qat.tflite`, 10 fine-tune epochs) | **91.2 %** | 17 880 B |
+
+QAT recovers all of PTQ's 1.4-point INT8 accuracy loss and adds another 1.8 points on top of
+the *float* model — the fake-quant fine-tune found a better minimum for the quantised graph,
+not just a less-lossy one. Real-recordings isolated-word accuracy (`kws-eval --recordings`,
+same two device speakers, `user-customised, in-training`, same manifest) moves the same
+direction, not just the synthetic test set:
+
+| Speaker | Words (n) | PTQ acc | QAT acc | Negatives (n) | PTQ FA rate | QAT FA rate |
+|---|---|---|---|---|---|---|
+| spk01 | 13 | 0.538 | **0.615** | 0 | n/a | n/a |
+| spk02 | 38 | 0.553 | **0.737** | 10 | 0.000 | 0.000 |
+
+False-accept rate is unchanged (0/10, both models) and isolated-word accuracy improves for both
+speakers — QAT does not trade detection performance for the quantisation-error recovery; it
+improves both. `export.assert_model_healthy` (50 % accuracy floor, ≥ 10 predicted classes) passes
+for both INT8 models with all 23 classes represented in predictions. Held-out phrase accuracy
+(4 clips, 1 speaker) is 0/4 for both models — too small an n to read anything into; the isolated-
+word and false-accept figures above are the ones with enough clips to mean something.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

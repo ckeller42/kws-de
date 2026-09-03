@@ -1,11 +1,22 @@
-import argparse
-import json
-import pathlib
+import os
+import sys
 
-import numpy as np
-import tensorflow as tf
+# See kws_de/train.py for why: loading a tfmot-quantised (QAT) model back
+# requires the legacy-Keras runtime tfmot targets, and the env var that
+# selects it must be set before `tensorflow` is imported anywhere in the
+# process. No-op for every export that isn't `--qat`.
+if "--qat" in sys.argv and os.environ.get("TF_USE_LEGACY_KERAS") != "1":
+    os.environ["TF_USE_LEGACY_KERAS"] = "1"
+    os.execv(sys.executable, [sys.executable, "-m", "kws_de.export", *sys.argv[1:]])
 
-from kws_de import config
+import argparse  # noqa: E402
+import json  # noqa: E402
+import pathlib  # noqa: E402
+
+import numpy as np  # noqa: E402
+import tensorflow as tf  # noqa: E402
+
+from kws_de import config  # noqa: E402
 
 
 def to_int8_tflite(model, rep_samples) -> bytes:
@@ -203,12 +214,22 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     )
     ap.add_argument("--prefix", default=None, help="npz prefix (default: features[_v2])")
     ap.add_argument("--model", default=None, help="model filename (default: kws/command.keras)")
+    ap.add_argument(
+        "--qat",
+        action="store_true",
+        help="load a quantisation-aware-trained model (kws-train --qat's SavedModel "
+        "dir, default <model>_qat) and use its baked-in fake-quant ranges for the "
+        "INT8 conversion, instead of a plain float model + post-training "
+        "quantisation; output artefacts get an extra _qat suffix",
+    )
     args = ap.parse_args()
     if args.firmware:
         args.v2 = True
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     model_name = args.model or ("command.keras" if args.v2 else "kws.keras")
+    if args.qat:
+        model_name = model_name.removesuffix(".keras") + "_qat"
     prefix = args.prefix or ("features_v2" if args.v2 else "features")
     # A v3 export must not overwrite the shipped v2 artefacts: the prefix's suffix
     # names them too (features_v3 -> command_v3.tflite / command_v3_data.h /
@@ -218,10 +239,19 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     suffix = prefix.removeprefix("features")
     if suffix == "_v2" or not args.v2:  # v2 IS the stock command model: no suffix
         suffix = ""
-    tflite_name = f"command{suffix}.tflite" if args.v2 else "model.tflite"
-    header_name = f"command{suffix}_data.h" if args.v2 else "model_data.h"
+    if args.qat:
+        suffix += "_qat"
+    qat_tag = "_qat" if args.qat else ""
+    tflite_name = f"command{suffix}.tflite" if args.v2 else f"model{qat_tag}.tflite"
+    header_name = f"command{suffix}_data.h" if args.v2 else f"model{qat_tag}_data.h"
     labels = config.COMMAND_LABELS if args.v2 else config.LABELS
-    model = tf.keras.models.load_model(config.MODELS_DIR / model_name)
+    if args.qat:
+        import tensorflow_model_optimization as tfmot
+
+        with tfmot.quantization.keras.quantize_scope():
+            model = tf.keras.models.load_model(config.MODELS_DIR / model_name)
+    else:
+        model = tf.keras.models.load_model(config.MODELS_DIR / model_name)
     d = np.load(config.DATA_DIR / f"{prefix}_train.npz")
     blob = to_int8_tflite(model, balanced_calibration(d["X"], d["y"]))
     (out / tflite_name).write_bytes(blob)
@@ -246,3 +276,7 @@ def main() -> None:  # pragma: no cover - I/O wrapper
         write_c_array(blob, gen / "model_data.h")
         write_model_config(blob, gen / "model_config.h")
         write_wake_headers(config.MODELS_DIR / "hey_bus.tflite", gen)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
