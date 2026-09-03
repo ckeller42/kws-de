@@ -97,7 +97,10 @@ scripts/data-loop.sh -H <device-host>   # or: export KWSREC_HOST=<device-host>
 
 `-H`/`KWSREC_HOST` is the SSH name of the machine the CoreS3 is plugged
 into — never hard-coded in the repo. Details, the data layout, and the two
-eval figures: [docs/sphinx/pipeline.rst](docs/sphinx/pipeline.rst).
+eval figures: [docs/sphinx/pipeline.rst](docs/sphinx/pipeline.rst). Every
+stage prints an ETA before it starts and records its actual duration after,
+improving future predictions (`kws_de.eta`, "How long will it take" in that
+same doc).
 
 ## Development
 
