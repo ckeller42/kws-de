@@ -61,8 +61,18 @@ if [[ -z $incoming ]]; then
   }
 fi
 
+# Every long stage below runs through `kws-eta run <stage> <size> -- ...`: it prints an
+# ETA from this stage's recorded history before the command starts, then records the
+# actual wall time after. `size` is whatever cheap-to-compute number scales with the
+# stage's work (see each stage's comment) -- never something that itself requires doing
+# the work first.
+eta() { run uv run --no-sync kws-eta run "$1" "$2" -- uv run --no-sync "${@:3}"; }
+
 stage "QC $incoming"
-run uv run --no-sync kws-qc "$incoming"
+# size = number of takes in this session (sessions.csv has one header + one row/take).
+qc_size=$(($(wc -l < "$incoming/sessions.csv" 2>/dev/null || echo 1) - 1))
+(( qc_size > 0 )) || qc_size=1
+eta qc "$qc_size" kws-qc "$incoming"
 
 stage "dataset build ($prefix)"
 # The v3 cache holds the MSWC/TTS material only; the approved recordings are merged in
@@ -81,16 +91,38 @@ if [[ ! -f $cache ]]; then
   echo "seeding $(basename "$cache") from $(basename "$seed") (full real+TTS cache)"
   run cp "$seed" "$cache"
 fi
-run uv run --no-sync kws-dataset build --cache raw_clips_v3.pkl --prefix "$prefix"
+# size = the cache pickle's byte size -- a cheap stand-in for clip count that doesn't
+# require unpickling it (the pickle's own load, inside the build, is the real work).
+build_size=$(wc -c < "$cache" 2>/dev/null | tr -d ' ' || echo 1)
+eta "dataset-build" "$build_size" kws-dataset build --cache raw_clips_v3.pkl --prefix "$prefix"
 
+epochs=40
 if (( ! skip_train )); then
   stage "train"
-  run uv run --no-sync kws-train --v2 --prefix "$prefix" --out command_v3.keras --epochs 40
+  # size = epochs * train-split row count, read back from the manifest the dataset-build
+  # stage above just wrote (falls back to epochs alone if that manifest is missing, e.g.
+  # a dry run).
+  manifest="$KWS_DATA_ROOT/data/manifest${prefix#features}.json"
+  n_train=$(uv run --no-sync python -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1]))["splits"]["train"]["n"])
+except (OSError, KeyError):
+    print(0)
+' "$manifest" 2>/dev/null || echo 0)
+  train_size=$(( epochs * n_train ))
+  (( train_size > 0 )) || train_size=$epochs
+  eta train "$train_size" \
+    kws-train --v2 --prefix "$prefix" --out command_v3.keras --epochs "$epochs"
   stage "export (health gate)"
-  run uv run --no-sync kws-export --prefix "$prefix" --model command_v3.keras --firmware
+  eta export 1 kws-export --prefix "$prefix" --model command_v3.keras --firmware
 fi
 
 stage "evals"
-run uv run --no-sync kws-eval --recordings "$rec/approved" --prefix "$prefix" --out docs/eval-report-v3.md
+# size = number of approved clips this eval scores.
+eval_size=$(find "$rec/approved" -name '*.wav' 2>/dev/null | wc -l | tr -d ' ')
+(( eval_size > 0 )) || eval_size=1
+eta eval "$eval_size" \
+  kws-eval --recordings "$rec/approved" --prefix "$prefix" --out docs/eval-report-v3.md
 
 echo "done: held-out + user-customised figures in \$KWS_DATA_ROOT/docs/eval-report-v3.md. Flash with your flash script for the device host."

@@ -4,6 +4,7 @@ import numpy as np
 import tensorflow as tf
 
 from kws_de import config
+from kws_de.eta import Timed
 from kws_de.model import build_dscnn
 
 
@@ -64,6 +65,8 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     num_classes = len(config.COMMAND_LABELS) if args.v2 else None
     out_name = args.out or ("command.keras" if args.v2 else "kws.keras")
     data = np.load(config.DATA_DIR / f"{prefix}_train.npz")
-    model, history = train(data["X"], data["y"], epochs=args.epochs, num_classes=num_classes)
+    size = args.epochs * data["X"].shape[0]
+    with Timed("train", size=size, note=prefix):
+        model, history = train(data["X"], data["y"], epochs=args.epochs, num_classes=num_classes)
     model.save(config.MODELS_DIR / out_name)
     print(f"final train accuracy: {history['accuracy'][-1]:.4f}")

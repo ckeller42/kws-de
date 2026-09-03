@@ -252,6 +252,42 @@ Either way the eval's labelling is manifest-driven and stays honest: with
 ``kws-eval --recordings`` reports their clips as
 ``user-customised, in-training`` — which is exactly what they now are.
 
+How long will it take
+----------------------
+
+Every long stage in ``scripts/data-loop.sh`` (QC, dataset build, train,
+export, eval) runs through ``kws-eta run <stage> <size> -- <command>``
+(``kws_de.eta``): before the command starts it prints an ETA from that
+stage's recorded history on this machine, and after it finishes it appends
+the measured wall time to a small ledger
+(``$KWS_DATA_ROOT/data/timings.jsonl``, one JSON line per finished run) so
+the next prediction improves. ``kws-train`` invoked directly also records,
+via ``Timed`` in ``kws_de.train.main``.
+
+The ledger models seconds-per-unit-of-``size`` rather than raw seconds, so
+one history serves any input size: QC's ``size`` is the take count in
+``sessions.csv``, dataset build's is the raw-clip cache's byte size (a cheap
+stand-in for clip count -- it avoids unpickling the cache just to measure
+it), train's is ``epochs × train-split rows`` (read back from the manifest
+the dataset-build stage just wrote), export's is a constant ``1``, and
+eval's is the approved-clip count. A prediction is the median of the last
+10 same-stage, same-machine rates, with the 20th/80th-percentile rates as
+its low/high band; the first run of a stage on a machine has no history, so
+it prints "ETA unknown" instead of guessing.
+
+.. code-block:: console
+
+   $ uv run --no-sync kws-eta predict train 4920
+   ETA ~6.3 min (range 5.8–7.1, from 4 runs)
+
+For a long-running training loop that logs its own step count (e.g. an
+external microWakeWord run), ``kws-eta watch <logfile> --total N --pattern
+'Step #(\d+)'`` tails the log and prints ``step 8200/20000, 610 steps/min,
+ETA 19.3 min`` every 30 s, alongside the ledger's prediction if ``--stage``
+names one. The machine tag in every ledger row is ``KWS_HOST_TAG`` if set,
+else ``platform.node()`` hashed to 8 hex characters -- never the raw
+hostname, so the ledger is safe to commit or share.
+
 Requirements
 ------------
 
