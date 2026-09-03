@@ -7,11 +7,14 @@
  * is switched off while it is active, so what the screen shows is the wake
  * model's behaviour and nothing else.
  *
- * The model is a *streaming* TFLite-Micro graph with resource variables: the
- * interpreter is created once and kept alive, and every Invoke() consumes the
- * next KWS_WAKE_FRAMES (3) 10 ms feature rows, i.e. one inference per 30 ms of
- * audio. Its variables are reset on every wake_set_active(true) so a previous
- * session cannot leak state into a new one.
+ * The model is a *streaming* graph: every step consumes the next
+ * KWS_WAKE_FRAMES (3) 10 ms feature rows, i.e. one inference per 30 ms of
+ * audio, and carries state between steps. By default that state is the ring
+ * buffers of the generated inference (CONFIG_KWS_INFER_GENERATED; no
+ * interpreter is built at all); with the switch off it is a TFLite-Micro
+ * interpreter's resource variables, created once and kept alive. Either way
+ * the state is reset on every wake_set_active(true), so a previous session
+ * cannot leak into a new one.
  */
 #pragma once
 #include <stdbool.h>

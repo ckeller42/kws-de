@@ -30,11 +30,26 @@ static_assert(WAKEFRONT_FEATURES == KWS_WAKE_FEATURES,
               "front-end width must match the wake model's input width");
 static_assert(WAKEFRONT_MAX_ROWS == KWS_WAKE_FRAMES,
               "front-end row buffer must match the wake model's per-Invoke stride");
+static_assert(WAKE_INFER_INPUT_LEN == KWS_WAKE_FRAMES * KWS_WAKE_FEATURES,
+              "generated wake input length must match the front-end block");
 
+/* Is the interpreter in this build at all? It is the inference path when the
+   generated one is switched off, and the reference the parity log needs when it
+   is on. With the generated path alone — the shipped default — nothing here
+   instantiates it and its 40 KB arena is never allocated, which is the point of
+   generating the inference in the first place. */
+#if !CONFIG_KWS_INFER_GENERATED || CONFIG_KWS_INFER_PARITY_LOG
+#define KWS_WAKE_TFLM 1
+#else
+#define KWS_WAKE_TFLM 0
+#endif
+
+#if KWS_WAKE_TFLM
 /* The streaming graph keeps its ring state in TFLM resource variables, which
    live in their own small arena (mirrors ESPHome's micro_wake_word). 1 KB fits
    the ~20 handles these models declare. */
 #define WAKE_VAR_ARENA_BYTES 1024
+#endif
 
 /* Loop cadence. The front-end consumes 10 ms per row and the model 3 rows per
    Invoke, so 10 ms of sleep keeps us a fraction of a step behind live audio
@@ -47,11 +62,13 @@ static SemaphoreHandle_t s_lock;
 static wake_status_t s_st;
 static volatile bool s_active;
 static volatile bool s_restart;      /* set on activation: reset model + front-end state */
-#if CONFIG_KWS_INFER_GENERATED
-static volatile bool s_parity_pending; /* generated path: log both paths' output on the next step */
+#if CONFIG_KWS_INFER_GENERATED && CONFIG_KWS_INFER_PARITY_LOG
+static bool s_parity_pending;        /* log both paths' output on the next step (wake_task only) */
 #endif
+#if KWS_WAKE_TFLM
 static uint8_t *s_arena;
 static uint8_t s_var_arena[WAKE_VAR_ARENA_BYTES];
+#endif
 static FILE *s_log;
 static assist_gate_t s_gate;         /* assist mode only: when the recogniser may run */
 static bool s_listening;             /* last state pushed to recognise_set_active() */
@@ -72,6 +89,7 @@ static void log_fire(uint32_t ms, float prob)
 
 static void wake_task(void *)
 {
+#if KWS_WAKE_TFLM
     /* 13 ops, exactly what models/hey_bus.tflite declares. */
     static tflite::MicroMutableOpResolver<13> resolver;
     resolver.AddConv2D(); resolver.AddDepthwiseConv2D(); resolver.AddFullyConnected();
@@ -89,27 +107,49 @@ static void wake_task(void *)
     if (interp.AllocateTensors() != kTfLiteOk) { ESP_LOGE(TAG, "AllocateTensors failed"); vTaskDelete(nullptr); return; }
     ESP_LOGI(TAG, "arena used %u / %u", (unsigned)interp.arena_used_bytes(), (unsigned)KWS_WAKE_ARENA_BYTES);
     TfLiteTensor *in = interp.input(0), *out = interp.output(0);
+    int8_t *feat = in->data.int8;      /* the front-end writes here, both paths read it */
+#else
+    static int8_t s_feat[WAKE_INFER_INPUT_LEN] __attribute__((aligned(16)));
+    int8_t *feat = s_feat;
+#endif
+
 #if CONFIG_KWS_INFER_GENERATED
+    bool use_generated = true;
     wake_infer_init();
-    /* gen/wake_infer.c reserves its esp-nn scratch block from a Python port of
-       esp_nn_get_conv_scratch_size_esp32s3() (kws_de/codegen.py). Ask the real
-       one, on the real chip, for this model's widest conv — the first CONV_2D,
-       with the dims gen/wake_infer.c itself passes — so a port that drifts from
-       esp-nn is a boot-log line rather than a silent scratch overrun. */
+    /* gen/wake_infer.c reserves WAKE_INFER_SCRATCH_BYTES of its arena for
+       esp-nn, sized by a Python port of esp_nn_get_conv_scratch_size_esp32s3()
+       (kws_de/codegen.py). Ask the real one, on the real chip, for this model's
+       widest conv — the first CONV_2D, with the dims gen/wake_infer.c itself
+       passes. If the port under-reserved, the kernels would scribble past the
+       arena into the ring state, so this refuses to run rather than logging a
+       number nobody diffs. */
     const data_dims_t sc_in = { .width = 1, .height = 5, .channels = 40, .extra = 1 };
     const data_dims_t sc_flt = { .width = 1, .height = 5, .channels = 40, .extra = 0 };
     const data_dims_t sc_out = { .width = 1, .height = 1, .channels = 32, .extra = 1 };
     const conv_params_t sc_p = { .in_offset = 128, .out_offset = -128, .stride = { 1, 3 },
                                  .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
-    ESP_LOGI(TAG, "inference: generated (esp-nn), %u B arena + %u B state, esp-nn conv scratch %d B queried; TFLM arena %u B kept as fallback",
-             (unsigned)wake_infer_arena_bytes(), (unsigned)wake_infer_state_bytes(),
-             esp_nn_get_conv_scratch_size(&sc_in, &sc_flt, &sc_out, &sc_p),
-             (unsigned)KWS_WAKE_ARENA_BYTES);
-#if !CONFIG_KWS_INFER_PARITY_LOG
-    (void)out;   /* only the parity log reads the interpreter's output tensor */
+    int scratch = esp_nn_get_conv_scratch_size(&sc_in, &sc_flt, &sc_out, &sc_p);
+    if (scratch > WAKE_INFER_SCRATCH_BYTES) {
+        ESP_LOGE(TAG, "esp-nn conv scratch %d B > the %u B gen/wake_infer.c reserved — regenerate with kws-codegen",
+                 scratch, (unsigned)WAKE_INFER_SCRATCH_BYTES);
+        use_generated = false;
+#if !KWS_WAKE_TFLM
+        ESP_LOGE(TAG, "no interpreter in this build (CONFIG_KWS_INFER_PARITY_LOG=n) — wake inference disabled");
+        vTaskDelete(nullptr); return;
 #endif
+        ESP_LOGE(TAG, "falling back to the TFLite Micro interpreter");
+    }
+    ESP_LOGI(TAG, "inference: %s, %u B arena + %u B state, esp-nn conv scratch %d B queried / %u B reserved; "
+                  "TFLM %s; free internal %u",
+             use_generated ? "generated (esp-nn)" : "TFLite Micro interpreter (generated path refused)",
+             (unsigned)wake_infer_arena_bytes(), (unsigned)wake_infer_state_bytes(),
+             scratch, (unsigned)WAKE_INFER_SCRATCH_BYTES,
+             KWS_WAKE_TFLM ? "arena kept as the parity reference and fallback" : "not built in",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 #else
-    ESP_LOGI(TAG, "inference: TFLite Micro interpreter");
+    const bool use_generated = false;
+    ESP_LOGI(TAG, "inference: TFLite Micro interpreter; free internal %u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 #endif
 
     wakefront_init();
@@ -126,11 +166,15 @@ static void wake_task(void *)
             /* Fresh session: drop the streaming ring state and the front-end's
                noise/PCAN estimates, and start from live audio rather than
                replaying whatever sat in the ring. */
+#if KWS_WAKE_TFLM
             interp.Reset();
             mrv->ResetAll();
+#endif
 #if CONFIG_KWS_INFER_GENERATED
             wake_infer_reset();
+#if CONFIG_KWS_INFER_PARITY_LOG
             s_parity_pending = true;
+#endif
 #endif
             wakefront_reset();
             pos = audio_write_pos();
@@ -158,31 +202,38 @@ static void wake_task(void *)
             if (!wakefront_ready(KWS_WAKE_FRAMES)) continue;
 
             int64_t t0 = esp_timer_get_time();
-            wakefront_take(KWS_WAKE_FRAMES, in->data.int8);
+            wakefront_take(KWS_WAKE_FRAMES, feat);
             NN_TIMERS_RESET();
-            uint8_t prob_q;
+            uint8_t prob_q = 0;
             int64_t t_invoke = esp_timer_get_time();
+            if (use_generated) {
 #if CONFIG_KWS_INFER_GENERATED
-            wake_infer_step(in->data.int8, &prob_q);
+                wake_infer_step(feat, &prob_q);
+#endif
+            } else {
+#if KWS_WAKE_TFLM
+                if (interp.Invoke() != kTfLiteOk) { ESP_LOGE(TAG, "Invoke failed"); continue; }
+                prob_q = out->data.uint8[0];
+#endif
+            }
             int64_t invoke_us = esp_timer_get_time() - t_invoke;
-#if CONFIG_KWS_INFER_PARITY_LOG
-            if (s_parity_pending) {
+#if CONFIG_KWS_INFER_GENERATED && CONFIG_KWS_INFER_PARITY_LOG
+            if (use_generated && s_parity_pending) {
                 /* Same input through both paths, once per mode entry: the
                    generated ring state has already advanced, so this compares
                    the interpreter's answer for THIS step only — it is
                    meaningful precisely because both paths were reset together
                    a moment ago. A mismatch is a real regression; the host
-                   parity tests should have caught it. Timed outside invoke_us. */
+                   parity tests should have caught it. Outside invoke_us, but
+                   inside this step's step_us, so the first trace window after a
+                   mode entry reads a few ms high. */
                 if (interp.Invoke() == kTfLiteOk)
-                    ESP_LOGI(TAG, "parity: generated %u, interpreter %u",
+                    ESP_LOGI(TAG, "parity: out byte generated %u, interpreter %u",
                              (unsigned)prob_q, (unsigned)out->data.uint8[0]);
+                else
+                    ESP_LOGE(TAG, "parity: interpreter Invoke failed");
                 s_parity_pending = false;
             }
-#endif
-#else
-            if (interp.Invoke() != kTfLiteOk) { ESP_LOGE(TAG, "Invoke failed"); continue; }
-            int64_t invoke_us = esp_timer_get_time() - t_invoke;
-            prob_q = out->data.uint8[0];
 #endif
             /* uint8 output: prob = (q - zero_point) * scale, i.e. q/256. */
             float prob = (prob_q - KWS_WAKE_OUTPUT_ZERO_POINT) * KWS_WAKE_OUTPUT_SCALE;
@@ -221,7 +272,13 @@ static void wake_task(void *)
             xSemaphoreTake(s_lock, portMAX_DELAY);
             s_st.prob = prob;
             s_st.infer_ms = ms;
+#if KWS_WAKE_TFLM
             s_st.arena_used = interp.arena_used_bytes();
+#else
+            /* No interpreter in this build: report what the generated path
+               actually occupies instead of a field that would read 0. */
+            s_st.arena_used = wake_infer_arena_bytes() + wake_infer_state_bytes();
+#endif
             if (fired) { s_st.fired_count++; s_st.fired_at_ms = now_ms; }
             wake_status_t copy = s_st;
             xSemaphoreGive(s_lock);
@@ -270,8 +327,10 @@ static void wake_task(void *)
 extern "C" void wake_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+#if KWS_WAKE_TFLM
     s_arena = arena_alloc(TAG, "wake", KWS_WAKE_ARENA_BYTES);
     assert(s_arena);
+#endif
     /* Core 0, priority 3 — same slot as the recogniser, off LVGL's core.
        Only one of the two is ever active. */
     xTaskCreatePinnedToCore(wake_task, "wake", 16384, nullptr, 3, nullptr, 0);

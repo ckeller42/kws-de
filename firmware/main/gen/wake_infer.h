@@ -7,6 +7,8 @@
 #define WAKE_INFER_OUTPUT_LEN 1
 /* Transient arena: activations + esp-nn scratch, live only for the duration of one call. */
 #define WAKE_INFER_ARENA_BYTES 15680
+/* Bytes at the end of the arena reserved for esp-nn's scratch buffer, sized from the widest op by this module's port of esp_nn_get_*_scratch_size_esp32s3. The firmware asks the real esp-nn for the same number on the chip and refuses to run the generated path if it answers more than this. */
+#define WAKE_INFER_SCRATCH_BYTES 15552
 /* Persistent state: ring-buffer history that must survive between calls (0 if wake is stateless). Separate from the arena above -- add both for the model's total static footprint. */
 #define WAKE_INFER_STATE_BYTES 4200
 

@@ -584,6 +584,12 @@ def test_write_then_check_roundtrips(tmp_path):
     header = (tmp_path / "wake_infer.h").read_text()
     assert f"#define WAKE_INFER_STATE_BYTES {info['state_bytes']}" in header
     assert info["state_bytes"] == 4200
+    # The firmware compares the on-chip esp-nn scratch query against this macro
+    # and refuses to run if the chip wants more, so it must be the planner's
+    # real reserve (test_scratch_sizes_come_from_the_esp32s3_formulas) and fit
+    # inside the arena.
+    assert "#define WAKE_INFER_SCRATCH_BYTES 15552" in header
+    assert 15552 <= info["arena_bytes"]
     assert codegen.check(WAKE, "wake", tmp_path) == []
 
 
