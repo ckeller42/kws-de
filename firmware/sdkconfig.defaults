@@ -32,3 +32,9 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 # well under 1% of a core.
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP32S3_DATA_CACHE_64KB=y
+# A microSD in the slot becomes the recording volume (storage.c). Cards ship
+# with anything or nothing on them, so one that probes but carries no readable
+# filesystem is reformatted FAT on first use rather than silently falling back
+# to the 12 MB flash partition — the card is data-collection scratch space, not
+# somewhere anything is kept. The internal partition is never formatted.
+CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL=y

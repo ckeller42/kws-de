@@ -1,7 +1,7 @@
 /**
  * @file record.h
  * @brief Guided recorder state machine: prompts a speaker through word/sentence/negative
- * takes and saves them as WAV files under /rec.
+ * takes and saves them as WAV files under storage_root() (see storage.h).
  */
 #pragma once
 #include <stdint.h>
@@ -24,7 +24,7 @@ typedef enum {
     REC_IDLE,      /**< Paused, waiting for a command. */
     REC_LISTENING, /**< Capturing, waiting for speech to start (VAD). */
     REC_CAPTURING, /**< Speech detected, recording the take. */
-    REC_SAVED,     /**< Take saved to /rec; briefly shown before the next take. */
+    REC_SAVED,     /**< Take saved; briefly shown before the next take. */
     REC_CLIPPED,   /**< Take discarded: input clipped, redo requested. */
     REC_TIMEOUT,   /**< Take discarded: no speech detected in time, redo requested. */
     REC_FULL,      /**< Take discarded: storage below STORAGE_MIN_FREE_BYTES. */

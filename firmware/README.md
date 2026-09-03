@@ -8,8 +8,9 @@ selection screen" below).
 
 - **Record mode** — a guided speech recorder. Entering it starts a fresh
   session for a new speaker id: the sentence set, then the negative set,
-  captured onto the device's flash with the built-in VAD and logged to a
-  `session.csv` alongside the WAVs.
+  captured onto the microSD (or the device's flash, if no card is in the
+  slot) with the built-in VAD and logged to a `session.csv` alongside the
+  WAVs.
 - **Record-wake mode** ("Hey Bus aufnehmen") — a "Hey Bus"-only guided
   session: same recorder, same speaker-id bump and `session.csv` row shape,
   but it prompts `WAKE_PROMPT_REPEATS` (5) single-take reads of the wake
@@ -17,15 +18,17 @@ selection screen" below).
   sets chained on. Collects real wake-word positives for `models/hey_bus.tflite`.
 - **Recognise mode** — an on-device keyword recogniser: mic → MFCC → the
   int8 TFLite Micro model → the same streaming detector logic as
-  `kws_de.stream`, shown live on the LCD and logged to flash.
+  `kws_de.stream`, shown live on the LCD and logged to the recording
+  volume.
 - **Wake mode** — a "Hey Bus" wake-word test mode. It runs *only* the
   microWakeWord streaming model, showing its live probability and flashing
   the screen green plus a beep on every detection.
-- **USB mode** — exposes the on-flash recordings and the recognise log as a
-  `KWSREC` FAT drive over USB so a host can pull them off. The device
-  presents as a composite USB device in this mode: the `KWSREC` MSC drive
-  plus a second serial port (CDC-ACM) that keeps the console reachable - see
-  "Serial commands" below.
+- **USB mode** — exposes the recordings and the recognise log as a
+  `KWSREC` FAT drive over USB so a host can pull them off (the microSD
+  card if one is in use, the internal flash partition otherwise — see
+  "Where recordings are stored"). The device presents as a composite USB
+  device in this mode: the `KWSREC` MSC drive plus a second serial port
+  (CDC-ACM) that keeps the console reachable - see "Serial commands" below.
 
 A device on the same USB serial port also accepts a small set of remote
 commands (mode switching, status) — see "Serial commands" below.
@@ -118,9 +121,48 @@ success screen — no sentence/negative sets chained on. Takes land under
 `spkNN/hey-bus/NNN.wav`, and each `session.csv` row has `set` = `wake`
 (same `prompt,file,ms,peak_dbfs,set,seed,ts` shape as every other row).
 
+## Where recordings are stored
+
+Two possible volumes, chosen once at boot by `storage_mount()`
+(`firmware/main/storage.c`). Everything the device writes — the WAVs,
+`session.csv`, `wake.log`, `recognise.log` — goes under `storage_root()`,
+and USB mode exports whichever volume that is.
+
+| | mount point | size | holds |
+|---|---|---|---|
+| microSD in the slot | `/sdcard` | the card | hours of sessions |
+| no card (fallback) | `/rec` | 12 MB partition | about one guided session |
+
+- **microSD is preferred and needs no setup.** A card that mounts is used
+  as-is. A card that probes but carries no filesystem is formatted FAT
+  once, on the spot, and then used
+  (`CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL` in `sdkconfig.defaults`) — so a
+  blank or foreign-formatted card just works, at the cost of one long
+  boot (~25 s for a 64 GB card). **Anything already on such a card is
+  erased**, so use a card you are happy to hand over to the device. The
+  internal flash partition is never formatted.
+- **A card that can never be formatted pays that ~25 s on every boot**
+  before the fallback takes over, so a boot that is suddenly half a minute
+  slower means the card is write-protected, dying, or counterfeit — take it
+  out. An empty slot costs nothing.
+- **The volume label is forced to `KWSREC`** on both media at every mount,
+  whatever the card arrived with, so the host always mounts the same name
+  and `scripts/pull-recordings.sh` finds it without configuration.
+- **Fallback to flash is automatic and is not an error.** With no card, an
+  unmountable card, or a card that fails the write-and-read-back probe at
+  mount (a dying or counterfeit card can report writes as successful and
+  silently keep the old sectors), the device records to `/rec` exactly as
+  it did before microSD support. The boot log says which volume won, and
+  `status` over the serial console answers `storage sd <free>/<total> MB`
+  or `storage flash <free>/<total> KB`.
+- **Pulling the card while the device runs** is reported on the next mode
+  entry and makes the recorder refuse takes (REC_FULL) rather than write
+  into a dead mount. Restart to pick a volume again.
+
 ## Pull recordings
 
-Tap **USB** on the menu to expose `KWSREC`, then on the host:
+Tap **USB** on the menu to expose `KWSREC` (the card if one is in use, the
+flash partition otherwise), then on the host:
 
 ```bash
 scripts/pull-recordings.sh                      # default: data/recordings
@@ -139,7 +181,7 @@ finishes.
 
 The screen shows the last fired word plus live stats: confidence,
 inference time in ms, TFLite Micro arena bytes used, and a running fired
-count. Every firing is also appended to `/rec/recognise.log` on the
+count. Every firing is also appended to `recognise.log` on the recording
 device as `[Log] <ms> <word> <conf>` (`<ms>` is milliseconds since boot)
 — pulled off with the recordings and replayable through
 `kws_de.stream.KeywordStream` on the host.
@@ -162,7 +204,8 @@ while this mode is active, so what you see is the wake model alone.
   `#define`d tunables at the top of `firmware/main/wake.h`.
 - On a fire the background goes green for 600 ms, the speaker plays a
   150 ms 1 kHz tone, and a line `[Wake] <ms> <prob>` is appended to
-  `/rec/wake.log` (pulled off with the recordings in USB mode).
+  `wake.log` on the recording volume (pulled off with the recordings in
+  USB mode).
 - The speaker and the microphone share one full-duplex I2S channel pair, so
   `beep.c` opens the speaker with the mic's exact format (16 kHz, 16-bit,
   2 channels). A different rate would be rejected by `esp_codec_dev` and
@@ -248,6 +291,18 @@ partition table erases the partition on the next flash, so pull first.
 
 ## Manual test checklist
 
+Storage: boot with the microSD slot **empty** → the boot log reports no
+usable card and mounts the flash partition, `status` answers `storage
+flash <free>/<total> KB`, a session writes `spkNN/session.csv` and its
+WAVs under `/rec`, and `mode usb` mounts `KWSREC` on the host with those
+files on it. Boot with a **card inserted** → the log prints the card's
+name, type and size (a blank or unformatted card is formatted FAT once
+first), `status` answers `storage sd <free>/<total> MB`, a session writes
+under the card root, `mode usb` mounts `KWSREC` showing the card, and
+`scripts/ingest.sh -H <device-host>` pulls from the card. **Pull the card
+while the device runs** → the next mode entry logs that the volume stopped
+responding and takes are refused (REC_FULL), with no crash.
+
 On-device manual checklist: from the menu, tap **Record** → the session
 starts at a new speaker id and the sentence set; complete it (or let it
 run) → it auto-chains into the negative set with no button press →
@@ -263,7 +318,8 @@ Wake mode: tap **Hey Bus** → the probability updates live and stays low
 on silence; say "Hey Bus" → the screen flashes green, the speaker beeps
 once, and the fire count rises by exactly one per utterance; say "Licht"
 and a few other words → no fire (nothing but the wake model is running);
-tap **Menu** → `/rec/wake.log` has one `[Wake] <ms> <prob>` line per fire.
+tap **Menu** → `wake.log` on the recording volume has one
+`[Wake] <ms> <prob>` line per fire.
 
 Serial commands: with the device connected over USB serial,
 `echo 'mode wake' > /dev/cu.usbmodemNNN` switches the screen to wake mode

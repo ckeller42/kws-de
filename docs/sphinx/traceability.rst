@@ -74,7 +74,8 @@ As of this writing, four requirements are open gaps:
   ever factored out of ``record.c`` into something host-testable.
 - ``REQ_FW_STORAGE_MIN_FREE`` — the flash-full path (< 200 KB free →
   REC_FULL) has no automated or manual coverage; it's awkward to hit by
-  hand (needs a near-full ``/rec``) and isn't in the current checklist.
+  hand (needs a near-full recording volume) and isn't in the current
+  checklist.
 - ``REQ_FW_DATA_NOT_COMMITTED`` — enforced only by ``.gitignore`` and code
   review, not by a CI check (e.g. a ``git ls-files`` assertion that none
   of the ignored paths are tracked).

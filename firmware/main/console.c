@@ -10,6 +10,7 @@
 #include "gen/model_config.h"
 #include "gen/wake_model_config.h"
 #include "record.h"
+#include "storage.h"
 #include "ui/ui.h"
 
 static const char *mode_name(ui_mode_t m)
@@ -64,6 +65,13 @@ static void handle_line(char *line)
         ui_mode_t m = app_get_mode();
         printf("mode %s\n", mode_name(m));
         printf("models command=%s wake=%s\n", KWS_MODEL_ID, KWS_WAKE_MODEL_ID);
+        /* Which volume the takes land on, and how much of a session still fits.
+           MB for a card, KB for the 12 MB flash partition — the units are the
+           quickest tell of which medium is live. */
+        unsigned div = storage_is_sdcard() ? 1024 * 1024 : 1024;
+        printf("storage %s %llu/%llu %s\n", storage_is_sdcard() ? "sd" : "flash",
+               storage_free_bytes() / div, storage_total_bytes() / div,
+               storage_is_sdcard() ? "MB" : "KB");
         if (m == UI_MODE_RECORD || m == UI_MODE_RECORD_WAKE) {
             record_status_t st;
             record_get_status(&st);

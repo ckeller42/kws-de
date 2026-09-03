@@ -3,7 +3,6 @@
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "ff.h"
 #include "audio.h"
 #include "record.h"
 #include "storage.h"
@@ -38,6 +37,7 @@ void app_set_mode(ui_mode_t m)
     if (s_mode == UI_MODE_WAKE) wake_set_active(false);
     if (s_mode == UI_MODE_ASSIST) { wake_set_active(false); recognise_set_active(false); }
     s_mode = m;
+    storage_recheck();                     /* logs if the microSD was pulled since boot */
     if (m == UI_MODE_MENU) ui_show_menu();
     if (m == UI_MODE_USB) {
         ui_show_usb();
@@ -68,12 +68,9 @@ void app_main(void)
     bsp_i2c_init();
     bsp_display_start();
     bsp_display_backlight_on();
+    /* microSD if one is in the slot (a guided session is ~9.5 MB, the 12 MB
+       flash partition holds barely one), the flash partition otherwise. */
     ESP_ERROR_CHECK(storage_mount());
-    /* volume label is a FAT property, not a USB descriptor: set once. Only one FAT
-     * drive is ever mounted on this device, so its FatFs pdrv is always 0.
-     * ponytail: hardcoded "0:" drive, revisit if a second FAT volume is ever added */
-    char label[12] = {0};
-    if (f_getlabel("0:", label, NULL) == FR_OK && label[0] == '\0') f_setlabel("0:KWSREC");
     /* Which models this image actually carries. A firmware binary outlives the
        checkout that built it, so the stamp (name@sha8 date, generated into the
        model config headers) is the only way to answer that from the device. */
