@@ -690,6 +690,34 @@ for both INT8 models with all 23 classes represented in predictions. Held-out ph
 (4 clips, 1 speaker) is 0/4 for both models — too small an n to read anything into; the isolated-
 word and false-accept figures above are the ones with enough clips to mean something.
 
+**DS-CNN width sweep (2026-09-03).** `build_dscnn` gained a `width` parameter (default 32,
+the shipped size) on every conv/depthwise-separable-block channel count, plumbed through
+`kws-train --width` and `kws-export --width` (non-default widths get a `_w<N>` export-name
+suffix, e.g. `command_v3_w16_qat.tflite`); `kws-export --stats` prints params + MACs
+(`kws_de.budgets.estimate_macs`, already used by `kws-benchmark`) for a loaded model.
+Widths 24 and 16 were trained on `features_v3` with the same recipe as the width-32 QAT
+baseline above (40 epochs, `--qat --qat-epochs 10`); width 12 was skipped per the stopping
+rule below since width 16 already missed by a wide margin. Distillation from the width-32
+model was skipped: `kws_de.distill.distill()` only supports a KWT teacher for the fixed-width
+DS-CNN student (no `width` param on the student side), a different use case than a same-
+architecture narrower student — not worth threading through for widths that fail on their
+own. MACs/params are architecture-only (independent of trained weights), computed directly
+from `build_dscnn`; the recordings figures reuse the same two device speakers as the
+baseline table, `user-customised, in-training`, isolated-word accuracy:
+
+| Width | INT8 test acc | Params | MACs | Size | spk01 acc (n=13) | spk02 acc (n=38) | False accepts (n=10) |
+|---|---|---|---|---|---|---|---|
+| 32 (baseline) | **91.2 %** | 5,879 | 2,070,496 | 17,880 B | **0.615** | **0.737** | 0 |
+| 24 | 88.7 % | 3,839 | 1,270,632 | 14,528 B | 0.462 | 0.605 | 0 |
+| 16 | 84.7 % | 2,183 | 658,928 | 11,528 B | 0.385 | 0.500 | 0 |
+| 12 | skipped (16 already missed the recommendation bar) | 1,499 | 423,636 | — | — | — | — |
+
+Recommendation: **keep width 32.** Width 24 already misses the ≤ 1.0-point INT8-test-accuracy
+bar (91.2 % → 88.7 %, a 2.5-point drop) and both narrower widths lose isolated-word accuracy on
+*both* real speakers versus the baseline — narrowing the channel count trades real-voice
+recognition, not just a synthetic-test-set fraction of a point. `export.assert_model_healthy`
+still passed for every exported width; the export health gate itself was not touched.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

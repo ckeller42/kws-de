@@ -44,16 +44,18 @@ def train(
     model=None,
     validation_data=None,
     callbacks=None,
+    width=32,
 ):
     """Fit `model` (default: a fresh `build_dscnn`) on (X, y). `validation_data`/
     `callbacks` are passed straight through to `model.fit` (e.g. a `ModelCheckpoint`
     to select the best-val-accuracy epoch) -- kws_de.benchmark reuses this for the
-    architecture zoo instead of duplicating the class-weight/fit logic."""
+    architecture zoo instead of duplicating the class-weight/fit logic. `width` is
+    forwarded to `build_dscnn` when `model` is not given."""
     tf.keras.utils.set_random_seed(seed)
     X = np.asarray(X, np.float32)[..., None]
     y = np.asarray(y)
     if model is None:
-        model = build_dscnn(num_classes=num_classes)
+        model = build_dscnn(num_classes=num_classes, width=width)
     model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
     cw = _class_weights(y) if class_weight else None
     if validation_data is not None:
@@ -138,6 +140,9 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     ap.add_argument(
         "--qat-epochs", type=int, default=10, help="fine-tune epochs for --qat (default 10)"
     )
+    ap.add_argument(
+        "--width", type=int, default=32, help="conv/depthwise-separable channel count (default 32)"
+    )
     args = ap.parse_args()
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     prefix = args.prefix or ("features_v2" if args.v2 else "features")
@@ -147,7 +152,9 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     data = np.load(config.DATA_DIR / f"{prefix}_train.npz")
     size = args.epochs * data["X"].shape[0]
     with Timed("train", size=size, note=prefix):
-        model, history = train(data["X"], data["y"], epochs=args.epochs, num_classes=num_classes)
+        model, history = train(
+            data["X"], data["y"], epochs=args.epochs, num_classes=num_classes, width=args.width
+        )
     model.save(config.MODELS_DIR / out_name)
     print(f"final train accuracy: {history['accuracy'][-1]:.4f}")
 
@@ -157,11 +164,13 @@ def main() -> None:  # pragma: no cover - I/O wrapper
         # `load_weights` round-trips fine across Keras 2/3 even when a full
         # `load_model` does not) rather than retraining, so the QAT fine-tune
         # starts from the exact model the PTQ path already exports.
-        model = build_dscnn(num_classes=num_classes)
+        model = build_dscnn(num_classes=num_classes, width=args.width)
         model.load_weights(float_path)
         print(f"loaded existing float model weights from {out_name} for QAT fine-tune")
     else:
-        model, history = train(data["X"], data["y"], epochs=args.epochs, num_classes=num_classes)
+        model, history = train(
+            data["X"], data["y"], epochs=args.epochs, num_classes=num_classes, width=args.width
+        )
         model.save(float_path)
         print(f"final train accuracy: {history['accuracy'][-1]:.4f}")
 
