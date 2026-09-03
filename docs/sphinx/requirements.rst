@@ -222,14 +222,49 @@ Recorder
 Storage / USB
 -------------
 
+.. req:: Recordings go to a microSD card when one is usable
+   :id: REQ_FW_STORAGE_SD
+   :status: implemented
+
+   At boot ``storage_mount()`` (``firmware/main/storage.c``) tries the
+   microSD slot. A card that mounts — or that carries no filesystem and can
+   be reformatted FAT on the spot, ``CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL`` —
+   becomes the recording volume: ``storage_root()`` returns ``/sdcard``,
+   the recorder, ``session.csv``, ``wake.log`` and ``recognise.log`` are
+   written under it, USB-drive mode exports the card, and ``status``
+   answers ``storage sd <free>/<total> MB``. The internal partition is
+   never formatted.
+
+   **Fallback to internal flash is unconditional and needs no user
+   action.** With no card in the slot, with a card that cannot be mounted
+   even after the one-time format attempt, or with one that mounts but
+   fails the write-and-read-back probe, the device behaves exactly as it
+   did before microSD support: ``storage_root()`` is ``/rec`` on the
+   internal 10 MB wear-levelled FAT partition, recordings and logs are
+   written there, USB-drive mode exports that partition, and ``status``
+   answers ``storage flash <free>/<total> KB``. This is not an error
+   state — it is the normal configuration for a device with no card, and
+   the only path CI can build and exercise.
+
+   A card pulled while the device runs is reported by ``storage_recheck()``
+   on the next mode entry; ``storage_free_bytes()`` then reads 0, so the
+   recorder refuses each take as REC_FULL instead of writing into a dead
+   mount or crashing. Making the card the recording volume again needs a
+   restart.
+
+   Verified on real hardware both ways
+   (:need:`TEST_MANUAL_STORAGE_FALLBACK`). The volume choice is one line of
+   BSP/IDF-dependent C with no host-buildable part, so it has no host test.
+
 .. req:: Recording stops before storage is exhausted
    :id: REQ_FW_STORAGE_MIN_FREE
    :status: implemented
 
-   Recording is disabled with a REC_FULL banner once free space on
-   ``/rec`` drops below ``STORAGE_MIN_FREE_BYTES`` = 200 KB (``storage.h``);
-   the USB drive mode remains available regardless, so recordings already
-   on flash can still be pulled off.
+   Recording is disabled with a REC_FULL banner once free space on the
+   recording volume (``storage_root()``: the microSD if one is in use, the
+   flash partition otherwise) drops below ``STORAGE_MIN_FREE_BYTES`` =
+   200 KB (``storage.h``); the USB drive mode remains available regardless,
+   so recordings already saved can still be pulled off.
 
 .. req:: /rec has exactly one owner at a time
    :id: REQ_FW_USB_SINGLE_OWNER

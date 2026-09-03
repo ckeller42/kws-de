@@ -371,6 +371,26 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    ``recognise.log`` replays through ``stream.KeywordStream`` with the same
    events. Run by hand on real M5Stack CoreS3 hardware; not automated.
 
+.. test:: On-device microSD detection and flash fallback
+   :id: TEST_MANUAL_STORAGE_FALLBACK
+   :status: manual
+   :links: REQ_FW_STORAGE_SD, REQ_FW_USB_SINGLE_OWNER
+
+   ``firmware/README.md`` "Manual test checklist". **No card:** boot with
+   the slot empty → the boot log says no usable microSD and names the flash
+   partition; ``status`` answers ``storage flash <free>/<total> KB``;
+   starting a session writes ``spkNN/session.csv`` and its WAVs under
+   ``/rec``; ``mode usb`` mounts ``KWSREC`` on the host with those files on
+   it, and ``mode menu`` leaves USB mode. **Card inserted:** boot with a
+   card in the slot → the log prints the card's name, type and size, and a
+   blank or unformatted card is reformatted FAT once before use;
+   ``status`` answers ``storage sd <free>/<total> MB``; a session writes
+   under the card root; ``mode usb`` mounts ``KWSREC`` showing the card's
+   contents; ``scripts/ingest.sh -H <host>`` pulls from the card. **Card
+   pulled while running:** the next mode entry logs that the volume stopped
+   responding and takes are refused (REC_FULL), with no crash. Run by hand
+   on real M5Stack CoreS3 hardware; not automated.
+
 .. test:: On-device "Hey Bus" wake test mode
    :id: TEST_MANUAL_WAKE_MODE
    :status: manual

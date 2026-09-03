@@ -42,7 +42,8 @@ Mic -> MFCC -> the int8 command model -> the same streaming detector as
 ``kws_de.stream`` (:need:`REQ_FW_23_CLASSES`, :need:`REQ_FW_DETECTOR_PARAMS`).
 The screen shows the last fired word, confidence, inference time, TFLite
 Micro arena bytes used, and a running fired count; every firing also
-appends to ``/rec/recognise.log`` (:need:`REQ_FW_RECOGNISE_LOG`), replayable
+appends to ``recognise.log`` on the recording volume
+(:need:`REQ_FW_RECOGNISE_LOG`), replayable
 through ``kws_de.stream.KeywordStream`` on the host. Back path: the
 screen's own back button returns to the menu.
 
@@ -54,7 +55,7 @@ Runs *only* the microWakeWord streaming model
 as long as this mode is active. Shows "Hey Bus?", the live wake
 probability, and a fire counter. A fire turns the background green for
 600 ms and plays a 150 ms 1 kHz tone (:need:`REQ_FW_WAKE_BEEP`), and appends
-``[Wake] <ms> <prob>`` to ``/rec/wake.log``. Back path: back button ->
+``[Wake] <ms> <prob>`` to ``wake.log`` on the recording volume. Back path: back button ->
 menu.
 
 Record
@@ -77,7 +78,7 @@ Record (Abbrechen -> menu, success screen's Menu -> menu).
 USB
 ~~~
 
-Exposes ``/rec`` as a ``KWSREC`` FAT drive over USB mass storage
+Exposes the recording volume as a ``KWSREC`` FAT drive over USB mass storage
 (:need:`REQ_FW_USB_SINGLE_OWNER`), see "USB-drive mode" below. Back path:
 sending ``mode menu`` (button or serial command) unmounts the drive and
 returns to the menu, restarting the chip in the process (see "Leaving USB
@@ -104,7 +105,9 @@ word only, straight to the same success screen
 (:need:`REQ_FW_RECORD_WAKE_SET`).
 
 Every take appends one row (``prompt,file,ms,peak_dbfs,set,seed,ts``) to
-``/rec/<speaker>/session.csv`` (:need:`REQ_FW_RECORD_SESSION_CSV`). Trailing
+``<root>/<speaker>/session.csv`` (:need:`REQ_FW_RECORD_SESSION_CSV`), where
+``<root>`` is the recording volume chosen at boot (see "Storage" below);
+the row's ``file`` column stays relative to that root either way. Trailing
 silence closes a take after a per-prompt-set hangover — 500 ms for words,
 1200 ms for sentences/negatives/wake — and a false-start filter discards a
 take opened by a breath or click and keeps listening
@@ -112,6 +115,38 @@ take opened by a breath or click and keeps listening
 (:need:`REQ_FW_RECORD_CLIP_REJECT`); a corrupted or too-short take is
 rejected too. Aborting with **Abbrechen** at any point returns straight to
 the menu with no success screen.
+
+Storage
+---------
+
+Recordings land on a **microSD card when one is usable, and on the internal
+flash partition otherwise** (:need:`REQ_FW_STORAGE_SD`). ``storage.c``
+makes that choice once at boot and hides it behind ``storage_root()``: the
+recorder, ``session.csv``, ``wake.log`` and ``recognise.log`` all build
+their paths from it, so nothing else in the firmware knows which medium is
+underneath. Both media are registered with esp_tinyusb and mounted through
+it, which is what lets USB-drive mode export exactly the volume the
+recorder writes to.
+
+The card is worth having because of the size gap: the flash ``storage``
+partition is 10 MB — about one guided session — while a card holds hours.
+A card that carries no filesystem is formatted FAT once at first use
+(``CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL``), which erases whatever was on it;
+the internal partition is never formatted. The FAT label is forced to
+``KWSREC`` on both media at mount, so the host mounts the same name
+whichever volume is live and ``scripts/pull-recordings.sh`` needs no
+configuration.
+
+Falling back to flash is the *normal* path, not a failure mode: with no
+card, with a card that cannot be mounted even after the format attempt, or
+with one that mounts but fails the write-and-read-back probe (a dying or
+counterfeit card can acknowledge writes and silently keep the old
+sectors), the device records to ``/rec`` exactly as it did before microSD
+support, with no user action. ``status`` reports which volume is live —
+``storage sd <free>/<total> MB`` or ``storage flash <free>/<total> KB``.
+A card pulled at runtime is logged by ``storage_recheck()`` on the next
+mode entry, and the recorder then refuses takes (REC_FULL) instead of
+writing into a dead mount.
 
 Serial console protocol
 -------------------------
@@ -128,8 +163,10 @@ The console port accepts newline-terminated commands
 - ``mode <name>`` switches the app mode, same as tapping the matching
   menu/back button.
 - ``status`` prints the current mode, the model stamps as
-  ``models command=<id> wake=<id>``, and in record/record-wake mode also
-  the recorder's phase/index/count/speaker.
+  ``models command=<id> wake=<id>``, the live recording volume as
+  ``storage sd <free>/<total> MB`` or ``storage flash <free>/<total> KB``
+  (:need:`REQ_FW_STORAGE_SD`), and in record/record-wake mode also the
+  recorder's phase/index/count/speaker.
 - ``wakefire`` injects one synthetic wake fire down the same path as a real
   one — a measurement hook for the assist-mode duty cycle
   (:need:`REQ_FW_ASSIST_GATE`), not a feature.
@@ -154,8 +191,9 @@ bridge — see "Hardware facts" below for what that means for opening it.
 USB-drive mode
 ---------------
 
-Entering USB mode unmounts ``/rec`` from the app and exposes the partition
-as a composite USB device: the ``KWSREC`` mass-storage drive plus a
+Entering USB mode unmounts the recording volume from the app and exposes
+it — the microSD or the flash partition, whichever is live — as a
+composite USB device: the ``KWSREC`` mass-storage drive plus a
 second, CDC-ACM serial port that takes over the console for as long as
 USB mode is active (:need:`REQ_FW_USB_CDC_CONSOLE`). The normal console
 port (USB-Serial-JTAG) goes dark the moment TinyUSB takes the PHY, same as
