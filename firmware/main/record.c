@@ -183,7 +183,9 @@ static void save_field_take(void)
        the previous one closed would otherwise land a 100-300 ms write on top of
        a live recogniser. Bounded, so a gate that stops ticking cannot park the
        recorder for ever; the ring copy above is already safe in hand. */
-    for (int i = 0; i < 250 && wake_window_open(); i++) vTaskDelay(pdMS_TO_TICKS(20));
+    int waited = 0;
+    for (; waited < 250 && wake_window_open(); waited++) vTaskDelay(pdMS_TO_TICKS(20));
+    if (waited == 250) ESP_LOGW(TAG, "field: window still open after 5 s, writing anyway");
 
     char dir[96], path[160], csv[128], name[24];
     snprintf(dir, sizeof dir, "%s/field", storage_root());              mkdir(dir, 0777);

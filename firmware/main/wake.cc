@@ -76,7 +76,7 @@ static uint8_t s_var_arena[WAKE_VAR_ARENA_BYTES];
 #endif
 static FILE *s_log;
 static assist_gate_t s_gate;         /* assist mode only: when the recogniser may run */
-static bool s_listening;             /* last state pushed to recognise_set_active() */
+static volatile bool s_listening;    /* last state pushed to recognise_set_active(); read by record.c */
 static volatile bool s_inject;       /* console-injected fire, see wake_inject_fire() */
 /* ponytail: s_field is written by the wake task (arm/disarm) and by
    wake_field_set() from the UI/console task, without a mutex — the only shared
