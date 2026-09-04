@@ -330,13 +330,16 @@ over the console instead → the badge follows that too, so the screen can never
 disagree with what is actually being recorded. Say "Hey Bus" and then a command:
 the screen behaves exactly as before (green flash, beep, recognised word).
 `status` now reports `field on takes 1 dropped 0`, and in USB-drive mode the
-drive holds `field/<spkNN>/<boot-ms>.wav` plus a `field.csv` row for it. Say
+drive holds `field/<spkNN>/<boot>-<ms>.wav` plus a `field.csv` row for it. Say
 "Hey Bus" a **second** time while the window is still open → still exactly one
 take, named after the *first* fire, with a larger `window_ms` and a longer WAV
 than a single-window take. In the serial log, each `field: saved` line lands
 after its window's `assist: recogniser off`, and the `recognise` step times
 inside the window stay in their usual range — a 100–300 ms outlier would mean a
-file was written while the recogniser ran.
+file was written while the recogniser ran. Toggling `field off` then `field on`
+over the console *while a window is open* must not produce an outlier either:
+the toggle takes effect at once, but the NVS write behind it is deferred to the
+window's closing edge.
 
 Serial commands: with the device connected over USB serial,
 `echo 'mode wake' > /dev/cu.usbmodemNNN` switches the screen to wake mode

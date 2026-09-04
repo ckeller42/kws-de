@@ -737,11 +737,13 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    one *field take*: the 1.0 s in front of the arming fire
    (``FIELD_PREROLL_MS``) plus the assist window that fire opened, copied out
    of the audio ring and saved as
-   ``storage_root()/field/<spkNN>/<boot-ms>.wav`` (16 kHz mono int16) with one
+   ``storage_root()/field/<spkNN>/<boot>-<ms>.wav`` (16 kHz mono int16) with one
    row in ``storage_root()/field/<spkNN>/field.csv``
    (``file,fire_ms,wake_prob,device_intent,device_words,window_ms,ms,peak_dbfs``).
    The speaker id is the current NVS id and is never bumped per interaction,
-   so one boot of one user is one field directory.
+   so one boot of one user is one field directory; ``<boot>`` is a counter in
+   the same ``kws`` namespace, bumped once per boot, so two boots of one
+   speaker cannot collide on the same ms-since-boot.
 
    **The take spans the window that actually happened, not a constant.** A
    second fire inside an open window extends it (:need:`REQ_FW_ASSIST_GATE`)
@@ -754,9 +756,16 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    pre-roll and the wake phrase always survive. A cut take cannot say which
    fires are still inside its audio, so it carries no ``device_intent`` /
    ``device_words`` at all; ``ms < FIELD_PREROLL_MS + window_ms`` is how the
-   host side reads truncation off the two columns already there. A
-   ``_Static_assert`` in ``field.h`` checks the ring against that budget, so a
-   future shrink fails the build rather than the recording.
+   host side reads truncation off the two columns. ``pull-recordings.sh``
+   carries ``window_ms`` into ``sessions.csv`` for exactly this, and
+   ``kws_de.qc`` marks every such row with ``truncated=1`` in ``qc.csv``, so a
+   truncated take stays distinguishable from one the recogniser simply never
+   answered. A ``_Static_assert`` in ``field.h`` checks the ring against that
+   budget, so a future shrink fails the build rather than the recording. The
+   copy is also clamped to the ring's write head (``field_clamp_len()``): the
+   span's end is derived from the arming fire's position and the window's ms
+   length, sampled one inference apart, so the computed end can sit a few
+   dozen samples in front of what has actually been written.
 
    Capture is **opt-in**: the toggle is off until the user turns it on once on
    the Assistent screen ("Aufnahme"), is persisted in NVS under the existing
@@ -765,28 +774,39 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    (``field on|off``), and while on the screen carries a red "REC" badge — the
    only visible difference. The badge is repainted from ``wake_field_get()``
    on the assist screen's refresh, so a console ``field on`` and a tap on the
-   switch reach the screen by the same path.
+   switch reach the screen by the same path. The in-RAM flag changes on the
+   caller's task, immediately — it is the privacy control — but the NVS write
+   behind it is flash I/O, so while a window is open it is *owed*, not done,
+   and paid at the window's closing edge (or on leaving the mode).
 
-   **No file I/O happens while the recogniser is active.** The wake task only
-   records the fire's ring position (``field.c``, pure C, host-tested); the
-   copy and the FAT write happen on the record task, which is idle in
-   Assistent mode. That task copies the ring *first* — a PSRAM ``memcpy``, so
-   the samples cannot age out however long it then waits — and only afterwards
-   waits out an open window (bounded at 5 s, so a gate that stops ticking
-   cannot park the recorder) before opening the file. A FAT write costs
-   100-300 ms, which is more than a whole recognise step. Below
+   **No field-capture I/O happens while the recogniser is active.** The wake
+   task only records the fire's ring position (``field.c``, pure C,
+   host-tested); the copy and the FAT write happen on the record task, which is
+   idle in Assistent mode. That task copies the ring *first* — a PSRAM
+   ``memcpy``, so the samples cannot age out however long it then waits, and
+   nothing above it touches flash — and only afterwards waits out an open
+   window (bounded at 5 s, so a gate that stops ticking cannot park the
+   recorder) before checking the storage floor and opening the file. A FAT
+   write costs 100-300 ms, which is more than a whole recognise step. Below
    ``STORAGE_MIN_FREE_BYTES`` the take is dropped with one log line
-   (``field: dropped, storage low``); a full command queue and a failed
-   ``fopen`` are counted the same way, and ``status`` reports both counters
-   (``field <on|off> takes <N> dropped <N>``).
+   (``field: dropped, storage low``); a full command queue, a failed ``fopen``,
+   audio that has aged out of the ring and a field take arriving while a guided
+   session owns the take buffer are counted the same way, and ``status``
+   reports both counters (``field <on|off> takes <N> dropped <N>``).
+
+   One pre-existing write is the known exception, and it is not field capture:
+   ``wake.cc``'s ``log_fire()`` appends one ~20-byte line to ``wake.log`` on
+   every fire, i.e. at every window *open*. It predates this requirement and is
+   present on both sides of the measurements above; it is named here so the
+   guarantee reads as what the firmware actually honours.
 
 .. req:: Field takes are labelled by Whisper and the grammar, never by the device
    :id: REQ_PIPE_FIELD_LABELS
    :status: implemented
 
    A pulled field take (``set=field`` in ``sessions.csv``, with the device
-   columns ``fire_ms,wake_prob,device_intent,device_words`` appended to the
-   guided nine) is transcribed whole by the same Whisper model, prompt and
+   columns ``fire_ms,wake_prob,device_intent,device_words,window_ms`` appended
+   to the guided nine) is transcribed whole by the same Whisper model, prompt and
    padding as every other take. If the first one or two word spans match the
    wake regex ``(hey|hej|he|hei)(bus|buss|bos|boss)`` — one span, because
    Whisper sometimes writes "HeyBus", or two — and end inside the first 1.3 s,
@@ -824,7 +844,25 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    from the one the rest of the report measures. Parsable is read off a
    non-empty ``prompt``, compared off ``agrees in ("0", "1")``, and the
    agreement rate is agree over *compared*, so takes the device never answered
-   cannot depress it.
+   cannot depress it. ``truncated`` is ``1`` when the device's ring cut the
+   take short (``ms < FIELD_PREROLL_MS + window_ms``,
+   :need:`REQ_FW_FIELD_CAPTURE`), which is the usual reason a take carries no
+   device answer at all.
+
+   **"Field takes" means one thing:** every ``set=field`` row in the session,
+   approved or not. Approved is reported *beside* it, never instead of it, and
+   both ``kws_de.qc``'s ``report.md`` Field line and
+   ``kws_de.eval.field_figures`` count it that way, so the two reports cannot
+   quote different numbers for the same session.
+
+   A parsed field take is filed like a guided sentence, and like a guided
+   sentence its phrase clip holds only the phrase: it is cut from the end of
+   the wake split to the last word Whisper heard plus 0.3 s, not from the whole
+   take. ``kws-eval`` streams every ``approved/phrases/`` row through the
+   command model end to end, so the pre-roll and the trailing silence of a
+   field take would otherwise be streamed with it, and a spurious event there
+   would score a take the model got right as an end-to-end miss. Word clips are
+   still cut from the full take, whose Whisper timestamps index them.
 
 .. req:: Recordings-based eval never mixes held-out and in-training figures
    :id: REQ_PIPE_EVAL_LABELS

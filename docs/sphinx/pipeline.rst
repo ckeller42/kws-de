@@ -53,20 +53,22 @@ Everything lives under ``$KWS_DATA_ROOT/data/recordings/``:
      spkNN/_phrase_/<slug>_NNN.wav        sentence takes
      spkNN/_neg_/<slug>_NNN.wav           negative-phrase takes
      spkNN/hey-bus/NNN.wav                wake-word ("Hey Bus") takes
-     field/spkNN/<boot-ms>.wav            field takes, captured in Assistent
+     field/spkNN/<boot>-<ms>.wav           field takes, captured in Assistent
                                            mode (set=field, no prompt)
      sessions.csv                         speaker,pulled,prompt,file,ms,
                                            peak_dbfs,set,seed,ts,fire_ms,
                                            wake_prob,device_intent,
-                                           device_words (merged across every
-                                           speaker in the pull; the last four
-                                           are empty for a guided take)
+                                           device_words,window_ms (merged
+                                           across every speaker in the pull;
+                                           the last five are empty for a
+                                           guided take)
      logs/recognise-<ts>.log              recognise-mode detection log, if any
    qc/<same-name>/
      qc.csv                               one row per take: file,set,prompt,
                                            speaker,verdict,reason,transcript,
                                            match_score,rms_dbfs,peak_dbfs,
-                                           dur_ms,device_intent,agrees
+                                           dur_ms,device_intent,agrees,
+                                           truncated
      words.csv                            one row per SEGMENTED keyword clip
      written.txt                          approved-relative paths this stamp
                                            wrote, for idempotent re-runs
@@ -174,7 +176,13 @@ must recognise.
 
 A valid intent becomes the label and the take is filed as an approved
 phrase — prompt, index row and word segmentation exactly as for a guided
-sentence. Anything else is kept as a negative with the transcript as its
+sentence, and, like a guided sentence, the phrase clip holds only the
+phrase: it is cut from the end of the wake split to the last word Whisper
+heard plus 0.3 s. Streaming the whole take instead would put its pre-roll
+and up to several seconds of trailing silence through the command model in
+the end-to-end figure, where one spurious event scores a correct take as a
+miss. The word clips still come off the full take, whose Whisper timestamps
+index them. Anything else is kept as a negative with the transcript as its
 prompt, with one guard: the transcript still has to pass the ordinary
 negatives content gate, so speech the grammar rejected but that *does*
 carry command vocabulary is left unfiled rather than entering either the
@@ -191,7 +199,13 @@ a different model from the one being evaluated — and it is never used as a
 label. The agreement rate is taken over the takes the device actually
 answered: a ring-truncated take carries no device prediction at all, and
 counting those as disagreements would quietly depress a figure the device
-never had a chance to earn.
+never had a chance to earn. Truncation itself is readable on the host —
+``pull-recordings.sh`` carries ``window_ms`` through and QC marks the row
+``truncated=1`` when the audio is shorter than the pre-roll plus that window
+— so a cut take is never mistaken for one the recogniser simply ignored.
+"Field takes" always means every ``set=field`` row, approved or not, with
+approved reported beside it; both ``report.md`` and the eval Field section
+count it that way.
 
 The two evaluation figures
 ---------------------------

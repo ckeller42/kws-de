@@ -1289,6 +1289,23 @@ about 25, so roughly every second window contributes one sample. Thirteen window
 five numbers. That is enough to exclude a 100–300 ms outlier, a two-order-of-magnitude
 effect, and not enough to resolve a 2 ms one.
 
+A review of that first build found the ordering claim was true of the design and not
+yet of the code: a `storage_free_bytes()` floor check — an `f_getfree()` that can scan
+the FAT and suspends both cores' cache — ran *before* the ring copy and before the
+wait, i.e. in exactly the place the design forbids, and it also ate the 0.2 s the ring
+reserves for the copy. It now runs last, immediately before the `fopen`. Two smaller
+holes closed with it: the copy is clamped to the ring's write head (the span's end is
+derived from the fire's ring position and the window's ms length, sampled one inference
+apart, so it could sit ~32 samples in front of what had actually been written and read
+the ring's previous lap into the tail), and the NVS write behind the "Aufnahme" toggle
+— flash I/O on the UI task, on the one screen where windows open — is deferred to the
+window's closing edge while the in-RAM flag still flips at once. Re-measured on the
+device after those changes, over two capturing windows: writes landed **970 ms** and
+**968 ms** after their window's `assist: recogniser off`, the one recognise step traced
+inside a window read **42 ms**, and toggling the switch off and on again *while that
+window was open* produced no outlier at all — the headline numbers above are unchanged,
+which is the point: the fix removed a hazard the sampling was too coarse to have caught.
+
 The label never comes from the device. On the workstation the take is transcribed by
 the same Whisper model as every guided take; a "Hey Bus" in the first 1.3 s is cut off
 as a wake positive, and the remaining words are run through the *same*

@@ -556,14 +556,16 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    "Aufnahme" switch is off after a fresh flash and ``status`` reports
    ``field off takes 0 dropped 0``; turning it on shows the "REC" badge and
    survives a reset; one interaction ("Hey Bus" + a command) adds exactly one
-   ``field/<spkNN>/<boot-ms>.wav`` and one ``field.csv`` row visible over
+   ``field/<spkNN>/<boot>-<ms>.wav`` and one ``field.csv`` row visible over
    USB-drive mode, and ``status`` counts it. A second "Hey Bus" *inside* the
    open window must still yield exactly **one** take, named after the first
    fire and longer than a single-window take. The recognise step time logged
    inside the window shows no 100-300 ms outlier, i.e. no file write happened
    while the recogniser ran, and each ``field: saved`` line lands after its
-   window's ``assist: recogniser off``. Run by hand on real M5Stack CoreS3
-   hardware; not automated.
+   window's ``assist: recogniser off``. Toggling the switch over the console
+   while a window is open shows no outlier either: the NVS write behind the
+   toggle is deferred to the window's closing edge. Run by hand on real
+   M5Stack CoreS3 hardware; not automated.
 
 .. note::
 
