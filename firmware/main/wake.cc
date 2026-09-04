@@ -19,6 +19,7 @@
 #include "nn_timers.h"
 #include "recognise.h"
 #include "storage.h"
+#include "task.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/micro_resource_variable.h"
@@ -333,7 +334,7 @@ extern "C" void wake_start(void)
 #endif
     /* Core 0, priority 3 — same slot as the recogniser, off LVGL's core.
        Only one of the two is ever active. */
-    xTaskCreatePinnedToCore(wake_task, "wake", 16384, nullptr, 3, nullptr, 0);
+    task_spawn(TAG, wake_task, "wake", 16384, nullptr, 3, 0);
 }
 
 extern "C" void wake_set_active(bool on)

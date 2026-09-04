@@ -16,6 +16,35 @@ config KWS_INFER_GENERATED
       code, which is the fallback if a newly exported model hits an op the
       generator refuses.
 
+choice KWS_INFER_COMMAND_ARENA
+    prompt "Where the generated command model's arena lives"
+    depends on KWS_INFER_GENERATED
+    default KWS_INFER_COMMAND_ARENA_PSRAM
+    help
+      gen/command_infer.c's arena is 51,248 B — one static array, so this is a
+      link-time choice, not an allocation. The wake model's 15,680 B arena is
+      always internal: it is small, and it runs every 30 ms.
+
+config KWS_INFER_COMMAND_ARENA_PSRAM
+    bool "PSRAM (.ext_ram.bss)"
+    help
+      The default. 51 KB of internal SRAM is more than this device has to
+      spare: claiming it unconditionally starved the recognise, record and
+      console task stacks, which must be internal and cannot be moved. Costs
+      ~1.4 ms of the ~28 ms evaluation (the interpreter ran its arena from
+      PSRAM too, so this is still ~1.5x faster than the interpreter path).
+
+config KWS_INFER_COMMAND_ARENA_INTERNAL
+    bool "Internal SRAM (.bss)"
+    help
+      ~1.4 ms faster, and 51,248 B of internal SRAM gone. Only viable in a
+      build that is not also creating the record/console tasks — it is the
+      measurement configuration, not a shipping one. If tasks stop being
+      created, this is why: look for "not created: free internal ..." in the
+      boot log.
+
+endchoice
+
 config KWS_INFER_PARITY_LOG
     bool "Log generated-vs-interpreter output once per mode entry"
     depends on KWS_INFER_GENERATED
@@ -33,5 +62,13 @@ config KWS_INFER_PARITY_LOG
       "parity: 0/23 output bytes differ" (command), turn it off to ship. With
       it off both models run on the generated code alone: no MicroInterpreter,
       no resource variables, no tensor arenas.
+
+      It needs KWS_INFER_COMMAND_ARENA_PSRAM (the default) to get as far as
+      printing the command line at all: with the arena in internal SRAM there
+      is not enough left to create the recognise task. Even with PSRAM this
+      build is short enough that the record task does not start — measured,
+      logged as "record task (8192 B stack) not created", and acceptable
+      because verifying parity needs only wake and recognise. If a task is
+      missing, that log line says so.
 
 endmenu

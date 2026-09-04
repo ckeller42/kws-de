@@ -6,6 +6,11 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+# Lets a .bss array live in PSRAM through EXT_RAM_BSS_ATTR. The generated
+# command model's 51 KB arena uses it (Kconfig choice KWS_INFER_COMMAND_ARENA);
+# claiming that much internal SRAM starved the task stacks, which cannot move
+# there (CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY is deliberately not set).
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=64

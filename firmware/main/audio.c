@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "task.h"
 
 static const char *TAG = "audio";
 static int16_t *s_ring;                 /* PSRAM, AUDIO_RING_SAMPLES */
@@ -37,7 +38,7 @@ void audio_start(void)
        ~-18 dBFS (RMS ~-40) at 30 dB — usable but quiet; +6 dB lifts SNR. Retune
        here if reads clip (the recorder flags clipping and asks for a redo). */
     ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(s_mic, 36.0));
-    xTaskCreatePinnedToCore(audio_task, "audio", 4096, NULL, 10, NULL, 1);
+    task_spawn(TAG, audio_task, "audio", 4096, NULL, 10, 1);
     ESP_LOGI(TAG, "capture running");
 }
 

@@ -21,6 +21,7 @@
 #include "nn_timers.h"
 #include "storage.h"
 #include "stream.h"
+#include "task.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
@@ -43,6 +44,16 @@ static_assert(COMMAND_INFER_STATE_BYTES == 0,
 #define KWS_CMD_TFLM 1
 #else
 #define KWS_CMD_TFLM 0
+#endif
+
+/* Where gen/command_infer.c's 51 KB arena was linked (Kconfig choice
+   KWS_INFER_COMMAND_ARENA; see CMakeLists.txt, which is what actually defines
+   COMMAND_INFER_ARENA_ATTR). PSRAM by default: internal SRAM is what the task
+   stacks need and cannot be moved out of. */
+#ifdef CONFIG_KWS_INFER_COMMAND_ARENA_PSRAM
+#define KWS_CMD_ARENA_WHERE "static, PSRAM"
+#else
+#define KWS_CMD_ARENA_WHERE "static, internal RAM"
 #endif
 
 static const char *TAG = "recognise";
@@ -126,23 +137,33 @@ static void recognise_task(void *)
     bool use_generated = true;
     command_infer_init();
     /* gen/command_infer.c reserves COMMAND_INFER_SCRATCH_BYTES of its arena for
-       esp-nn, sized by a Python port of
-       esp_nn_get_depthwise_conv_scratch_size_esp32s3() (kws_de/codegen.py).
-       Ask the real one, on the real chip, for this model's widest op — the
-       3x3 depthwise convs (ops 1/3/5, all identical geometry), with the dims
-       gen/command_infer.c itself passes. If the port under-reserved, the
-       kernels would scribble past the arena, so this refuses to run rather
-       than logging a number nobody diffs. */
-    const data_dims_t sc_in = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
-    const data_dims_t sc_flt = { .width = 3, .height = 3, .channels = 32, .extra = 0 };
-    const data_dims_t sc_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
-    const dw_conv_params_t sc_p = { .in_offset = 120, .out_offset = -123, .ch_mult = 1,
+       esp-nn — the maximum over every op, sized by a Python port of the
+       esp_nn_get_*_scratch_size_esp32s3() family (kws_de/codegen.py). Ask the
+       real functions, on the real chip, for both kinds this model uses: the
+       3x3 depthwise convs (ops 1/3/5, identical geometry, the widest today at
+       19,888 B) and the 3x3x1 stem convolution (op 0, 6,948 B). Querying only
+       the depthwise would let a future esp-nn whose *conv* formula grew slip
+       past the guard. SOFTMAX's 4 bytes per class needs no query. If the port
+       under-reserved, the kernels would scribble past the arena, so this
+       refuses to run rather than logging a number nobody diffs. */
+    const data_dims_t dw_in = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+    const data_dims_t dw_flt = { .width = 3, .height = 3, .channels = 32, .extra = 0 };
+    const data_dims_t dw_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+    const dw_conv_params_t dw_p = { .in_offset = 120, .out_offset = -123, .ch_mult = 1,
                                     .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 },
                                     .activation = { -123, 127 } };
-    int scratch = esp_nn_get_depthwise_conv_scratch_size(&sc_in, &sc_flt, &sc_out, &sc_p);
+    const data_dims_t cv_in = { .width = 10, .height = 49, .channels = 1, .extra = 1 };
+    const data_dims_t cv_flt = { .width = 3, .height = 3, .channels = 1, .extra = 0 };
+    const data_dims_t cv_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+    const conv_params_t cv_p = { .in_offset = -71, .out_offset = -120, .stride = { 1, 1 },
+                                 .padding = { 1, 1 }, .dilation = { 0, 0 },
+                                 .activation = { -120, 127 } };
+    int dw_scratch = esp_nn_get_depthwise_conv_scratch_size(&dw_in, &dw_flt, &dw_out, &dw_p);
+    int cv_scratch = esp_nn_get_conv_scratch_size(&cv_in, &cv_flt, &cv_out, &cv_p);
+    int scratch = dw_scratch > cv_scratch ? dw_scratch : cv_scratch;
     if (scratch > COMMAND_INFER_SCRATCH_BYTES) {
-        ESP_LOGE(TAG, "esp-nn depthwise scratch %d B > the %u B gen/command_infer.c reserved — regenerate with kws-codegen",
-                 scratch, (unsigned)COMMAND_INFER_SCRATCH_BYTES);
+        ESP_LOGE(TAG, "esp-nn scratch %d B (depthwise %d, conv %d) > the %u B gen/command_infer.c reserved — regenerate with kws-codegen",
+                 scratch, dw_scratch, cv_scratch, (unsigned)COMMAND_INFER_SCRATCH_BYTES);
         use_generated = false;
 #if !KWS_CMD_TFLM
         ESP_LOGE(TAG, "no interpreter in this build (CONFIG_KWS_INFER_PARITY_LOG=n) — recognition disabled");
@@ -150,10 +171,17 @@ static void recognise_task(void *)
 #endif
         ESP_LOGE(TAG, "falling back to the TFLite Micro interpreter");
     }
-    ESP_LOGI(TAG, "inference: %s, %u B arena (static, internal RAM) + %u B state, "
-                  "esp-nn depthwise scratch %d B queried / %u B reserved; TFLM %s; free internal %u",
+    /* The two models keep separate arenas and separate scratch blocks on
+       purpose. esp-nn's scratch pointer is a file-static global, so in assist
+       mode the wake task (priority 3) can preempt this one between
+       esp_nn_set_*_scratch_buf() and the kernel call; with separate buffers the
+       worst case is one inference reading the other model's scratch, which is
+       recoverable. Sharing one buffer would make interleaved use corrupt it. */
+    ESP_LOGI(TAG, "inference: %s, %u B arena (%s) + %u B state, "
+                  "esp-nn scratch %d B queried / %u B reserved; TFLM %s; free internal %u",
              use_generated ? "generated (esp-nn)" : "TFLite Micro interpreter (generated path refused)",
-             (unsigned)command_infer_arena_bytes(), (unsigned)command_infer_state_bytes(),
+             (unsigned)command_infer_arena_bytes(), KWS_CMD_ARENA_WHERE,
+             (unsigned)command_infer_state_bytes(),
              scratch, (unsigned)COMMAND_INFER_SCRATCH_BYTES,
              KWS_CMD_TFLM ? "arena kept as the parity reference and fallback" : "not built in",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -278,9 +306,9 @@ static void recognise_task(void *)
         step_us = esp_timer_get_time() - t0;
         uint32_t ms = (uint32_t)(step_us / 1000);
         if ((++steps % 50) == 0)                         /* ~every 5 s: front-end + inference cost */
-            /* The stack headroom is in the trace because RECOGNISE_STACK is
-               sized per inference path (see below) and internal RAM is the
-               binding constraint once the generated arenas move into .bss. */
+            /* The stack headroom is in the trace because RECOGNISE_STACK was
+               cut to fit internal RAM (see below): the number stays checkable
+               on any build instead of being a one-off measurement. */
             ESP_LOGI(TAG, "step %lu ms (front-end %lld us over %d new frames, invoke %lld us: " NN_TIMERS_FMT
                           ", stack %u B free)",
                      (unsigned long)ms, pushed ? fe_us / pushed : (int64_t)0, pushed,
@@ -325,26 +353,21 @@ extern "C" void recognise_start(void)
        while this one is a best-effort burst costing 46 ms per step. At equal
        priority the burst starved the detector.
 
-       10 KB of stack, down from the interpreter era's 16 KB. A task stack must
-       come out of internal RAM, and once the generated arenas live in .bss
-       (51,248 B for the command model alone) there is only ~30 KB of internal
-       heap left — 16 KB no longer fits, the create failed, and with the return
-       value unchecked recognition was simply absent with nothing in the log.
-       10 KB is measured, not guessed: the high-water mark is 6,436 B on the
+       10 KB of stack, down from the interpreter era's 16 KB, for both paths.
+       A task stack must come out of internal RAM and cannot be moved to PSRAM
+       (CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY is off), and this task is only
+       the first of four app_main creates — record (8 KB) and console (4 KB)
+       follow it and were the ones that silently failed when the generated
+       arena took 51 KB of internal SRAM. The arena lives in PSRAM by default
+       now, which is the real fix, but the stack stays at its measured size
+       rather than its historical one: the high-water mark is 6,436 B on the
        generated path and 6,368 B on the interpreter path (both with the
-       recognise screen live), so either way ~3.8 KB is left for what this
-       measurement does not reach — a fire opening recognise.log through FATFS.
-       The "stack N B free" field in the step trace above is that high-water
-       mark, so the size stays checkable on any build. */
+       recognise screen live), so ~3.8 KB is left for what that measurement
+       does not reach — a fire opening recognise.log through FATFS. The
+       "stack N B free" field in the step trace above is that high-water mark,
+       so the size stays checkable on any build. */
 #define RECOGNISE_STACK 10240
-    /* Checked, unlike before: a failed create left the device with no
-       recogniser and nothing in the log to say so. */
-    if (xTaskCreatePinnedToCore(recognise_task, "recognise", RECOGNISE_STACK, nullptr, 2, nullptr, 0)
-        != pdPASS)
-        ESP_LOGE(TAG, "recognise task (%u B stack) not created: free internal %u, largest block %u",
-                 (unsigned)RECOGNISE_STACK,
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    task_spawn(TAG, recognise_task, "recognise", RECOGNISE_STACK, nullptr, 2, 0);
 }
 extern "C" void recognise_set_active(bool on)
 {

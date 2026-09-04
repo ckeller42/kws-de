@@ -30,3 +30,13 @@ idf_component_register(
   INCLUDE_DIRS "." "microfrontend" "microfrontend/kissfft"
   REQUIRES fatfs wear_levelling nvs_flash esp_timer esp_partition esp_tinyusb driver sdmmc
   PRIV_REQUIRES esp-tflite-micro esp-nn)
+
+# Arena placement (Kconfig choice KWS_INFER_COMMAND_ARENA). The generated file
+# declares its arena as `COMMAND_INFER_ARENA_ATTR static int8_t arena[...]` with
+# the macro defaulting to empty, so pointing it at EXT_RAM_BSS_ATTR is all it
+# takes to move 51 KB out of internal SRAM. -include esp_attr.h because the
+# generated C is platform-neutral and pulls in no ESP-IDF header of its own.
+if(CONFIG_KWS_INFER_COMMAND_ARENA_PSRAM)
+  set_source_files_properties("gen/command_infer.c" PROPERTIES COMPILE_OPTIONS
+      "-include;esp_attr.h;-DCOMMAND_INFER_ARENA_ATTR=EXT_RAM_BSS_ATTR")
+endif()
