@@ -6,7 +6,6 @@
 #include "audio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_nn.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -17,6 +16,7 @@
 #include "gen/model_config.h"
 #include "gen/model_data.h"
 #include "gen/test_vectors.h"
+#include "infer_lock.h"
 #include "mfcc.h"
 #include "nn_timers.h"
 #include "storage.h"
@@ -136,34 +136,21 @@ static void recognise_task(void *)
 #if CONFIG_KWS_INFER_GENERATED
     bool use_generated = true;
     command_infer_init();
-    /* gen/command_infer.c reserves COMMAND_INFER_SCRATCH_BYTES of its arena for
-       esp-nn — the maximum over every op, sized by a Python port of the
+    /* COMMAND_INFER_SCRATCH_BYTES is this model's share of kws_infer_scratch —
+       the maximum over every op, sized by a Python port of the
        esp_nn_get_*_scratch_size_esp32s3() family (kws_de/codegen.py). Ask the
-       real functions, on the real chip, for both kinds this model uses: the
-       3x3 depthwise convs (ops 1/3/5, identical geometry, the widest today at
-       19,888 B) and the 3x3x1 stem convolution (op 0, 6,948 B). Querying only
-       the depthwise would let a future esp-nn whose *conv* formula grew slip
-       past the guard. SOFTMAX's 4 bytes per class needs no query. If the port
-       under-reserved, the kernels would scribble past the arena, so this
-       refuses to run rather than logging a number nobody diffs. */
-    const data_dims_t dw_in = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
-    const data_dims_t dw_flt = { .width = 3, .height = 3, .channels = 32, .extra = 0 };
-    const data_dims_t dw_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
-    const dw_conv_params_t dw_p = { .in_offset = 120, .out_offset = -123, .ch_mult = 1,
-                                    .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 },
-                                    .activation = { -123, 127 } };
-    const data_dims_t cv_in = { .width = 10, .height = 49, .channels = 1, .extra = 1 };
-    const data_dims_t cv_flt = { .width = 3, .height = 3, .channels = 1, .extra = 0 };
-    const data_dims_t cv_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
-    const conv_params_t cv_p = { .in_offset = -71, .out_offset = -120, .stride = { 1, 1 },
-                                 .padding = { 1, 1 }, .dilation = { 0, 0 },
-                                 .activation = { -120, 127 } };
-    int dw_scratch = esp_nn_get_depthwise_conv_scratch_size(&dw_in, &dw_flt, &dw_out, &dw_p);
-    int cv_scratch = esp_nn_get_conv_scratch_size(&cv_in, &cv_flt, &cv_out, &cv_p);
-    int scratch = dw_scratch > cv_scratch ? dw_scratch : cv_scratch;
+       real functions, on the real chip: the query is generated alongside the
+       kernels from the same dims, so it covers every op that takes scratch
+       (both the 3x3 depthwise convs and the convolutions — querying only the
+       widest of today's would let a future esp-nn whose other formula grew slip
+       past the guard) and cannot describe a model that is no longer here. If
+       the port under-reserved, the kernels would scribble past the shared
+       region, so this refuses to run rather than logging a number nobody
+       diffs. */
+    int scratch = command_infer_scratch_query();
     if (scratch > COMMAND_INFER_SCRATCH_BYTES) {
-        ESP_LOGE(TAG, "esp-nn scratch %d B (depthwise %d, conv %d) > the %u B gen/command_infer.c reserved — regenerate with kws-codegen",
-                 scratch, dw_scratch, cv_scratch, (unsigned)COMMAND_INFER_SCRATCH_BYTES);
+        ESP_LOGE(TAG, "esp-nn scratch %d B > the %u B gen/command_infer.c reserved — regenerate with kws-codegen",
+                 scratch, (unsigned)COMMAND_INFER_SCRATCH_BYTES);
         use_generated = false;
 #if !KWS_CMD_TFLM
         ESP_LOGE(TAG, "no interpreter in this build (CONFIG_KWS_INFER_PARITY_LOG=n) — recognition disabled");
@@ -171,17 +158,16 @@ static void recognise_task(void *)
 #endif
         ESP_LOGE(TAG, "falling back to the TFLite Micro interpreter");
     }
-    /* The two models keep separate arenas and separate scratch blocks on
-       purpose. esp-nn's scratch pointer is a file-static global, so in assist
-       mode the wake task (priority 3) can preempt this one between
-       esp_nn_set_*_scratch_buf() and the kernel call; with separate buffers the
-       worst case is one inference reading the other model's scratch, which is
-       recoverable. Sharing one buffer would make interleaved use corrupt it. */
-    ESP_LOGI(TAG, "inference: %s, %u B arena (%s) + %u B state, "
+    /* The two models keep separate arenas but share one esp-nn scratch region,
+       because esp-nn's scratch pointers are file-static globals and separate
+       regions would be handed to the wrong model's kernels. In assist mode the
+       wake task (priority 3) can preempt this one mid-inference, so the two
+       evaluations are serialised on kws_infer_lock() — see infer_lock.h. */
+    ESP_LOGI(TAG, "inference: %s, %u B arena (%s) + %u B state + %u B shared scratch, "
                   "esp-nn scratch %d B queried / %u B reserved; TFLM %s; free internal %u",
              use_generated ? "generated (esp-nn)" : "TFLite Micro interpreter (generated path refused)",
              (unsigned)command_infer_arena_bytes(), KWS_CMD_ARENA_WHERE,
-             (unsigned)command_infer_state_bytes(),
+             (unsigned)command_infer_state_bytes(), (unsigned)KWS_INFER_SCRATCH_BYTES,
              scratch, (unsigned)COMMAND_INFER_SCRATCH_BYTES,
              KWS_CMD_TFLM ? "arena kept as the parity reference and fallback" : "not built in",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -195,16 +181,24 @@ static void recognise_task(void *)
        and the step loop cannot drift apart. `feat` is the input buffer both
        paths read; `logits` receives the 23 output bytes. */
     auto evaluate = [&]() -> bool {
+        bool ok = false;
 #if CONFIG_KWS_INFER_GENERATED
-        if (use_generated) { command_infer(feat, logits); return true; }
+        /* Both models' kernels work in one esp-nn scratch region (infer_lock.h
+           says why there is only one), and the wake task — priority 3, this
+           core — can preempt this one mid-inference in assist mode. */
+        kws_infer_lock();
+        if (use_generated) { command_infer(feat, logits); ok = true; }
 #endif
 #if KWS_CMD_TFLM
-        if (interp.Invoke() != kTfLiteOk) return false;
-        memcpy(logits, out->data.int8, sizeof logits);
-        return true;
-#else
-        return false;
+        if (!ok && interp.Invoke() == kTfLiteOk) {
+            memcpy(logits, out->data.int8, sizeof logits);
+            ok = true;
+        }
 #endif
+#if CONFIG_KWS_INFER_GENERATED
+        kws_infer_unlock();
+#endif
+        return ok;
     };
 
     /* Numeric fingerprint of the inference path, once per boot: the golden MFCC
@@ -278,7 +272,7 @@ static void recognise_task(void *)
         mfcc_quantize(feats, feat, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
         NN_TIMERS_RESET();
         int64_t t_invoke = esp_timer_get_time();
-        if (!evaluate()) { ESP_LOGE(TAG, "Invoke failed"); continue; }
+        if (!evaluate()) { ESP_LOGE(TAG, "inference failed"); continue; }
         int64_t invoke_us = esp_timer_get_time() - t_invoke;
 #if CONFIG_KWS_INFER_GENERATED && CONFIG_KWS_INFER_PARITY_LOG
         /* Once per mode entry, on the same live features: run the interpreter
@@ -287,7 +281,10 @@ static void recognise_task(void *)
            reads high. */
         if (s_parity_pending && use_generated) {
             s_parity_pending = false;
-            if (interp.Invoke() != kTfLiteOk) {
+            kws_infer_lock();      /* TFLM's kernels move the same esp-nn globals */
+            TfLiteStatus st = interp.Invoke();
+            kws_infer_unlock();
+            if (st != kTfLiteOk) {
                 ESP_LOGE(TAG, "parity: interpreter Invoke failed");
             } else {
                 int diff = 0;
@@ -342,6 +339,9 @@ static void recognise_task(void *)
 extern "C" void recognise_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+#if CONFIG_KWS_INFER_GENERATED
+    kws_infer_lock_init();     /* before the task exists, so nothing races to create it */
+#endif
 #if KWS_CMD_TFLM
     s_arena = arena_alloc(TAG, "command", KWS_MODEL_ARENA_BYTES);
     assert(s_arena);

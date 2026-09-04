@@ -8,7 +8,6 @@
 #include "beep.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_nn.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -16,6 +15,7 @@
 #include "gen/wake_infer.h"
 #include "gen/wake_model_config.h"
 #include "gen/wake_model_data.h"
+#include "infer_lock.h"
 #include "nn_timers.h"
 #include "recognise.h"
 #include "storage.h"
@@ -117,21 +117,17 @@ static void wake_task(void *)
 #if CONFIG_KWS_INFER_GENERATED
     bool use_generated = true;
     wake_infer_init();
-    /* gen/wake_infer.c reserves WAKE_INFER_SCRATCH_BYTES of its arena for
-       esp-nn, sized by a Python port of esp_nn_get_conv_scratch_size_esp32s3()
-       (kws_de/codegen.py). Ask the real one, on the real chip, for this model's
-       widest conv — the first CONV_2D, with the dims gen/wake_infer.c itself
-       passes. If the port under-reserved, the kernels would scribble past the
-       arena into the ring state, so this refuses to run rather than logging a
-       number nobody diffs. */
-    const data_dims_t sc_in = { .width = 1, .height = 5, .channels = 40, .extra = 1 };
-    const data_dims_t sc_flt = { .width = 1, .height = 5, .channels = 40, .extra = 0 };
-    const data_dims_t sc_out = { .width = 1, .height = 1, .channels = 32, .extra = 1 };
-    const conv_params_t sc_p = { .in_offset = 128, .out_offset = -128, .stride = { 1, 3 },
-                                 .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
-    int scratch = esp_nn_get_conv_scratch_size(&sc_in, &sc_flt, &sc_out, &sc_p);
+    /* WAKE_INFER_SCRATCH_BYTES is this model's share of kws_infer_scratch,
+       sized by a Python port of the esp_nn_get_*_scratch_size_esp32s3() family
+       (kws_de/codegen.py). Ask the real ones, on the real chip: the query is
+       generated from the very dims gen/wake_infer.c passes its kernels, so it
+       cannot go stale behind a regenerated model the way the hand-copied dims
+       it replaced could. If the port under-reserved, the kernels would scribble
+       past the shared region into whatever the linker put above it, so this
+       refuses to run rather than logging a number nobody diffs. */
+    int scratch = wake_infer_scratch_query();
     if (scratch > WAKE_INFER_SCRATCH_BYTES) {
-        ESP_LOGE(TAG, "esp-nn conv scratch %d B > the %u B gen/wake_infer.c reserved — regenerate with kws-codegen",
+        ESP_LOGE(TAG, "esp-nn scratch %d B > the %u B gen/wake_infer.c reserved — regenerate with kws-codegen",
                  scratch, (unsigned)WAKE_INFER_SCRATCH_BYTES);
         use_generated = false;
 #if !KWS_WAKE_TFLM
@@ -140,10 +136,11 @@ static void wake_task(void *)
 #endif
         ESP_LOGE(TAG, "falling back to the TFLite Micro interpreter");
     }
-    ESP_LOGI(TAG, "inference: %s, %u B arena + %u B state, esp-nn conv scratch %d B queried / %u B reserved; "
-                  "TFLM %s; free internal %u",
+    ESP_LOGI(TAG, "inference: %s, %u B arena + %u B state + %u B shared scratch, "
+                  "esp-nn scratch %d B queried / %u B reserved; TFLM %s; free internal %u",
              use_generated ? "generated (esp-nn)" : "TFLite Micro interpreter (generated path refused)",
              (unsigned)wake_infer_arena_bytes(), (unsigned)wake_infer_state_bytes(),
+             (unsigned)KWS_INFER_SCRATCH_BYTES,
              scratch, (unsigned)WAKE_INFER_SCRATCH_BYTES,
              KWS_WAKE_TFLM ? "arena kept as the parity reference and fallback" : "not built in",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -207,14 +204,22 @@ static void wake_task(void *)
             NN_TIMERS_RESET();
             uint8_t prob_q = 0;
             int64_t t_invoke = esp_timer_get_time();
+#if CONFIG_KWS_INFER_GENERATED
+            /* Held across the whole evaluation, the parity Invoke below
+               included: both paths' kernels work in one esp-nn scratch region
+               (infer_lock.h says why there is only one), and this task can
+               preempt the recogniser mid-inference in assist mode. */
+            kws_infer_lock();
+#endif
+            bool inferred = true;    /* checked after the unlock below, not here */
             if (use_generated) {
 #if CONFIG_KWS_INFER_GENERATED
                 wake_infer_step(feat, &prob_q);
 #endif
             } else {
 #if KWS_WAKE_TFLM
-                if (interp.Invoke() != kTfLiteOk) { ESP_LOGE(TAG, "Invoke failed"); continue; }
-                prob_q = out->data.uint8[0];
+                inferred = interp.Invoke() == kTfLiteOk;
+                if (inferred) prob_q = out->data.uint8[0];
 #endif
             }
             int64_t invoke_us = esp_timer_get_time() - t_invoke;
@@ -236,6 +241,10 @@ static void wake_task(void *)
                 s_parity_pending = false;
             }
 #endif
+#if CONFIG_KWS_INFER_GENERATED
+            kws_infer_unlock();
+#endif
+            if (!inferred) { ESP_LOGE(TAG, "inference failed"); continue; }
             /* uint8 output: prob = (q - zero_point) * scale, i.e. q/256. */
             float prob = (prob_q - KWS_WAKE_OUTPUT_ZERO_POINT) * KWS_WAKE_OUTPUT_SCALE;
             int64_t step_us = esp_timer_get_time() - t0;
@@ -328,12 +337,16 @@ static void wake_task(void *)
 extern "C" void wake_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+#if CONFIG_KWS_INFER_GENERATED
+    kws_infer_lock_init();     /* before the task exists, so nothing races to create it */
+#endif
 #if KWS_WAKE_TFLM
     s_arena = arena_alloc(TAG, "wake", KWS_WAKE_ARENA_BYTES);
     assert(s_arena);
 #endif
-    /* Core 0, priority 3 — same slot as the recogniser, off LVGL's core.
-       Only one of the two is ever active. */
+    /* Core 0, priority 3 — above the recogniser, which shares this core. In
+       recognise mode only that one runs and in wake mode only this one, but
+       assist mode has both live, which is why the inference lock exists. */
     task_spawn(TAG, wake_task, "wake", 16384, nullptr, 3, 0);
 }
 
