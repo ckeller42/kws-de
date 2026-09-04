@@ -291,6 +291,7 @@ The console port accepts newline-terminated commands
    mode menu|record|recordwake|recognise|wake|assist|usb
    status
    wakefire
+   beep
 
 - ``mode <name>`` switches the app mode, same as tapping the matching
   menu/back button.
@@ -302,6 +303,11 @@ The console port accepts newline-terminated commands
 - ``wakefire`` injects one synthetic wake fire down the same path as a real
   one — a measurement hook for the assist-mode duty cycle
   (:need:`REQ_FW_ASSIST_GATE`), not a feature.
+- ``beep`` plays the command-confirmation tone — two 80 ms 1.5 kHz pips,
+  sounded whenever the recogniser fires on a real command word (in assist
+  mode only once the window has closed, so the speaker never reaches the
+  window's own audio, and not at all while field capture is armed — see
+  :need:`REQ_FW_FIELD_CAPTURE`). A speaker check that needs nobody to speak.
 
 A **model stamp** is ``<file name>@<first 8 hex of the tflite's sha256>
 <date>``, for example ``command_v3_qat.tflite@fc36da9f 2026-09-03``.

@@ -35,6 +35,21 @@ void stream_reset(stream_t *s);
  */
 int  stream_push(stream_t *s, const float posterior[KWS_NUM_LABELS]);
 
+/**
+ * @brief Did this stream_push() return name a real command?
+ *
+ * True only for a fire on one of the command words. `-1` (nothing fired),
+ * `_unknown_` and `_silence_` are all rejections: the model heard something,
+ * but not an instruction the van can act on. This is what the confirmation
+ * tone is keyed off, so it is a pure function here rather than an inline test
+ * at the call site — the host test is the only place that distinction is
+ * checked, the device cannot be made to speak on demand.
+ */
+static inline int stream_is_command(int fired)
+{
+    return fired >= 0 && fired != KWS_UNKNOWN_INDEX && fired != KWS_SILENCE_INDEX;
+}
+
 #ifdef __cplusplus
 }
 #endif

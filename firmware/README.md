@@ -210,6 +210,16 @@ while this mode is active, so what you see is the wake model alone.
   `beep.c` opens the speaker with the mic's exact format (16 kHz, 16-bit,
   2 channels). A different rate would be rejected by `esp_codec_dev` and
   would take capture down with it.
+- A recognised **command** (a fire on a real command word — `_unknown_` and
+  `_silence_` stay silent) is confirmed with two 80 ms 1.5 kHz pips, higher
+  and shorter than the wake tone so the two are never confused. In assist
+  mode the pips wait until the window has closed, so the speaker cannot be
+  heard in the window's own audio; playback runs on a low-priority task, so
+  no inference step ever waits on the codec.
+- **Both tones are muted while field capture is armed.** An armed device is a
+  device the user has asked to be quiet, and neither tone may ever end up
+  inside a take. A command still recognised under capture simply passes
+  silently — the owed tone is dropped, not deferred to a later window.
 
 ## Regenerating headers
 
@@ -257,6 +267,8 @@ status
 - `wakefire` — injects one synthetic wake fire down the same path as a real
   one (gate, beep, log, UI). A measurement hook for the assist-mode duty
   cycle, which cannot be exercised without fires.
+- `beep` — plays the command-confirmation tone once, so the speaker path can
+  be checked without speaking to the device.
 
 A model stamp is `<file name>@<first 8 hex of the tflite's sha256> <date>`,
 e.g. `command_v3_qat.tflite@fc36da9f 2026-09-03`. It is generated into
@@ -328,7 +340,8 @@ reset the device and re-open Assistent → the switch is still on (the toggle is
 in NVS; `takes` re-zeroes, it counts since boot). Send `field off` / `field on`
 over the console instead → the badge follows that too, so the screen can never
 disagree with what is actually being recorded. Say "Hey Bus" and then a command:
-the screen behaves exactly as before (green flash, beep, recognised word).
+the screen behaves exactly as before (green flash, recognised word) — but
+silently, since capture is armed and both tones are muted.
 `status` now reports `field on takes 1 dropped 0`, and in USB-drive mode the
 drive holds `field/<spkNN>/<boot>-<ms>.wav` plus a `field.csv` row for it. Say
 "Hey Bus" a **second** time while the window is still open → still exactly one

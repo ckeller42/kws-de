@@ -61,6 +61,24 @@ int main(void)
     float weak[KWS_NUM_LABELS]; n = 0;
     for (int i = 0; i < 6; i++) { one_hot(weak, LICHT, 0.3f); if (stream_push(&s, weak) >= 0) n++; }
     assert(n == 0);
+
+    /* Confirmation-tone trigger: only a fire on a real command word counts.
+       Nothing fired, _unknown_ and _silence_ all stay silent. */
+    assert(stream_is_command(LICHT));
+    assert(stream_is_command(AN));
+    assert(!stream_is_command(-1));
+    assert(!stream_is_command(KWS_UNKNOWN_INDEX));
+    assert(!stream_is_command(KWS_SILENCE_INDEX));
+
+    /* End to end: a sustained "Licht" is a command; a sustained _unknown_ does
+       fire (stream_push suppresses only silence) but is not one. */
+    stream_reset(&s);
+    int e[] = {LICHT, LICHT, LICHT, LICHT};
+    n = run(&s, e, 4, ev); assert(n == 1 && stream_is_command(ev[0]));
+    stream_reset(&s);
+    int f[] = {KWS_UNKNOWN_INDEX, KWS_UNKNOWN_INDEX, KWS_UNKNOWN_INDEX, KWS_UNKNOWN_INDEX};
+    n = run(&s, f, 4, ev); assert(n == 1 && !stream_is_command(ev[0]));
+
     puts("test_stream OK");
     return 0;
 }

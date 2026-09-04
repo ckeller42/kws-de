@@ -369,6 +369,19 @@ static void wake_task(void *)
                     } else {
                         recognise_set_active(false);
                         post_field_take(now_ms);
+                        /* The window is shut, and the take's span is already
+                           handed to the recorder above: the tone the recogniser
+                           owes for a recognised command can sound now, where the
+                           mic can no longer capture it into the window's audio.
+                           Muted while field capture is on, for the same reason
+                           the wake tone is (below) — with capture armed the user
+                           has chosen a silent device, and a take must never
+                           contain a beep. Taken unconditionally so a muted tone
+                           is dropped rather than left owed and played at some
+                           later window's close. beep_double() posts to the beep
+                           task, so this edge costs nothing (see recognise.h). */
+                        bool tone_owed = recognise_take_command_fired();
+                        if (tone_owed && !s_field.enabled) beep_double();
                         /* The window is shut: an NVS write owed by a mid-window
                            toggle (wake_field_set) can be paid now. */
                         if (s_field_persist) { s_field_persist = false; field_persist(s_field.enabled); }

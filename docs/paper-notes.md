@@ -1630,6 +1630,35 @@ unchanged while it shares a scratch region that grew by 9,936 B. And the microSD
 mount probe again (`sdmmc_card_init failed (0x107)`, falling back to the flash partition) —
 the same defective card as E12's.
 
+### E19 — command confirmation tone (2026-09-04, feat/command-beep)
+
+Acceptance feedback for the user, not a measurement: a fire on a real command word (not
+`_unknown_`, not `_silence_` — `stream_is_command()`, host-tested in `test_stream.c`) plays two
+80 ms 1.5 kHz pips, distinct from the wake fire's single 150 ms 1 kHz tone. Two constraints
+shaped it. (1) It must not reach the microphone inside an assist window, or the field-capture
+takes (E17) would carry the device's own beep as training audio — so in assist mode the
+recogniser only *records* that a tone is owed and the wake task plays it at the window's closing
+edge. The recogniser's self-imposed deadline is not that edge: a second wake fire extends the
+gate without re-arming the deadline, so keying off "recogniser inactive" would have beeped
+mid-window. With capture *armed* the tone is dropped altogether, on the same `s_field.enabled`
+predicate E17 already mutes the wake tone with: an armed device is the user's chosen silent
+mode, and the owed flag is taken (and discarded) rather than left to sound at a later window's
+close. (2) It must not lengthen an inference step, so playback is a priority-1 task woken
+by a task notification; both model tasks only post. The tone reuses the existing shared duplex
+codec path (`beep.c`), so nothing about the mic stream changes.
+
+Measured on the CoreS3. The speaker opens after the mic on the same codec without error
+(`beep: speaker ready (wake 1000 Hz/150 ms, confirm 2 x 1500 Hz/80 ms)`). Playing the tone in
+wake mode leaves the front-end at a full 68 steps per 2 s trace window, so the concurrent write
+costs the mic stream nothing, and the wake probability peaks at 0.242 against a 0.99 threshold —
+the device does not hear its own beep as a wake word. Same in recognise mode: the tone played
+into the live recogniser produced no fire at all, so there is no feedback loop to guard against.
+An injected wake fire on silence opens and closes the usual window (2537 ms, duty 251/1000 of
+wall, 70 ms per wall second) with no tone, confirming that a rejection stays silent. Measured
+before this branch was rebased onto E17, so with capture *disabled* — the capture-armed mute
+added in the rebase rides on the same `s_field.enabled` predicate E17 already gates the wake
+tone with, and needs no separate device evidence.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
