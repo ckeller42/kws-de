@@ -51,9 +51,11 @@ _WAKE_RE = re.compile(r"(hey|hej|he|hei)(bus|buss|bos|boss)", re.IGNORECASE)
 
 # A wake phrase ending later than this into a field take is not that take's wake
 # phrase. The take starts FIELD_PREROLL_MS before the fire and the model fires
-# ~0.2-0.3 s past the end of the phrase, so the phrase ends ~1.2-1.3 s in; this
-# is that plus slack, and it has to move with FIELD_PREROLL_MS.
-WAKE_MAX_S = 1.8
+# 0.23-1.20 s past the end of the phrase (measured, E17), so the phrase ends
+# between 1.3 and 2.27 s in; this is the late end plus slack, and it has to move
+# with FIELD_PREROLL_MS. Only the take's first one or two words are ever tested
+# against it, so a loose bound cannot swallow a phrase said later in the take.
+WAKE_MAX_S = 2.5
 # Kept after the end of "bus", so the wake clip is not cut mid-plosive.
 WAKE_TAIL_S = 0.15
 # Kept after the last word of a field take's command, so the phrase clip is not
@@ -62,7 +64,7 @@ PHRASE_TAIL_S = 0.3
 # firmware/main/field.h's FIELD_PREROLL_MS: audio the device keeps in front of the
 # wake fire. `ms < FIELD_PREROLL_MS + window_ms` is how a ring-truncated take is
 # read off the two columns the pull carries (REQ_FW_FIELD_CAPTURE).
-FIELD_PREROLL_MS = 1500
+FIELD_PREROLL_MS = 2500
 TRUNCATED_SLACK_MS = 50  # tick/sample rounding between window_ms and the WAV length
 MIN_PREROLL_MS = 500  # no build ever kept less in front of the fire; smaller heads are cuts
 

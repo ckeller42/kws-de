@@ -1399,6 +1399,55 @@ field take is self-selected: it exists only because the wake word fired, so it m
 command accuracy *given* a successful wake, and says nothing about missed wakes, for
 which no trigger exists.
 
+**The pre-roll was still too short, and what was wrong was a number, not a formula
+(fix/field-take-offset).** At 1.5 s the wake phrase came back *clipped at the take's
+first sample* in 8 of the 9 second-session takes: the transcript said "Hey Bus", but the
+model that had just fired on it could not fire on the recording of it — replayed through
+the firmware feature path, the round-5 model fires on only 3 of those 9 takes. The
+suspects were all in the ring: `audio_write_pos()` at the fire, codec/DMA lag, which
+side the copy starts on. Every one of them was innocent. The wrong number was the
+model's own detection latency. Replaying the 13 approved "Hey Bus" clips spliced into
+real room tone — so the front-end's noise and PCAN estimates are warm, as they are on
+the device — the firmware gate (0.85 twice in a row) is met a median **1.06 s** and at
+worst **1.20 s** after the phrase *ends*, not the 0.2–0.3 s `field.h`, `qc.py` and
+`test_field.c` all budgeted for. The model answers one phrase with two humps: the first,
+right at the phrase end, peaks around 0.87 and usually yields a single qualifying step;
+the second, ~1 s later, sits at 0.996 for a third of a second and is what fires. The
+0.2–0.3 s figure was the first hump.
+
+Every field observation falls out of the corrected number. At a 1.0 s pre-roll the
+phrase ends at 1.0 − 1.06 < 0, in front of the file: 8 of 11 takes carried no wake word,
+and the 3 that did are the low-latency tail (0.23 s, so the phrase should end at 0.77 s;
+measured 0.84 s). At 1.5 s it ends at 0.44 s and the takes measure 0.34–0.54 s. The
+device's own beep is what ruled the ring out: at 14–64 ms past the pre-roll boundary in
+every take of the earlier session, the fire lands exactly where the geometry says it
+should, so the thing sitting a second away was the phrase, not the index.
+
+Confirmed on the device without a human, by playing one of the speaker's own approved
+wake clips through the flashing host's speaker (host-measured latency for that clip:
+1.17 s), device in Assistent mode with `field on`. **Before**, 1.5 s pre-roll: fire at
+0.996, phrase in the take at **0.00–0.32 s** with its onset cut off — the host
+prediction (0.33 s) to within 10 ms, which incidentally says the anchor is not sliding
+either, since the wake task holds 68 steps per 2 s, i.e. real time. The take itself
+peaks at 0.242 through the model and does not fire. **After**, 2.5 s pre-roll: same
+clip, same 1.18 s latency, phrase whole at **0.82–1.32 s** of a 5.00 s take with 0.82 s
+of lead-in in front of it — and the take now *fires the model at 2.48 s*, 20 ms from the
+device's own fire point. That is the property the feature exists for: a take that
+reproduces the wake it was triggered by is usable as wake training data.
+
+The fix is the budget, written down as its three terms — `FIELD_WAKE_LATENCY_MS` 1200 +
+`FIELD_PHRASE_MS` 900 + `FIELD_LEAD_IN_MS` 400 = a **2.5 s** pre-roll — so the pre-roll
+can no longer be set to a value that contradicts the measurement, and
+`firmware/test/test_field.c` asserts that the span contains a phrase placed where those
+terms put it (the assertion fails at 1.5 s). `qc.WAKE_MAX_S` moves with it, 1.8 → 2.5 s.
+
+The lesson is E17's own, twice over. The first time the self-recording device recorded
+itself; this time it was sized against a latency nobody had measured. 0.2–0.3 s was
+plausible, cheap to write down, and wrong by a factor of four — and it had been copied
+into three files, where each copy made the next look corroborated. The test that would
+have caught it is not "the pre-roll is 1.5 s" but "the phrase the fire answers is inside
+the take".
+
 ### E18 — deploying the width-48 command model (2026-09-04, measured on the CoreS3)
 
 E16 recommended width 48 and left one thing open: the runtime was a MAC-scaled estimate, not

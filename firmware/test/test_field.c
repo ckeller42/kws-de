@@ -3,19 +3,36 @@
 #include <assert.h>
 #include <stdio.h>
 
+#define MS(ms) ((uint32_t)((uint64_t)KWS_SAMPLE_RATE * (ms) / 1000u))
+
 int main(void)
 {
     field_state_t f;
     uint32_t start = 0, len = 0;
     bool cut = true;
 
-    /* The pre-roll is a measured value, not a free parameter: the wake model
-       fires ~0.2-0.3 s past the end of a ~0.7 s "Hey Bus", so a shorter one
-       starts inside the phrase and cuts its onset. Everything below is written
-       in the macros and would pass at any value, so pin it here — and note that
-       kws_de/qc.py's FIELD_PREROLL_MS carries the same number for the
-       truncation test and has to move with it. */
-    assert(FIELD_PREROLL_MS == 1500);
+    /* The take has to hold the phrase the fire is an ANSWER to, whole. Put that
+       phrase where the measured timings put it — it ends FIELD_WAKE_LATENCY_MS
+       before the fire and runs FIELD_PHRASE_MS before that — and require the
+       span to contain it. This is the assertion the 1.5 s pre-roll failed: it
+       budgeted 0.2-0.3 s of model latency against a real 1.06-1.20 s, so the
+       phrase sat in front of the take's first sample and 8 of 11 real takes
+       carried no wake word at all. Everything else in this file is written in
+       the macros and would pass at any pre-roll. */
+    field_reset(&f);
+    field_set_enabled(&f, true);
+    const uint32_t fire = 30 * KWS_SAMPLE_RATE;                  /* 30 s into a session */
+    const uint32_t phrase_end = fire - MS(FIELD_WAKE_LATENCY_MS);
+    const uint32_t phrase_start = phrase_end - MS(FIELD_PHRASE_MS);
+    field_on_wake(&f, fire);
+    assert(field_take_span(&f, ASSIST_WINDOW_MS, &start, &len, &cut));
+    assert(start <= phrase_start);            /* the onset is inside the take... */
+    assert(start + len > phrase_end);         /* ...and so is the rest of it */
+
+    /* kws_de/qc.py's FIELD_PREROLL_MS carries the same number for the
+       truncation test and its WAKE_MAX_S is derived from it for the wake-clip
+       cut; both have to move with this, and nothing else checks that they did. */
+    assert(FIELD_PREROLL_MS == 2500);
     /* The ring still has room for the wider take (the cap is on the total). */
     assert(FIELD_TAKE_SAMPLES <= FIELD_MAX_TAKE_SAMPLES);
 

@@ -217,9 +217,9 @@ def test_field_wake_split_ignores_a_late_or_absent_wake_phrase():
     late = {
         "text": "Hey Bus an",
         "words": [
-            {"word": "Hey", "start": 1.70, "end": 1.95},
-            {"word": "Bus", "start": 1.96, "end": 2.30},
-            {"word": "an", "start": 2.40, "end": 2.60},
+            {"word": "Hey", "start": 2.60, "end": 2.85},
+            {"word": "Bus", "start": 2.86, "end": 3.20},
+            {"word": "an", "start": 3.30, "end": 3.50},
         ],
     }
     assert qc.field_wake_split(late) == (None, ["hey", "bus", "an"])
