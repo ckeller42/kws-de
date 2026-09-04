@@ -523,16 +523,17 @@ def _field_session(
     device_intent: str,
     device_words: str = "Licht:0.93|an:0.88",
     window_ms: int = 2500,
+    ms: int = 4000,
 ) -> Path:
     # 4000 ms of audio = FIELD_PREROLL_MS (1500) + a 2500 ms window, i.e. the
     # whole window fitted the ring: not truncated. A larger window_ms with the
     # same wav is what a ring-truncated take looks like on the host.
     inc = tmp_path / "incoming" / "f1"
-    _wav(inc / "field" / "spk05" / "1-123456.wav", _tone(ms=4000))
+    _wav(inc / "field" / "spk05" / "1-123456.wav", _tone(ms=ms))
     (inc / "sessions.csv").write_text(
         "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,"
         "fire_ms,wake_prob,device_intent,device_words,window_ms\n"
-        "spk05,t,,field/spk05/1-123456.wav,4000,-10,field,,123456,123456,0.910,"
+        f"spk05,t,,field/spk05/1-123456.wav,{ms},-10,field,,123456,123456,0.910,"
         f"{device_intent},{device_words},{window_ms}\n"
     )
     return inc
@@ -670,6 +671,17 @@ def test_run_qc_rounding_short_field_take_is_not_truncated(tmp_path):
     counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
     row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
     assert row["truncated"] == "0" and counts["field_truncated"] == 0
+
+
+def test_run_qc_older_session_with_shorter_preroll_is_not_truncated(tmp_path):
+    # A session recorded by a 1.0 s pre-roll build: 3500 ms = 1000 + 2500. The
+    # pre-roll is inferred from the session, not assumed to be today's.
+    inc = _field_session(tmp_path, "Licht Küche an", window_ms=2500, ms=3500)
+    takes = qc.read_sessions(inc)
+    assert takes[0].preroll_ms == 1000
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
+    assert counts["field_truncated"] == 0
 
 
 def test_run_qc_field_take_that_does_not_parse_is_kept_as_a_negative(tmp_path):

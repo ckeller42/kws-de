@@ -64,6 +64,7 @@ PHRASE_TAIL_S = 0.3
 # read off the two columns the pull carries (REQ_FW_FIELD_CAPTURE).
 FIELD_PREROLL_MS = 1500
 TRUNCATED_SLACK_MS = 50  # tick/sample rounding between window_ms and the WAV length
+MIN_PREROLL_MS = 500  # no build ever kept less in front of the fire; smaller heads are cuts
 
 
 @dataclass
@@ -75,6 +76,7 @@ class Take:
     device_intent: str = ""  # what the device itself recognised (field takes only)
     device_words: str = ""  # "<word>:<conf>" entries joined by '|'
     window_ms: int = 0  # how long the assist window was really open (field takes only)
+    preroll_ms: int = FIELD_PREROLL_MS  # the recording build's pre-roll, inferred per session
     # seconds to cut for the phrase clip; None means the whole file
     span: tuple[float, float] | None = None
 
@@ -319,7 +321,7 @@ def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
     # take can read 1-30 ms "short"; only a real cut is more than that.
     truncated = ""
     if take.set == "field" and take.window_ms:
-        short_by = FIELD_PREROLL_MS + take.window_ms - m.get("dur_ms", 0)
+        short_by = take.preroll_ms + take.window_ms - m.get("dur_ms", 0)
         truncated = "1" if short_by > TRUNCATED_SLACK_MS else "0"
     row = QcRow(
         file=str(take.file),
@@ -342,6 +344,7 @@ def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
 def read_sessions(incoming: Path) -> list[Take]:
     incoming = Path(incoming)
     takes = []
+    heads = []  # ms - window_ms of each field take = that build's pre-roll, unless cut
     with (incoming / "sessions.csv").open(newline="") as fh:
         for r in csv.DictReader(fh):
             takes.append(
@@ -357,6 +360,16 @@ def read_sessions(incoming: Path) -> list[Take]:
                     window_ms=int(r.get("window_ms") or 0),
                 )
             )
+            if r["set"] == "field" and r.get("window_ms"):
+                heads.append(int(r["ms"]) - int(r["window_ms"]))
+    # Sessions recorded before the pre-roll grew carry a shorter head; a cut take
+    # has less than the pre-roll in front, so the session's longest head is it.
+    plausible = [h for h in heads if MIN_PREROLL_MS <= h <= FIELD_PREROLL_MS]
+    if plausible:
+        pre = max(plausible)
+        for t in takes:
+            if t.set == "field":
+                t.preroll_ms = pre
     return takes
 
 
