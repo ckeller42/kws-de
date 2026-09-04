@@ -1155,6 +1155,103 @@ One rig note, not a firmware finding: the microSD failed its mount probe again t
 went to the flash partition. Same defective card as E12's; it costs the boot latency the
 console tooling already waits out.
 
+### E16 — wider DS-CNN: width 40 and 48 (2026-09-04, host-only, no device work)
+
+E15 deployed a model that lost ground on both speakers it shared with its predecessor
+(spk01 0.615 → 0.538, spk02 0.737 → 0.605) while gaining on the third, and read that as
+"the honest cost of personalisation at fixed capacity: 5,879 parameters split three ways
+instead of two". If that reading is right, the fix is capacity. The 2026-09-03 width sweep
+only went *narrower* (24, 16 — both worse on both speakers), so the hypothesis had never
+been tested in the direction it predicts. Widths 40 and 48 were trained with the same
+recipe as the deployed model (40 float epochs, `--qat --qat-epochs 10`) on the *same*
+`features_v3` cache, no dataset rebuild — `data/manifest_v3.json`, `built_at`
+`2026-09-03T17:29:02Z`, train n = 32,399 (7,263 real / 25,136 TTS), speakers spk01, spk02,
+spk10 — so the only variable is the channel count. Real-voice figures are `eval_recordings`
+over the full QC-approved set, the same 197 word clips / 101 phrases / 29 negatives as E15,
+and the w32 column is a re-run of the deployed export in the identical invocation form
+rather than a quote of E15's table:
+
+| | w32 (deployed) | w40 | w48 |
+|---|---|---|---|
+| params | 5,879 | 8,303 | 11,111 |
+| MACs | 2,070,496 | 3,058,520 (1.48x) | 4,234,704 (2.05x) |
+| tflite bytes | 17,912 | 21,680 | 25,832 |
+| INT8 held-out test acc | 90.70 % | 92.83 % | **93.59 %** |
+| spk01 words (n=13) | 0.538 | 0.769 | **0.923** |
+| spk02 words (n=38) | 0.605 | 0.842 | **0.895** |
+| spk10 words (n=146) | 0.678 | 0.760 | **0.856** |
+| all words (n=197) | 0.655 | 0.777 | **0.868** |
+| phrase intent (n=101) | 8/101 (0.079) | **12/101 (0.119)** | 8/101 (0.079) |
+| false accepts (n=29) | 1/29 (0.034) | **0/29** | **0/29** |
+| est. command evaluation | 27.3 ms (measured, E14/E15) | ~40.3 ms | ~55.8 ms |
+| est. recognise step | 31 ms (measured, E14/E15) | ~44 ms | ~59 ms |
+| arena, PSRAM | 31,360 B | 39,200 B | 47,040 B |
+| shared esp-nn scratch, internal | 19,888 B | **59,632 B** | 29,824 B |
+| est. free internal at recogniser start | 55,103 B (measured) | **~15,359 B** | ~45,167 B |
+
+`export.assert_model_healthy` passes for all three (23 predicted classes each). Device
+figures are *estimates* scaled by MACs from E14/E15's measured w32 numbers, not
+measurements — the device was not touched in this experiment.
+
+**ETA ledger, predicted against actual.** `kws-eta predict train 1295960` before each run,
+`Timed` recording the float-training phase after:
+
+| run | predicted | actual (float phase) | full command wall |
+|---|---|---|---|
+| w40 | ~3.5 min (range 3.2–4.5, 5 runs) | 308.0 s (5.1 min) | 6 min 50 s |
+| w48 | ~4.0 min (range 3.3–4.7, 6 runs) | 376.2 s (6.3 min) | 9 min 52 s |
+
+Both overshoot, and the reason is a limitation of the ledger worth writing down: the
+predictor's `size` is `epochs x train rows`, which carries no width term, and every run in
+its history was a width-32 one. It is predicting a *different architecture's* duration from
+the data volume alone. The overshoot ratios (1.47, 1.57) do not track the MAC ratios
+(1.48, 2.05) either, so a width term would not be a simple multiplier — the float training
+step is not purely MAC-bound.
+
+**The interesting finding is not the accuracy, it is that width 40 is a memory trap.**
+`kws-codegen` run on all three exports (regenerating w32 first as a control — it reproduced
+the deployed 31,360 B arena / 19,888 B scratch exactly) reports the shared esp-nn scratch,
+and w40 needs **three times** what w32 needs while w48 needs only one and a half times.
+The max-scratch op is the depthwise in every case, and `_depthwise_scratch` — the
+branch-for-branch port of `esp_nn_get_depthwise_conv_scratch_size_esp32s3` — branches on
+`channels % 16`. 40 is 8-aligned but not 16-aligned, so it falls out of the fast path into
+the generic one, which rounds the channel count up to 48 *and* allocates an output buffer
+the aligned path does not need: 35,616 B of padded input plus 23,520 B of output, against
+w48's 29,376 B of padded input and no output buffer. **A model that is 28 % smaller than
+another in MACs asks for twice its scratch, because of an alignment branch in a kernel
+library.** That matters because the shared `kws_infer_scratch` region is internal `.bss`,
+sized to the widest op of any shipped model: w40 would grow it by 39,744 B and leave ~15 KB
+free at recogniser start — under E14's 23,879 B "every task created" mark and close to
+E13's 8,431 B, the level at which the 8 KB record task silently failed to spawn. w48 grows
+it by 9,936 B and leaves ~45 KB. The arenas are PSRAM and irrelevant at these sizes.
+
+**Reading.** E15's capacity explanation holds, and holds strongly. Width recovers both
+regressed speakers and overshoots their pre-session-2 numbers — spk01 0.538 → 0.923 and
+spk02 0.605 → 0.895 at w48, against the 0.615 / 0.737 the *previous* model managed with two
+speakers instead of three — and spk10 rises with them rather than trading against them
+(0.678 → 0.856), which is what "the model ran out of parameters" predicts and what "the
+third speaker crowded the other two out" does not. Aggregate real-voice word accuracy goes
+0.655 → 0.868 and the safety-side metric improves to 0/29 false accepts. The synthetic
+split agrees this time (90.7 → 93.6 %), which is worth flagging precisely because E15's
+headline lesson was that it disagreed: the TTS-dominated test split is not a *proxy* for a
+microphone, but it is not anti-correlated either — it failed to see a data change and does
+see a capacity change. The recommendation is **w48**, at 2.05x the MACs and 9,936 B more
+internal SRAM, subject to one device measurement of the recognise step before flashing
+(~59 ms estimated against a 100 ms step budget: real-time holds, but CPU load roughly
+doubles and in assist mode the recogniser shares a core with the wake task). **w40 should
+not be deployed at any accuracy** — it is beaten by w48 on every real-voice metric except
+phrase intent and costs 30 KB more of the scarcest memory to be worse. If w48 measures
+badly on the device, the fallback is staying at w32, not stepping down to w40.
+
+One tooling note for whoever repeats this. `kws-eval` derives the model filename from
+`--prefix` and `--qat` alone and has no `--model`, so it cannot be pointed at a
+`command_v3_w<N>_qat.tflite`; the width models were scored through a throwaway driver
+calling `eval_recordings` + `make_command_predict_fn` with explicit bytes, the same code
+path, validated by reproducing E15's deployed-w32 row exactly. A `--model` flag is the
+obvious fix if width sweeps become routine. Also, `command_v3_w48_qat_metadata.json` still
+carries the stock `budgets.macs` of 3,000,000, which both new widths exceed; nothing
+enforces it, but a deploy should either raise the declared budget or note the overrun.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
