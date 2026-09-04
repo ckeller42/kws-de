@@ -40,5 +40,5 @@ digraph model {
   op7 -> op8 [color="#C98A1E"];
   op8 -> op9 [color="#C98A1E"];
   op9 -> OUT [color="#C94B32", penwidth=2];
-  labelloc="b"; fontsize=11; fontname="Helvetica"; label="Command DS-CNN (v3, QAT)\n\n11 ops, 28 tensors, 4,960 weights, 2,070,496 MACs, 0 B state, 17,880 B file";
+  labelloc="b"; fontsize=11; fontname="Helvetica"; label="Command DS-CNN (v3, QAT)\n\n10 ops, 28 tensors, 4,960 weights, 2,070,496 MACs, 0 B state, 17,912 B file";
 }
