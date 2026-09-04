@@ -473,6 +473,51 @@ always 1x1 (a streaming model advances the ring by one row per Invoke
 instead of recomputing a window), so MACs = weights count exactly, unlike
 the command model's 49x10 = 490x multiplier above.
 
+Generated inference
+---------------------
+
+Both shipped models run as generated C, not through the TFLite Micro
+interpreter (:need:`REQ_FW_INFER_GENERATED`). ``kws-codegen`` reads the same
+``.tflite`` graph the diagrams above are drawn from and emits straight-line
+calls into esp-nn's ESP32-S3 kernels with the requantisation constants folded
+in, so the op sequence in the generated C is exactly the op sequence in the
+figures:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Model
+     - Source read by ``kws-codegen``
+     - Generated ops, in order
+     - Arena / state
+
+   * - Command
+     - ``firmware/main/gen/model_data.h``
+     - CONV_2D, then 3x (DEPTHWISE_CONV_2D, CONV_2D 1x1), MEAN,
+       FULLY_CONNECTED, SOFTMAX — 10 ops
+     - 51,248 B arena (incl. 19,888 B esp-nn scratch), 0 B state
+
+   * - Wake
+     - ``models/hey_bus.tflite``
+     - the streaming stem CONV_2D, the depthwise/1x1 stack over ring buffers,
+       FULLY_CONNECTED, LOGISTIC, QUANTIZE — 14 ops after the streaming
+       rewrite
+     - 15,680 B arena (incl. 15,552 B esp-nn scratch), 4,200 B ring state
+
+The command model is generated from the C array the firmware embeds rather
+than from ``models/command_v3_qat.tflite``: a retrain rewrites the ``.tflite``
+without touching the device headers, so only ``model_data.h`` is guaranteed to
+be the bytes the device actually runs — and it is in the repository, so its
+freshness check runs in CI. The wake model has no such in-repo copy, so its
+check only bites where ``KWS_DATA_ROOT`` is present. Regenerate either with:
+
+.. code-block:: console
+
+   $ uv run --no-sync kws-codegen firmware/main/gen/model_data.h \
+       --name command --out firmware/main/gen
+   $ uv run --no-sync kws-codegen "$KWS_DATA_ROOT/models/hey_bus.tflite" \
+       --name wake --out firmware/main/gen
+
 Data provenance
 -----------------
 

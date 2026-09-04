@@ -99,13 +99,16 @@ binary is a small ``assert``-based program built by
    :status: passing
    :links: REQ_FW_INFER_GENERATED, REQ_FW_HOST_TESTS_NO_IDF
 
-   ``firmware/test/test_wake_smoke.c``: compiles the committed generated wake
-   inference (``gen/wake_infer.c``) against esp-nn's ANSI-C reference kernels
-   and replays the 64 synthetic feature windows of
-   ``gen/wake_smoke_vectors.h``, asserting every step's output byte equals the
-   reference interpreter's answer frozen in the same header. Model-free and
-   data-free, so this is the one that runs in CI: ``wake smoke: 0/64 steps
-   differ``.
+   ``firmware/test/test_wake_smoke.c`` and
+   ``firmware/test/test_command_smoke.c``: compile the committed generated
+   inference (``gen/wake_infer.c``, ``gen/command_infer.c``) against esp-nn's
+   ANSI-C reference kernels and replay the synthetic feature windows of
+   ``gen/wake_smoke_vectors.h`` (64 steps of one continuous clip) and
+   ``gen/command_smoke_vectors.h`` (16 independent windows — the command model
+   is stateless), asserting every output byte equals the reference
+   interpreter's answer frozen in the same header. Model-free and data-free, so
+   these are the ones that run in CI: ``wake smoke: 0/64 steps differ`` and
+   ``command smoke: 0/368 bytes differ``.
 
    Two wider comparisons run only where the models and recordings are present
    (a developer machine with ``KWS_DATA_ROOT``, never CI):
@@ -113,14 +116,21 @@ binary is a small ``assert``-based program built by
    takes plus the golden vector through the same generated code
    (``wake parity: 0/635 steps differ (11 clips, 4200 B state)``), and
    ``tests/test_codegen_parity.py`` extends the byte-for-byte comparison to
-   the command model (``command parity: 0/1564 bytes differ``). Both generate
+   the command model over 4 synthetic vectors plus 64 real test-split feature
+   windows (``command parity: 0/1564 bytes differ (68 clips, arena
+   51248 B)``). Both generate
    their vectors into a scratch directory, never into the committed
    ``firmware/main/gen``. Zero LSB difference is the pass condition
    throughout; one differing byte fails.
 
    On the device the same comparison runs once per wake-mode entry with
    ``CONFIG_KWS_INFER_PARITY_LOG=y``, on live microphone features, and is
-   logged as ``parity: generated <a>, interpreter <b>``.
+   logged as ``parity: generated <a>, interpreter <b>``. That build has no room
+   for the recogniser on the CoreS3 (both interpreters plus both generated
+   ``.bss`` arenas), so for the command model the device evidence is instead
+   the ``selftest int8 out:`` line — all 23 output bytes for the golden MFCC
+   vector, byte-identical between the interpreter build and the generated
+   build.
 
 .. test:: Generated arena stays within the TFLM arena
    :id: TEST_INFER_ARENA
@@ -132,9 +142,10 @@ binary is a small ``assert``-based program built by
    ``KWS_MODEL_ARENA_BYTES`` the firmware allocates for TFLM today, read from
    the committed ``firmware/main/gen/`` headers, and the per-op esp-nn scratch
    sizes are pinned to hand-derived
-   ``esp_nn_get_*_scratch_size_esp32s3`` values. The device confirms that
-   scratch figure at boot by asking the real esp-nn on the real chip for the
-   model's widest convolution and logging what it answers.
+   ``esp_nn_get_*_scratch_size_esp32s3`` values (15,552 B for the wake model's
+   widest convolution, 19,888 B for the command model's 3x3 depthwise). The
+   device confirms that figure at boot by asking the real esp-nn on the real
+   chip for the same op, and refuses the generated path if it answers more.
 
 Python tests (pytest)
 ----------------------

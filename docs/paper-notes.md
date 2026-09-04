@@ -903,6 +903,67 @@ boot, gets 15,552 B — exactly what the port reserved — and refuses to run th
 if it ever comes back larger, because that failure mode is a silent overrun into the ring
 state rather than a crash.
 
+### E13 — generated inference for the command model (2026-09-04, measured on the CoreS3)
+
+The same treatment for the 23-class DS-CNN, and with it the interpreter leaves the firmware
+entirely: `firmware/main/gen/command_infer.c` is 10 straight-line esp-nn calls (CONV_2D, then
+three DEPTHWISE_CONV_2D / 1x1 CONV_2D pairs, MEAN, FULLY_CONNECTED, SOFTMAX), no ring state,
+one static arena. Both builds measured on the device in one session, ~100 s of recognition
+each, medians over the ~5 s trace lines with the cold first one dropped:
+
+| | TFLM interpreter | generated (esp-nn) |
+|---|---|---|
+| recognise step | 46.0 ms | **31.0 ms** (−33 %) |
+| model evaluation alone | 41,710 µs | **26,986 µs** (−35 %) |
+| arena / state | 65,536 B arena in **PSRAM** (54,824 B used) | **51,248 B arena in internal `.bss`** (19,888 B of it esp-nn scratch) + 0 B state |
+| free internal RAM at recogniser start | 36,231 B | **8,495 B** |
+| recognise task stack high-water | 6,368 B of 10,240 | 6,436 B of 10,240 |
+| app image | 1,165,440 B | **1,000,688 B** (−164,752 B: no interpreter, no kernel set, for either model) |
+| `selftest int8 out:` (23 bytes, golden vector) | `-128,…,-36,…,0,-94,…,-127,…` | byte-identical |
+
+**Same story as E12, at ten times the scale.** The interpreter's own kernel timers attribute
+28.4 ms of its 41.7 ms `Invoke` to conv + depthwise + FC + softmax and ~13.0 ms to the
+`rest` column — dispatch, tensor bookkeeping, the reference-C `MEAN`. The generated function
+keeps the kernels and deletes the 13 ms, landing at 27.0 ms. So the spec's "command Invoke at
+least 2x faster" is **not** met: 1.55x is what removing all interpreter overhead is worth
+here, because unlike the wake model this one is genuinely arithmetic-bound (49x10x32
+activations through three depthwise blocks). Recorded as open, like E12's sub-1 ms target;
+the lever left is the model, not the runtime.
+
+**Arena placement is the interesting result.** The interpreter's arena never fit internal RAM
+— `command arena 65536 B does not fit internal RAM (free 47019, largest block 31744)` — so it
+had always run from PSRAM. The generated arena is a `.bss` array, so it is internal SRAM by
+construction: no allocation, no runtime contiguity requirement, no PSRAM round trips. The
+bill comes as internal RAM: free internal at recogniser start drops 36,231 → 8,495 B, and the
+recognise task's 16 KB stack no longer fit — `xTaskCreatePinnedToCore` failed, its return
+value was unchecked, and recognition was simply *absent* with nothing in the log. Both are
+fixed: the create is checked now, and the stack is 10 KB against a measured 6.4 KB high-water
+mark on either path (reported live as `stack <n> B free` in the step trace). Worth noting for
+later: the 1.4 ms between the interpreter's 28.4 ms of PSRAM-fed kernels and the generated
+path's 27.0 ms is roughly what the arena's placement is worth, so 51 KB of internal SRAM can
+be bought back cheaply if something else needs it more.
+
+One capability was lost, and it is worth stating: `CONFIG_KWS_INFER_PARITY_LOG=y` keeps both
+interpreters *and* both generated `.bss` arenas, which leaves 16,711 B of internal RAM with a
+largest block of 8,704 B — not enough to create the recognise task at all, so the wake model's
+trick of logging `parity: <a>/<b> differ` on live device audio has no room to run for the
+command model. The device evidence is the `selftest int8 out:` line instead: all 23 output
+bytes for the golden MFCC vector, printed by both builds and byte-identical. Off-device the
+chain is unchanged in strength — `command smoke: 0/368 bytes differ` (16 synthetic windows,
+model-free, runs in CI) and `command parity: 0/1564 bytes differ (68 clips, arena 51248 B)`
+(4 synthetic vectors plus 64 real test-split windows, needs the data root).
+
+**A trap found on the way.** `models/command_v3_qat.tflite` is *not* the model the firmware
+runs. A retrain rewrites the `.tflite` without touching `firmware/main/gen/model_data.h`, and
+the two had already diverged (17,912 B / `f985f282` on disk against the 17,880 B / `fc36da9f`
+the device's `KWS_MODEL_ID` names — different weights, not a re-serialisation). Generating
+from the `.tflite` would have shipped a generated path computing a different model from the
+one `model_config.h`'s quantisation constants describe, with nothing failing loudly. So
+`kws-codegen` reads the embedded C array directly (`codegen.model_bytes` accepts a
+`model_data.h`), which makes the model the device runs the single source of truth — and, as a
+side effect, puts the command model's byte-exact freshness check inside CI, where the wake
+model's could never go because `models/` is not in the repository.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

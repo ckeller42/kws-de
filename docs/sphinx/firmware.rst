@@ -40,12 +40,51 @@ Recognition demo
 
 Mic -> MFCC -> the int8 command model -> the same streaming detector as
 ``kws_de.stream`` (:need:`REQ_FW_23_CLASSES`, :need:`REQ_FW_DETECTOR_PARAMS`).
-The screen shows the last fired word, confidence, inference time, TFLite
-Micro arena bytes used, and a running fired count; every firing also
+The screen shows the last fired word, confidence, inference time, model arena
+bytes used, and a running fired count; every firing also
 appends to ``recognise.log`` on the recording volume
 (:need:`REQ_FW_RECOGNISE_LOG`), replayable
 through ``kws_de.stream.KeywordStream`` on the host. Back path: the
 screen's own back button returns to the menu.
+
+The command model, like the wake model, runs on the generated inference path
+by default (:need:`REQ_FW_INFER_GENERATED`); the default build carries no
+interpreter at all. Measured on the CoreS3 in one session, ~100 s of
+recognition per path, medians over the ~5 s trace lines with the cold first
+one dropped: **step 46 -> 31 ms** and **model evaluation 41.7 -> 27.0 ms**
+(-35 %). The ~14.7 ms saved is almost exactly the ``rest`` column of the
+interpreter's own trace (~13.0 ms of dispatch, tensor bookkeeping and
+reference-C glue): the esp-nn kernels are the same on both paths, so the
+generated code deleted the overhead rather than making the arithmetic faster.
+The spec's "at least 2x" target is therefore **not** met at 1.55x — the
+remaining 27 ms is kernel time for this model's 49x10x32 activations, which is
+a model-size question, not a code-generation one.
+
+Where the arena lives is the other half of the story. The interpreter's
+65,536 B arena never fit internal RAM (``command arena 65536 B does not fit
+internal RAM (free 47019, largest block 31744) — using PSRAM``), while the
+generated 51,248 B arena is a ``.bss`` array and so is in internal SRAM by
+construction: no allocation, no fragmentation, no PSRAM round trips. The cost
+is that internal RAM is now the binding constraint — free internal at
+recogniser start is **36,231 -> 8,495 B**, and the recognise task's stack came
+down from 16 KB to 10 KB to fit (measured high-water use is ~6.4 KB on either
+path, reported live as ``stack <n> B free`` in the step trace). If internal
+RAM is ever needed back, the arena can move to PSRAM for roughly the 1.4 ms
+that separates the two kernel timings above.
+
+The boot line reads ``inference: generated (esp-nn), 51248 B arena (static,
+internal RAM) + 0 B state, esp-nn depthwise scratch 19888 B queried / 19888 B
+reserved; TFLM not built in; free internal <n>`` — the same on-chip scratch
+check as the wake model, here against
+``esp_nn_get_depthwise_conv_scratch_size`` for the model's widest op (its 3x3
+depthwise convolutions). The ``selftest int8 out:`` line, which prints all 23
+output bytes for the golden MFCC vector, is byte-identical between the
+interpreter build and the generated build — the on-device form of the
+bit-exactness the host tests check. ``CONFIG_KWS_INFER_PARITY_LOG=y`` cannot
+be used to check it the way the wake model does: that build keeps both
+interpreters *and* both generated ``.bss`` arenas, which leaves too little
+internal RAM for the recognise task to be created at all (``recognise task
+(16384 B stack) not created: free internal 16711, largest block 8704``).
 
 Hey Bus demo (wake test mode)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
