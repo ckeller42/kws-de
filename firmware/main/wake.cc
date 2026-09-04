@@ -389,7 +389,16 @@ static void wake_task(void *)
             } else {
                 ui_wake_refresh(&copy);       /* paint green before the tone blocks */
             }
-            if (fired) beep_play();
+            /* Silent while field capture is on. The speaker sits centimetres
+               from the mic, so the tone comes back into the ring at roughly
+               full scale — and it is played at the fire, i.e. exactly inside
+               the span a take covers, ~14-64 ms past the pre-roll boundary.
+               Left in, it is the peak of every take and kws-qc rejects all of
+               them as clipped. Muting rather than editing it out of the WAV
+               keeps the audio and the take's own device_words prediction
+               describing the same sound. The screen is already green (assist
+               repaints above), so the fire is still acknowledged. */
+            if (fired && !(assist && s_field.enabled)) beep_play();
             /* Yield inside the catch-up loop too: a backlog must never starve
                the LVGL task, or the Record button stops responding. */
             vTaskDelay(1);
