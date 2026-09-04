@@ -1840,6 +1840,33 @@ fallback ledger instead of the shared one — three runs had accumulated there u
 **Nothing was promoted.** The installed `hey_bus.tflite` is unchanged, `firmware/main/gen/` was
 not touched, and no device work was done (the CoreS3 was in use).
 
+**Follow-up: the cutter is fixed at the source (issue #58, `fix/qc-field-cutter`).** E20 worked
+around the mislabelled clips with an exclude list; the pipeline now cannot produce them. Two
+rules were separated that had been one. A `wake` clip is cut only from a *whole leading* phrase
+— the take's first one or two word spans, ending within 2.5 s and at least 0.4 s long — because
+a wake clip starts at sample 0, so a short one is proof the capture began after the "Hey".
+Everything filed as a phrase or a negative starts after the **last** wake phrase in the take,
+wherever it sits, so a take ending in "Hey Bus" or carrying a second fire cannot leak the word;
+a take with nothing left after that cut, or whose transcript holds the phrase with no word span
+to locate it by, is filed nowhere at all. Re-running QC on the two field sessions reproduces
+E20's manual triage exactly and finds one clip more than it did: session `…-0951` yields **0**
+wake clips instead of 8 fragments, the two wake-bearing negatives become one correctly trimmed
+negative, the two wake-bearing phrases are dropped, and one take E20 discarded (`33-282511`,
+"Hey Bus … Hey Bus, Licht aus") is *recovered* as a clean 2.21 s phrase by cutting after the
+second phrase. `scripts/audit-approved.py` now audits the whole tree — format, duration band per
+set, `index.csv` ↔ files both ways, `spkNN` naming, and a Whisper pass over every field-derived
+phrase/negative looking for the wake regex — and reports 0 problems over 379 clips. The lesson
+generalises past this bug: **per-session QC cannot see a per-tree invariant**, and the invariant
+here ("no non-wake clip contains the wake word") is exactly the one whose violation is invisible
+in every individual session's report.
+
+One correction to E21 falls out of it. `qc.csv`'s `wake_clip` was "did Whisper find the phrase at
+the head of the take", which was the same question as "was a wake clip written" only while every
+leading phrase produced one. It no longer is: a head-cut fragment writes nothing, but the speaker
+*did* wake the device with it, and counting those as "no wake clip" would have turned all eight
+of session `…-0951`'s takes into false alarms. `wake_clip` now means "Whisper found the phrase in
+the take", which is the question the near-miss and false-alarm counts actually need.
+
 ### E21 — the loose capture gate (2026-09-04, feat/field-loose-gate)
 
 E17 closed on a caveat it could not fix: a field take is self-selected, because it exists

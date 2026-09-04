@@ -207,9 +207,12 @@ def test_field_wake_split_cuts_the_wake_phrase_and_returns_the_command():
             {"word": "an", "start": 2.10, "end": 2.30},
         ],
     }
-    cut_s, tokens = qc.field_wake_split(tr)
-    assert cut_s == pytest.approx(0.75)  # end of "Bus" + WAKE_TAIL_S
-    assert tokens == ["licht", "küche", "an"]
+    split = qc.field_wake_split(tr)
+    assert split.wake_end == pytest.approx(0.75)  # end of "Bus" + WAKE_TAIL_S
+    assert split.tokens == ["licht", "küche", "an"]
+    # wake only at the front: the command clip starts exactly where the wake
+    # clip ends, which is what the pipeline did before #58 and still does
+    assert split.command_start == pytest.approx(0.75)
 
 
 def test_field_wake_split_ignores_a_late_or_absent_wake_phrase():
@@ -222,10 +225,12 @@ def test_field_wake_split_ignores_a_late_or_absent_wake_phrase():
             {"word": "an", "start": 3.30, "end": 3.50},
         ],
     }
-    assert qc.field_wake_split(late) == (None, ["hey", "bus", "an"])
+    # no wake CLIP is cut... but the phrase is still in the take, so everything
+    # kept from it starts after the phrase ends (#58)
+    assert qc.field_wake_split(late) == (None, ["an"], pytest.approx(3.35))
     # no wake phrase at all: nothing is cut, everything is command material
     plain = {"text": "Licht an", "words": [{"word": "Licht", "start": 0.1, "end": 0.4}]}
-    assert qc.field_wake_split(plain) == (None, ["licht", "an"])
+    assert qc.field_wake_split(plain) == (None, ["licht", "an"], 0.0)
 
 
 def test_field_wake_split_accepts_a_single_glued_wake_span():
@@ -240,7 +245,82 @@ def test_field_wake_split_accepts_a_single_glued_wake_span():
             {"word": "an", "start": 2.10, "end": 2.30},
         ],
     }
-    assert qc.field_wake_split(tr) == (pytest.approx(0.75), ["licht", "küche", "an"])
+    assert qc.field_wake_split(tr) == (
+        pytest.approx(0.75),
+        ["licht", "küche", "an"],
+        pytest.approx(0.75),
+    )
+
+
+def test_field_wake_split_excludes_a_wake_phrase_spoken_mid_take():
+    # #58: the take opens with the command and says "Hey Bus" at 2.0 s. No wake
+    # clip (the phrase is not this take's fire), but nothing kept from the take
+    # may contain it either — the command clip starts after 2.0 s + WAKE_TAIL_S.
+    tr = {
+        "text": "Licht Küche an Hey Bus Licht aus",
+        "words": [
+            {"word": "Licht", "start": 0.20, "end": 0.50},
+            {"word": "Küche", "start": 0.55, "end": 0.85},
+            {"word": "an", "start": 0.90, "end": 1.10},
+            {"word": "Hey", "start": 1.70, "end": 1.90},
+            {"word": "Bus", "start": 1.92, "end": 2.00},
+            {"word": "Licht", "start": 2.40, "end": 2.70},
+            {"word": "aus", "start": 2.75, "end": 3.00},
+        ],
+    }
+    split = qc.field_wake_split(tr)
+    assert split.wake_end is None
+    assert split.tokens == ["licht", "aus"]
+    assert split.command_start == pytest.approx(2.15)
+
+
+def test_field_wake_split_starts_after_the_LAST_of_two_wake_phrases():
+    # a second fire inside the same window: the cut has to follow the LAST phrase,
+    # or the clip written from the first one still carries the second (#58)
+    tr = {
+        "text": "Hey Bus Licht aus Hey Bus Licht an",
+        "words": [
+            {"word": "Hey", "start": 0.10, "end": 0.35},
+            {"word": "Bus", "start": 0.36, "end": 0.60},
+            {"word": "Licht", "start": 0.90, "end": 1.20},
+            {"word": "aus", "start": 1.25, "end": 1.45},
+            {"word": "Hey", "start": 2.00, "end": 2.25},
+            {"word": "Bus", "start": 2.26, "end": 2.50},
+            {"word": "Licht", "start": 2.90, "end": 3.20},
+            {"word": "an", "start": 3.25, "end": 3.45},
+        ],
+    }
+    split = qc.field_wake_split(tr)
+    # the wake CLIP still comes off the leading phrase, as before
+    assert split.wake_end == pytest.approx(0.75)
+    assert split.tokens == ["licht", "an"]
+    assert split.command_start == pytest.approx(2.65)
+
+
+def test_field_wake_split_rejects_a_head_cut_wake_fragment():
+    # session 2026-09-04-0951: recorded with no pre-roll, so the capture starts
+    # mid-phrase and the "wake" clip would be a 0.2-0.3 s tail with no "Hey" in it.
+    # Nothing is cut as a positive — but the rest of the take is still usable.
+    tr = {
+        "text": "Hey Bus Licht an",
+        "words": [
+            {"word": "Hey", "start": 0.00, "end": 0.04},
+            {"word": "Bus", "start": 0.04, "end": 0.16},
+            {"word": "Licht", "start": 0.90, "end": 1.20},
+            {"word": "an", "start": 1.25, "end": 1.45},
+        ],
+    }
+    split = qc.field_wake_split(tr)
+    assert split.wake_end is None  # 0.16 + 0.15 s is a fragment, not a phrase
+    assert split.tokens == ["licht", "an"]
+    assert split.command_start == pytest.approx(0.31)
+
+
+def test_contains_wake_finds_the_phrase_without_word_spans():
+    assert qc.contains_wake(["licht", "an", "hey", "bus"])
+    assert qc.contains_wake(["heybus"])
+    assert not qc.contains_wake(["licht", "küche", "an"])
+    assert not qc.contains_wake(["hey", "licht", "bus"])
 
 
 def test_field_intent_splits_a_welded_compound_but_not_ordinary_speech():
@@ -782,7 +862,88 @@ def test_run_qc_unparsable_field_take_with_command_words_is_not_filed_as_a_negat
     assert not (appr / "negatives").exists()
     row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
     assert row["prompt"] == "" and row["agrees"] == ""
-    assert "1 unparsed (vocab present)" in (qcd / "report.md").read_text()
+    assert "1 approved but unfiled" in (qcd / "report.md").read_text()
+
+
+def test_run_qc_field_negative_is_cut_after_a_leading_wake_phrase(tmp_path):
+    # #58: "Hey Bus, Kaffeemaschine an" does not parse, so it is negative
+    # material — but only the part after the wake phrase is, and the clip written
+    # must start there rather than at the take's first sample.
+    inc = _field_session(tmp_path, "")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+
+    def transcriber(p: Path):
+        return {
+            "text": " Hey Bus, Kaffeemaschine an.",
+            "words": [
+                {"word": "Hey", "start": 0.10, "end": 0.35},
+                {"word": "Bus", "start": 0.36, "end": 0.60},
+                {"word": "Kaffeemaschine", "start": 1.10, "end": 1.90},
+                {"word": "an", "start": 1.95, "end": 2.15},
+            ],
+        }
+
+    qc.run_qc(inc, qcd, appr, transcriber)
+    idx = list(csv.DictReader((appr / "negatives" / "index.csv").open()))
+    assert idx[0]["prompt"] == "kaffeemaschine an"  # not the whole transcript
+    neg = appr / "negatives" / "spk05" / "1-123456_001.wav"
+    sig, sr = sf.read(neg, always_2d=True)
+    # 4.0 s take minus the 0.75 s that hold the wake phrase
+    assert 3.20 <= len(sig) / sr <= 3.30
+
+
+def test_run_qc_field_take_ending_in_the_wake_phrase_files_no_command_clip(tmp_path):
+    # the real 0951 failure: "Lichtküche an. Hey Bus." — the command sits BEFORE
+    # the phrase, so cutting the phrase out leaves nothing to file. Better no clip
+    # than a phrase clip that teaches the wake model not to wake (#58).
+    inc = _field_session(tmp_path, "")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+
+    def transcriber(p: Path):
+        return {
+            "text": " Lichtküche an. Hey Bus.",
+            "words": [
+                {"word": "Lichtküche", "start": 0.20, "end": 0.90},
+                {"word": "an", "start": 0.95, "end": 1.15},
+                {"word": "Hey", "start": 1.80, "end": 2.05},
+                {"word": "Bus", "start": 2.06, "end": 2.30},
+            ],
+        }
+
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["wake_written"] == 0  # the phrase is not at the front
+    assert not (appr / "phrases").exists() and not (appr / "negatives").exists()
+    assert "1 approved but unfiled" in (qcd / "report.md").read_text()
+
+
+def test_run_qc_field_take_that_is_only_the_wake_phrase_files_no_negative(tmp_path):
+    # a bare "Hey Bus" take: the wake clip is the whole of it, and what is left
+    # over is not a negative — filing it was how a wake clip landed in negatives/.
+    inc = _field_session(tmp_path, "")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+
+    def transcriber(p: Path):
+        return {
+            "text": " Hey Bus.",
+            "words": [
+                {"word": "Hey", "start": 0.10, "end": 0.35},
+                {"word": "Bus", "start": 0.36, "end": 0.60},
+            ],
+        }
+
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["wake_written"] == 1
+    assert not (appr / "negatives").exists()
+
+
+def test_run_qc_field_take_with_a_wake_phrase_and_no_word_spans_is_not_filed(tmp_path):
+    # Whisper returned text but no timings: the phrase cannot be located, so it
+    # cannot be cut out. Nothing is filed rather than a clip carrying "Hey Bus".
+    inc = _field_session(tmp_path, "")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, lambda p: {"text": "Hey Bus wann fahren wir", "words": []})
+    assert counts["field_approved"] == 1 and counts["wake_written"] == 0
+    assert not (appr / "negatives").exists() and not (appr / "phrases").exists()
 
 
 def test_run_qc_field_take_with_an_empty_transcript_is_rejected(tmp_path):

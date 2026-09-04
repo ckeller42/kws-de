@@ -14,6 +14,7 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import soundfile as sf
@@ -56,6 +57,12 @@ _WAKE_RE = re.compile(r"(hey|hej|he|hei)(bus|buss|bos|boss)", re.IGNORECASE)
 # with FIELD_PREROLL_MS. Only the take's first one or two words are ever tested
 # against it, so a loose bound cannot swallow a phrase said later in the take.
 WAKE_MAX_S = 2.5
+# A wake clip runs from the take's first sample to the end of the phrase, so a clip
+# this short means the phrase's head is not in the take at all: the session was
+# recorded with no pre-roll and the capture starts after the device's own detection.
+# What is left is a 0.2-0.3 s tail fragment with the "Hey" missing (a whole phrase is
+# 0.5-0.7 s), and training a wake model on those teaches it to fire on one syllable.
+WAKE_MIN_S = 0.4
 # Kept after the end of "bus", so the wake clip is not cut mid-plosive.
 WAKE_TAIL_S = 0.15
 # Kept after the last word of a field take's command, so the phrase clip is not
@@ -116,8 +123,10 @@ class QcRow:
     # take; "" for a guided take. Capture runs a looser gate, so a "0" here is a
     # take the shipped detector would never have recorded.
     would_fire: str = ""
-    # "1"/"0" Whisper found the wake phrase at the head of this field take; "" when
-    # nothing looked (a guided take, or a field take the gates rejected).
+    # "1"/"0" Whisper found the wake phrase in this field take; "" when nothing
+    # looked (a guided take, or a field take the gates rejected). Not the same as
+    # "a wake clip was written": a head-cut fragment is unusable as a positive but
+    # the speaker did say the phrase, and the near-miss count needs the latter.
     wake_clip: str = ""
 
 
@@ -157,22 +166,70 @@ def label_for_token(token: str) -> str | None:
     return None
 
 
-def field_wake_split(tr: Transcript) -> tuple[float | None, list[str]]:
-    """Split a field take's transcript into (seconds at which the wake clip
-    ends, the normalised command tokens after it). Returns `(None, all tokens)`
-    when the take does not open with the wake phrase inside the first
-    WAKE_MAX_S seconds — the take is then all command (or all junk), and
-    nothing is cut off as a wake clip. Whisper emits the phrase as either one
-    span ("HeyBus") or two ("Hey", "Bus"), so both spellings are tried."""
+def wake_hits(tr: Transcript) -> list[tuple[int, float]]:
+    """Every "Hey Bus" in a field take's word spans, as
+    `(index of the first word AFTER the phrase, that word's end time)`.
+    Whisper emits the phrase as one span ("HeyBus") or two ("Hey", "Bus"), so
+    both are tried at every offset — not only at the start of the take."""
     words = tr.get("words", [])
-    for n in (1, 2):
-        if len(words) < n:
-            break
-        glued = "".join(t for w in words[:n] for t in normalise(w["word"]))
-        if _WAKE_RE.fullmatch(glued) and float(words[n - 1]["end"]) <= WAKE_MAX_S:
-            rest = [t for w in words[n:] for t in normalise(w["word"])]
-            return float(words[n - 1]["end"]) + WAKE_TAIL_S, rest
-    return None, normalise(tr.get("text", ""))
+    hits: list[tuple[int, float]] = []
+    i = 0
+    while i < len(words):
+        n = next(
+            (
+                n
+                for n in (1, 2)
+                if i + n <= len(words)
+                and _WAKE_RE.fullmatch(
+                    "".join(t for w in words[i : i + n] for t in normalise(w["word"]))
+                )
+            ),
+            None,
+        )
+        if n is None:
+            i += 1
+            continue
+        hits.append((i + n, float(words[i + n - 1]["end"])))
+        i += n
+    return hits
+
+
+def contains_wake(tokens: list[str]) -> bool:
+    """Does the wake phrase appear anywhere in a normalised token list? The
+    timing-free counterpart of `wake_hits`, for the case where Whisper returned
+    text but no word spans to cut by."""
+    return any(
+        _WAKE_RE.fullmatch("".join(tokens[i : i + n])) for i in range(len(tokens)) for n in (1, 2)
+    )
+
+
+class WakeSplit(NamedTuple):
+    """How a field take divides into wake phrase and everything else."""
+
+    wake_end: float | None
+    """Seconds at which the wake CLIP ends, or None when there is no whole phrase to
+    cut: a phrase ending later than WAKE_MAX_S, or not at the start of the take, is
+    not that take's wake fire, and one ending before WAKE_MIN_S is a head-cut fragment."""
+    tokens: list[str]
+    """Normalised tokens after the LAST wake phrase (all of them when there is none)."""
+    command_start: float
+    """Seconds from which the take holds no wake phrase at all: the last phrase's
+    end plus WAKE_TAIL_S, or 0.0. Every phrase/negative clip starts here, so no
+    non-wake clip can carry "Hey Bus" (#58)."""
+
+
+def field_wake_split(tr: Transcript) -> WakeSplit:
+    """Split a field take's transcript around its wake phrase(s)."""
+    hits = wake_hits(tr)
+    if not hits:
+        return WakeSplit(None, normalise(tr.get("text", "")), 0.0)
+    words = tr.get("words", [])
+    first_after, first_end = hits[0]
+    last_after, last_end = hits[-1]
+    cut = first_end + WAKE_TAIL_S
+    whole = first_after <= 2 and first_end <= WAKE_MAX_S and cut >= WAKE_MIN_S
+    rest = [t for w in words[last_after:] for t in normalise(w["word"])]
+    return WakeSplit(cut if whole else None, rest, last_end + WAKE_TAIL_S)
 
 
 def _split_glued(tok: str, v: set[str]) -> list[str]:
@@ -466,6 +523,20 @@ def _next_no(d: Path, prefix: str) -> str:
     return f"{(max(nums) + 1) if nums else 1:03d}"
 
 
+def _write_clip(src: Path, dst: Path, span: tuple[float, float] | None) -> None:
+    """Copy a take, or write only `span` seconds of it. A field take's clip is
+    always a span: it starts after the take's last wake phrase and stops at the
+    last word Whisper heard, so neither the wake word nor the pre-roll and
+    trailing silence around the speech reach the approved tree."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if span is None:
+        dst.write_bytes(src.read_bytes())
+        return
+    sig, sr = sf.read(src, dtype="float32", always_2d=True)
+    lo, hi = (int(s * sr) for s in span)
+    sf.write(dst, sig[max(lo, 0) : hi, 0], sr, subtype="PCM_16")
+
+
 def _append_index(path: Path, row: dict) -> None:
     new = not path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -521,25 +592,29 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             continue
         if t.set == "field":
             n_field_approved += 1
-            cut_s, tokens = field_wake_split(tr)
-            # Whisper, not the device, decides whether this take really opens with
-            # "Hey Bus" — which is what makes the two counts below meaningful.
+            split = field_wake_split(tr)
+            # Whisper, not the device, decides whether the speaker really said
+            # "Hey Bus" in this take — which is what makes the two counts below
+            # meaningful. Note this is "was the phrase in the take", NOT "was a
+            # wake clip cut from it": a head-cut fragment is unusable as a
+            # positive but is still a take the speaker woke the device with.
             # Computed here, before `t` is rebound to the derived sentence take.
-            row.wake_clip = "1" if cut_s is not None else "0"
-            if row.wake_clip == "1":
+            heard_wake = bool(split.command_start) or contains_wake(split.tokens)
+            row.wake_clip = "1" if heard_wake else "0"
+            if heard_wake:
                 n_near_miss += row.would_fire == "0"
                 n_near_miss_cap += t.wake_prob < CAPTURE_WAKE_THRESHOLD
             else:
                 n_false_alarm += row.would_fire == "1"
                 n_false_alarm_cap += t.wake_prob >= CAPTURE_WAKE_THRESHOLD
-            if cut_s is not None:
+            if split.wake_end is not None:
                 # the wake phrase is a real "Hey Bus" positive: file it exactly
                 # where the guided wake set goes, so it trains the wake model too
                 sig, sr = sf.read(t.file, dtype="float32", always_2d=True)
                 d = approved / "wake" / t.speaker
                 dst = d / f"{t.speaker}_{_next_no(d, t.speaker)}.wav"
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                sf.write(dst, sig[: int(cut_s * sr), 0], sr, subtype="PCM_16")
+                sf.write(dst, sig[: int(split.wake_end * sr), 0], sr, subtype="PCM_16")
                 written.append(str(dst.relative_to(approved)))
                 _append_index(
                     approved / "wake" / "index.csv",
@@ -551,7 +626,16 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 )
                 n_wake += 1
                 n_field_wake += 1
-            got = field_intent(tokens)
+            if contains_wake(split.tokens):
+                # Whisper heard the phrase but gave no word span to locate it by,
+                # so it cannot be cut out. Filing the take anyway is how "Hey Bus"
+                # ended up inside phrases/ and negatives/ (#58): file nothing.
+                n_field_unfiled += 1
+                continue
+            # A negative is described by what is left AFTER the wake phrase, not by
+            # the whole transcript: the words before it are not in the clip either.
+            kept_text = " ".join(split.tokens) if split.command_start else row.transcript
+            got = field_intent(split.tokens)
             if isinstance(got, Intent):
                 n_field_parsable += 1
                 # The derived label is the row's prompt too, so `qc.csv` says on
@@ -583,17 +667,30 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                     prompt=intent_text(got),
                     speaker=t.speaker,
                     # no word timestamps -> keep the whole take rather than a 0.3 s stub
-                    span=(cut_s or 0.0, max(ends) + PHRASE_TAIL_S) if ends else None,
+                    span=(split.command_start, max(ends) + PHRASE_TAIL_S) if ends else None,
                 )
-            elif content_gate("negatives", "", row.transcript)[1] is None:
+            elif split.tokens and content_gate("negatives", "", kept_text)[1] is None:
                 # Kept, not dropped: unparsable field speech is `_unknown_`
-                # material, with the transcript itself as its prompt.
-                t = Take(file=t.file, set="negatives", prompt=row.transcript, speaker=t.speaker)
+                # material, with what was heard after the wake phrase as its prompt.
+                t = Take(
+                    file=t.file,
+                    set="negatives",
+                    prompt=kept_text,
+                    speaker=t.speaker,
+                    # the take's own duration is the end: a negative is everything
+                    # after the wake phrase, trailing room tone included
+                    span=(split.command_start, row.dur_ms / 1000) if split.command_start else None,
+                )
             else:
-                # The grammar rejected it, but it still contains command words
-                # ("an Licht Küche"). Filing that under negatives/ would teach the
-                # model a real command is _unknown_ (data.py) and score a correct
+                # Either nothing but the wake phrase was said, or the grammar
+                # rejected speech that still contains command words ("an Licht
+                # Küche"). Filing the latter under negatives/ would teach the model
+                # a real command is _unknown_ (data.py) and score a correct
                 # recognition of it as a false accept (eval.py). Leave it unfiled.
+                n_field_unfiled += 1
+                continue
+            if t.span and t.span[1] - t.span[0] < MIN_MS / 1000:
+                # cutting the wake phrase out left a stub, not a clip
                 n_field_unfiled += 1
                 continue
         if t.set == "words":
@@ -614,12 +711,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             slug = _slug_of(t.file)
             d = approved / "phrases" / t.speaker
             dst = d / f"{slug}_{_next_no(d, slug)}.wav"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if t.span is None:
-                dst.write_bytes(t.file.read_bytes())
-            else:  # a field take: only the command part of it is the phrase
-                lo, hi = (int(s * sr) for s in t.span)
-                sf.write(dst, sig[max(lo, 0) : hi], sr, subtype="PCM_16")
+            _write_clip(t.file, dst, t.span)  # a field take: only its command part
             written.append(str(dst.relative_to(approved)))
             _append_index(
                 approved / "phrases" / "index.csv",
@@ -680,8 +772,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             slug = _slug_of(t.file)
             d = approved / "negatives" / t.speaker
             dst = d / f"{slug}_{_next_no(d, slug)}.wav"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(t.file.read_bytes())
+            _write_clip(t.file, dst, t.span)  # a field take: everything after the wake phrase
             written.append(str(dst.relative_to(approved)))
             _append_index(
                 approved / "negatives" / "index.csv",
@@ -711,7 +802,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         field_section = (
             f"\n## Field\n\n{n_field} field takes, {n_field_approved} approved, "
             f"{n_field_parsable} parsable, {n_field_wake} wake clips, "
-            f"{n_field_unfiled} unparsed (vocab present), "
+            f"{n_field_unfiled} approved but unfiled, "
             f"{n_field_truncated} ring-truncated, "
             f"device-Whisper agreement {agree_rate} over {n_field_compared} compared.\n"
             # The capture gate is looser than the shipped one, so a take can be a
