@@ -362,9 +362,13 @@ Recogniser
    4,200 B of persistent ring state in ``.bss``, against the 40,960 B arena the
    interpreter allocates. Command: a 51,248 B transient arena (19,888 B of it
    scratch) and no state at all, against the 65,536 B arena the interpreter
-   allocates — and because the generated arena is ``.bss`` it is in internal
-   SRAM, where the interpreter's had to fall back to PSRAM for want of a
-   contiguous block (:need:`REQ_FW_ARENA_PLACEMENT`).
+   allocates. The generated arena is one static array, so its placement is a
+   link-time choice (Kconfig ``KWS_INFER_COMMAND_ARENA``) rather than an
+   allocation: PSRAM by default, internal SRAM as a measurement opt-in worth
+   1.7 ms of the ~28.7 ms evaluation. PSRAM is the default because 51,248 B of
+   internal SRAM is more than the board has spare — claiming it leaves 8,431 B
+   free and the record task's stack, which must be internal, is then never
+   created (:need:`REQ_FW_ARENA_PLACEMENT`).
    Neither reserve is taken on trust: at boot the firmware asks the chip's own
    ``esp_nn_get_conv_scratch_size_esp32s3`` (wake) or
    ``esp_nn_get_depthwise_conv_scratch_size_esp32s3`` (command) for that
@@ -385,9 +389,11 @@ Recogniser
    interpreter *out*: no ``MicroInterpreter``, no resource variables and
    neither tensor arena, which is the memory the generated path is there to
    save. Enabling ``CONFIG_KWS_INFER_PARITY_LOG`` builds it back in for both
-   models, which on the CoreS3 leaves too little internal RAM to create the
-   recognise task — the interpreter is a fallback for a model the generator
-   refuses, not a configuration the device has room to run alongside.
+   models and logs ``parity: 0/23 output bytes differ`` on live device audio
+   once per mode entry; that build is tight enough that the record task is not
+   created (logged, not silent), so it verifies rather than ships. The
+   interpreter is a fallback for a model the generator refuses, not a
+   configuration the device has room to run alongside the generated one.
    ``CONFIG_KWS_INFER_PARITY_LOG`` (default off) brings it back as an
    on-device reference and logs both paths' output for the same input once per
    mode entry, on real device audio — a developer-verification switch, not a

@@ -123,14 +123,13 @@ binary is a small ``assert``-based program built by
    ``firmware/main/gen``. Zero LSB difference is the pass condition
    throughout; one differing byte fails.
 
-   On the device the same comparison runs once per wake-mode entry with
-   ``CONFIG_KWS_INFER_PARITY_LOG=y``, on live microphone features, and is
-   logged as ``parity: generated <a>, interpreter <b>``. That build has no room
-   for the recogniser on the CoreS3 (both interpreters plus both generated
-   ``.bss`` arenas), so for the command model the device evidence is instead
-   the ``selftest int8 out:`` line — all 23 output bytes for the golden MFCC
-   vector, byte-identical between the interpreter build and the generated
-   build.
+   On the device the same comparison runs once per mode entry with
+   ``CONFIG_KWS_INFER_PARITY_LOG=y``, on live microphone features:
+   ``parity: generated <a>, interpreter <b>`` for the wake model and
+   ``parity: 0/23 output bytes differ`` for the command model. A second,
+   always-on device check needs no such build — the ``selftest int8 out:``
+   line prints all 23 output bytes for the golden MFCC vector, and is
+   byte-identical between the interpreter build and the generated build.
 
 .. test:: Generated arena stays within the TFLM arena
    :id: TEST_INFER_ARENA

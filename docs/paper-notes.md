@@ -911,47 +911,58 @@ three DEPTHWISE_CONV_2D / 1x1 CONV_2D pairs, MEAN, FULLY_CONNECTED, SOFTMAX), no
 one static arena. Both builds measured on the device in one session, ~100 s of recognition
 each, medians over the ~5 s trace lines with the cold first one dropped:
 
-| | TFLM interpreter | generated (esp-nn) |
-|---|---|---|
-| recognise step | 46.0 ms | **31.0 ms** (−33 %) |
-| model evaluation alone | 41,710 µs | **26,986 µs** (−35 %) |
-| arena / state | 65,536 B arena in **PSRAM** (54,824 B used) | **51,248 B arena in internal `.bss`** (19,888 B of it esp-nn scratch) + 0 B state |
-| free internal RAM at recogniser start | 36,231 B | **8,495 B** |
-| recognise task stack high-water | 6,368 B of 10,240 | 6,436 B of 10,240 |
-| app image | 1,165,440 B | **1,000,688 B** (−164,752 B: no interpreter, no kernel set, for either model) |
-| `selftest int8 out:` (23 bytes, golden vector) | `-128,…,-36,…,0,-94,…,-127,…` | byte-identical |
+| | TFLM interpreter | generated, arena PSRAM (default) | generated, arena internal |
+|---|---|---|---|
+| recognise step | 46.0 ms | **33.0 ms** (−28 %) | **31.0 ms** (−33 %) |
+| model evaluation alone | 41,710 µs | **28,726 µs** (−31 %) | **26,983 µs** (−35 %) |
+| arena / state | 65,536 B in PSRAM (54,824 B used) | 51,248 B in PSRAM, 0 B state | 51,248 B in internal `.bss`, 0 B state |
+| free internal at recogniser start | 36,231 B | **59,679 B** | 8,431 B |
+| every app_main task created? | yes | yes | **no** — record's 8 KB stack fails |
+| recognise task stack high-water | 6,368 B of 10,240 | 6,516 B of 10,240 | 6,436 B of 10,240 |
+| app image | 1,165,440 B | **1,001,507 B** | 1,001,523 B |
+| `selftest int8 out:` (23 bytes, golden vector) | `-128,…,-36,…,0,-94,…,-127,…` | byte-identical | byte-identical |
+| live `parity:` line (PARITY_LOG=y) | — | **`parity: 0/23 output bytes differ`** | build too tight to run |
 
 **Same story as E12, at ten times the scale.** The interpreter's own kernel timers attribute
 28.4 ms of its 41.7 ms `Invoke` to conv + depthwise + FC + softmax and ~13.0 ms to the
 `rest` column — dispatch, tensor bookkeeping, the reference-C `MEAN`. The generated function
-keeps the kernels and deletes the 13 ms, landing at 27.0 ms. So the spec's "command Invoke at
-least 2x faster" is **not** met: 1.55x is what removing all interpreter overhead is worth
-here, because unlike the wake model this one is genuinely arithmetic-bound (49x10x32
-activations through three depthwise blocks). Recorded as open, like E12's sub-1 ms target;
-the lever left is the model, not the runtime.
+keeps the kernels and deletes the 13 ms. So the spec's "command Invoke at least 2x faster" is
+**not** met: 1.45x with the shipping arena placement (1.55x with the arena internal) is what
+removing all interpreter overhead is worth here, because unlike the wake model this one is
+genuinely arithmetic-bound (49x10x32 activations through three depthwise blocks). Recorded as
+open, like E12's sub-1 ms target; the lever left is the model, not the runtime.
 
-**Arena placement is the interesting result.** The interpreter's arena never fit internal RAM
-— `command arena 65536 B does not fit internal RAM (free 47019, largest block 31744)` — so it
-had always run from PSRAM. The generated arena is a `.bss` array, so it is internal SRAM by
-construction: no allocation, no runtime contiguity requirement, no PSRAM round trips. The
-bill comes as internal RAM: free internal at recogniser start drops 36,231 → 8,495 B, and the
-recognise task's 16 KB stack no longer fit — `xTaskCreatePinnedToCore` failed, its return
-value was unchecked, and recognition was simply *absent* with nothing in the log. Both are
-fixed: the create is checked now, and the stack is 10 KB against a measured 6.4 KB high-water
-mark on either path (reported live as `stack <n> B free` in the step trace). Worth noting for
-later: the 1.4 ms between the interpreter's 28.4 ms of PSRAM-fed kernels and the generated
-path's 27.0 ms is roughly what the arena's placement is worth, so 51 KB of internal SRAM can
-be bought back cheaply if something else needs it more.
+**Arena placement turned out to be a memory question, not a speed one.** The generated arena is
+one static array, so where it lands is settled at link time — no allocation, no contiguity
+requirement — which made internal SRAM look free. It is not: 51,248 B is more internal memory
+than this board has spare, and taking it left 8,431 B at recogniser start. Task stacks must be
+internal (`CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY` is off, and `SPIRAM_MALLOC_ALWAYSINTERNAL`
+only redirects `malloc`), so the *next* task `app_main` creates simply did not exist:
 
-One capability was lost, and it is worth stating: `CONFIG_KWS_INFER_PARITY_LOG=y` keeps both
-interpreters *and* both generated `.bss` arenas, which leaves 16,711 B of internal RAM with a
-largest block of 8,704 B — not enough to create the recognise task at all, so the wake model's
-trick of logging `parity: <a>/<b> differ` on live device audio has no room to run for the
-command model. The device evidence is the `selftest int8 out:` line instead: all 23 output
-bytes for the golden MFCC vector, printed by both builds and byte-identical. Off-device the
-chain is unchanged in strength — `command smoke: 0/368 bytes differ` (16 synthetic windows,
-model-free, runs in CI) and `command parity: 0/1564 bytes differ (68 clips, arena 51248 B)`
-(4 synthetic vectors plus 64 real test-split windows, needs the data root).
+```text
+E (27435) record: record task (8192 B stack) not created: free internal 8035, largest block 7680
+```
+
+Record mode would have sat in `REC_IDLE` for ever, queueing into a queue nobody drained. It was
+invisible because every `xTaskCreatePinnedToCore` in the firmware dropped its return value;
+they all go through one checked helper now (`firmware/main/task.h`), which is how the line
+above exists at all. The fix proper is a Kconfig choice defaulting to PSRAM: 1.7 ms of the
+~28.7 ms evaluation buys back 51 KB of the scarcest memory on the board, and the interpreter
+it is being compared against ran its own arena from PSRAM anyway. Internal stays as the
+opt-in for measurement builds. **The general lesson is worth keeping for the paper: moving a
+model from an interpreter to generated code converts a heap allocation into a linker
+placement, and a linker placement has no failure path — it succeeds and something else
+starves.**
+
+Bit-exactness on the device is now checked two ways rather than one. `CONFIG_KWS_INFER_PARITY_LOG=y`
+fits once the arena is in PSRAM, and logs `parity: 0/23 output bytes differ` on live microphone
+features on the first step after entering the mode (that build is still tight enough to lose
+the record task — logged, and acceptable for a verification build). Independently, the
+`selftest int8 out:` line prints all 23 output bytes for the golden MFCC vector on *every*
+build, and is byte-identical between the interpreter and generated builds. Off-device:
+`command smoke: 0/368 bytes differ` (16 synthetic windows, model-free, runs in CI) and
+`command parity: 0/1564 bytes differ (68 clips, arena 51248 B)` (4 synthetic vectors plus 64
+real test-split windows, needs the data root).
 
 **A trap found on the way.** `models/command_v3_qat.tflite` is *not* the model the firmware
 runs. A retrain rewrites the `.tflite` without touching `firmware/main/gen/model_data.h`, and

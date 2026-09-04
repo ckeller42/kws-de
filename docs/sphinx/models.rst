@@ -495,27 +495,33 @@ figures:
      - ``firmware/main/gen/model_data.h``
      - CONV_2D, then 3x (DEPTHWISE_CONV_2D, CONV_2D 1x1), MEAN,
        FULLY_CONNECTED, SOFTMAX — 10 ops
-     - 51,248 B arena (incl. 19,888 B esp-nn scratch), 0 B state
+     - 51,248 B arena (incl. 19,888 B esp-nn scratch), 0 B state; in PSRAM by
+       default (Kconfig ``KWS_INFER_COMMAND_ARENA``)
 
    * - Wake
-     - ``models/hey_bus.tflite``
+     - ``firmware/main/gen/wake_model_data.h``
      - the streaming stem CONV_2D, the depthwise/1x1 stack over ring buffers,
        FULLY_CONNECTED, LOGISTIC, QUANTIZE — 14 ops after the streaming
        rewrite
-     - 15,680 B arena (incl. 15,552 B esp-nn scratch), 4,200 B ring state
+     - 15,680 B arena (incl. 15,552 B esp-nn scratch), 4,200 B ring state;
+       always internal SRAM — small, and it runs every 30 ms
 
-The command model is generated from the C array the firmware embeds rather
-than from ``models/command_v3_qat.tflite``: a retrain rewrites the ``.tflite``
-without touching the device headers, so only ``model_data.h`` is guaranteed to
-be the bytes the device actually runs — and it is in the repository, so its
-freshness check runs in CI. The wake model has no such in-repo copy, so its
-check only bites where ``KWS_DATA_ROOT`` is present. Regenerate either with:
+Both are generated from the C array the firmware embeds, not from
+``models/*.tflite``: a retrain rewrites the ``.tflite`` without touching the
+device headers, so only ``*_model_data.h`` is guaranteed to be the bytes the
+device actually runs — and the command model's had already drifted from its
+``.tflite`` when this was written. ``kws-fwgen --check`` guards that from both
+sides now: it fails when the embedded array stops matching the sha8 in
+``KWS_MODEL_ID``, and warns when the ``.tflite`` the stamp names has been
+re-exported since. Because the headers are in the repository, both freshness
+checks also run in CI, where ``models/`` does not exist at all. Regenerate
+either with:
 
 .. code-block:: console
 
    $ uv run --no-sync kws-codegen firmware/main/gen/model_data.h \
        --name command --out firmware/main/gen
-   $ uv run --no-sync kws-codegen "$KWS_DATA_ROOT/models/hey_bus.tflite" \
+   $ uv run --no-sync kws-codegen firmware/main/gen/wake_model_data.h \
        --name wake --out firmware/main/gen
 
 Data provenance
