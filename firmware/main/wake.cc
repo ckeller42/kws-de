@@ -37,6 +37,10 @@ static_assert(WAKEFRONT_MAX_ROWS == KWS_WAKE_FRAMES,
               "front-end row buffer must match the wake model's per-Invoke stride");
 static_assert(WAKE_INFER_INPUT_LEN == KWS_WAKE_FRAMES * KWS_WAKE_FEATURES,
               "generated wake input length must match the front-end block");
+/* field.h cannot include wake.h (the dependency runs the other way), so the
+   "a capture threshold never tightens the gate" range is pinned here instead. */
+static_assert(FIELD_THRESH_MAX == WAKE_THRESHOLD,
+              "the loosest capture setting must be exactly the production gate");
 
 /* Is the interpreter in this build at all? It is the inference path when the
    generated one is switched off, and the reference the parity log needs when it
@@ -86,13 +90,17 @@ static volatile bool s_inject;       /* console-injected fire, see wake_inject_f
 static field_state_t s_field;        /* assist mode only: opt-in capture of real interactions */
 static uint32_t s_fire_ms;           /* ms-since-boot of the fire that armed s_field */
 static float s_fire_prob;            /* wake probability at that fire */
-static volatile bool s_field_persist; /* toggle changed mid-window: NVS write still owed */
+static volatile bool s_field_persist; /* a capture setting changed mid-window: NVS write still owed */
 
-static void field_persist(bool on)
+/* Both persisted capture settings in one flash transaction: the toggle and the
+   capture threshold. The threshold rides along as hundredths, which is exactly
+   the resolution the `field thresh` command accepts. */
+static void field_persist(void)
 {
     nvs_handle_t h;
     if (nvs_open("kws", NVS_READWRITE, &h) != ESP_OK) return;
-    nvs_set_u8(h, "field", on ? 1 : 0);
+    nvs_set_u8(h, "field", s_field.enabled ? 1 : 0);
+    nvs_set_u8(h, "fieldth", (uint8_t)lroundf(s_field.thresh * 100.f));
     nvs_commit(h);
     nvs_close(h);
 }
@@ -203,6 +211,7 @@ static void wake_task(void *)
 
     uint32_t pos = 0;            /* absolute ring position we have consumed up to */
     int consecutive = 0;
+    float run_peak = 0;          /* highest prob of the qualifying run in progress */
     int64_t deaf_until_us = 0;
     int16_t chunk[WAKEFRONT_STRIDE];
 
@@ -225,6 +234,7 @@ static void wake_task(void *)
             wakefront_reset();
             pos = audio_write_pos();
             consecutive = 0;
+            run_peak = 0;
             deaf_until_us = 0;
             assist_gate_reset(&s_gate);
             if (s_listening) { s_listening = false; recognise_set_active(false); }
@@ -299,14 +309,36 @@ static void wake_task(void *)
             int64_t step_us = esp_timer_get_time() - t0;
             uint32_t ms = (uint32_t)(step_us / 1000);
 
-            consecutive = (prob >= WAKE_THRESHOLD) ? consecutive + 1 : 0;
+            bool assist = app_get_mode() == UI_MODE_ASSIST;
+            /* ONE gate, one threshold value: while capture is armed in Assistent
+               mode it is the looser capture threshold, everywhere else it is
+               WAKE_THRESHOLD. The 2-step / refractory logic below is the
+               production logic either way — there is no second detector. */
+            float thresh = field_gate_thresh(&s_field, assist, WAKE_THRESHOLD);
+            if (prob >= thresh) {
+                consecutive++;
+                if (prob > run_peak) run_peak = prob;
+            } else {
+                consecutive = 0;
+                run_peak = 0;
+            }
             bool fired = false;
+            /* The peak of the run that fired, not the last step of it: the take's
+               wake_prob is what kws-qc re-reads against WAKE_THRESHOLD to say
+               whether the production gate would have fired on this take. */
+            float fire_peak = 0;
             if (consecutive >= WAKE_MIN_CONSECUTIVE && esp_timer_get_time() >= deaf_until_us) {
                 deaf_until_us = esp_timer_get_time() + (int64_t)WAKE_REFRACTORY_MS * 1000;
                 consecutive = 0;
+                fire_peak = run_peak;
+                run_peak = 0;
                 fired = true;
             }
-            if (s_inject) { s_inject = false; fired = true; }
+            if (s_inject) {
+                s_inject = false;
+                fired = true;
+                if (fire_peak == 0) fire_peak = prob;   /* injected: this step is all there is */
+            }
 
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             /* Tuning trace: the peak probability of the last 2 s, so the serial
@@ -348,7 +380,6 @@ static void wake_task(void *)
                that happens here is turning the recogniser on and off at its
                edges, so the expensive model runs for ~2.5 s per interaction
                instead of continuously. */
-            bool assist = app_get_mode() == UI_MODE_ASSIST;
             if (assist) {
                 if (fired) {
                     assist_gate_on_wake(&s_gate, now_ms);
@@ -356,7 +387,7 @@ static void wake_task(void *)
                        "first fire wins": a later fire extends the window, but the
                        audio — and with it the file name, fire_ms and wake_prob —
                        stays anchored to the phrase the take begins with. */
-                    if (!s_field.armed) { s_fire_ms = now_ms; s_fire_prob = prob; }
+                    if (!s_field.armed) { s_fire_ms = now_ms; s_fire_prob = fire_peak; }
                     field_on_wake(&s_field, audio_write_pos());
                 }
                 bool listen = assist_gate_tick(&s_gate, now_ms);
@@ -384,7 +415,7 @@ static void wake_task(void *)
                         if (tone_owed && !s_field.enabled) beep_double();
                         /* The window is shut: an NVS write owed by a mid-window
                            toggle (wake_field_set) can be paid now. */
-                        if (s_field_persist) { s_field_persist = false; field_persist(s_field.enabled); }
+                        if (s_field_persist) { s_field_persist = false; field_persist(); }
                     }
                     ESP_LOGI(TAG, "assist: recogniser %s (window %lu)", listen ? "on" : "off",
                              (unsigned long)s_gate.windows);
@@ -430,13 +461,18 @@ extern "C" void wake_start(void)
     s_arena = arena_alloc(TAG, "wake", KWS_WAKE_ARENA_BYTES);
     assert(s_arena);
 #endif
-    /* Restore the opt-in capture toggle before the task exists, so it never
-       observes an unrestored one. */
+    /* Restore the opt-in capture settings before the task exists, so it never
+       observes unrestored ones. field_reset() installs FIELD_THRESH_DEFAULT, and
+       field_set_thresh() rejects anything out of range, so a missing or
+       corrupted NVS value leaves the default rather than a gate that would fire
+       on silence. */
+    field_reset(&s_field);
     nvs_handle_t h;
     if (nvs_open("kws", NVS_READWRITE, &h) == ESP_OK) {
-        uint8_t on = 0;
-        if (nvs_get_u8(h, "field", &on) != ESP_OK) on = 0;   /* off until turned on once */
-        field_set_enabled(&s_field, on != 0);
+        uint8_t v = 0;
+        if (nvs_get_u8(h, "field", &v) != ESP_OK) v = 0;     /* off until turned on once */
+        field_set_enabled(&s_field, v != 0);
+        if (nvs_get_u8(h, "fieldth", &v) == ESP_OK) field_set_thresh(&s_field, (float)v / 100.f);
         nvs_close(h);
     }
     /* Core 0, priority 3 — above the recogniser, which shares this core. In
@@ -455,7 +491,7 @@ extern "C" void wake_set_active(bool on)
     if (!on && s_log) { fclose(s_log); s_log = nullptr; }
     /* Leaving the mode is the other place an owed toggle write must be paid:
        the wake task's closing edge will not run again in this mode. */
-    if (!on && s_field_persist) { s_field_persist = false; field_persist(s_field.enabled); }
+    if (!on && s_field_persist) { s_field_persist = false; field_persist(); }
 }
 
 extern "C" bool wake_window_open(void) { return s_listening; }
@@ -484,5 +520,18 @@ extern "C" void wake_field_set(bool on)
        persisted is always the current one. */
     field_set_enabled(&s_field, on);
     if (wake_window_open()) { s_field_persist = true; return; }
-    field_persist(on);
+    field_persist();
+}
+
+extern "C" float wake_field_thresh_get(void) { return s_field.thresh; }
+
+extern "C" bool wake_field_thresh_set(float v)
+{
+    /* Same deferral as the toggle above, and for the same reason: the value
+       takes effect on the caller's task at once, the flash write behind it
+       waits out an open window. */
+    if (!field_set_thresh(&s_field, v)) return false;
+    if (wake_window_open()) { s_field_persist = true; return true; }
+    field_persist();
+    return true;
 }

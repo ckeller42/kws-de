@@ -48,7 +48,7 @@ binary is a small ``assert``-based program built by
 .. test:: Field-take window arithmetic and the capture toggle
    :id: TEST_FIELD_SPAN
    :status: passing
-   :links: REQ_FW_FIELD_CAPTURE, REQ_FW_HOST_TESTS_NO_IDF
+   :links: REQ_FW_FIELD_CAPTURE, REQ_FW_FIELD_CAPTURE_GATE, REQ_FW_HOST_TESTS_NO_IDF
 
    ``firmware/test/test_field.c``: asserts that capture is off after
    ``field_reset`` (opt-in), that an enabled fire yields the pre-roll +
@@ -59,7 +59,13 @@ binary is a small ``assert``-based program built by
    is cut at the *end* with ``truncated`` set and the pre-roll intact, that
    ``field_disarm`` prevents a second copy, that a fire in the first second
    after boot shortens the take instead of reading in front of the ring, and
-   that turning capture off drops a pending take.
+   that turning capture off drops a pending take. It also pins the capture
+   gate: ``field_gate_thresh`` returns the production threshold with capture
+   off, outside Assistent mode, and whenever the capture value would *tighten*
+   it, and the capture threshold only in the one case both conditions hold;
+   ``field_set_thresh`` rejects a value outside
+   ``FIELD_THRESH_MIN``/``FIELD_THRESH_MAX`` and leaves the previous one
+   standing.
 
 .. test:: WAV header bytes at three sample counts
    :id: TEST_WAV_HEADER
@@ -317,7 +323,8 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
 .. test:: QC field mode: wake split, grammar labels, agreement
    :id: TEST_QC_FIELD_MODE
    :status: passing
-   :links: REQ_PIPE_FIELD_LABELS, REQ_PIPE_QC_CONTENT, REQ_PIPE_APPROVED_LAYOUT
+   :links: REQ_PIPE_FIELD_LABELS, REQ_FW_FIELD_CAPTURE_GATE, REQ_PIPE_QC_CONTENT,
+      REQ_PIPE_APPROVED_LAYOUT
 
    ``tests/test_qc.py``: ``field_wake_split`` cuts at the end of "Bus"
    + 0.15 s and returns the command tokens, accepts a single glued ``HeyBus``
@@ -367,7 +374,7 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
 .. test:: Field section of the recordings eval
    :id: TEST_EVAL_FIELD
    :status: passing
-   :links: REQ_PIPE_FIELD_LABELS, REQ_PIPE_EVAL_LABELS
+   :links: REQ_PIPE_FIELD_LABELS, REQ_FW_FIELD_CAPTURE_GATE, REQ_PIPE_EVAL_LABELS
 
    ``tests/test_eval_recordings.py``: ``field_figures`` counts takes,
    parsable takes (non-empty ``prompt``), compared takes
@@ -378,7 +385,12 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
    taken over *parsable* instead of *compared* fails the test. The rendered
    section carries the per-speaker table and says the agreement is the
    accuracy of the model deployed *at capture time*; with no field takes
-   there is no Field section at all.
+   there is no Field section at all. A second test counts near-misses
+   (``wake_clip=1`` with ``would_fire=0``) and false alarms (``wake_clip=0``
+   with ``would_fire=1``) per speaker at both the production and the capture
+   threshold, off the same fixture, and asserts the rendered line quotes all
+   four — the rejected row, which no transcriber ever looked at, counts as
+   neither.
 
 .. test:: Stage-duration ETA: ledger, prediction math, Timed, and the CLI
    :id: TEST_ETA
@@ -550,7 +562,7 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
 .. test:: On-device field capture in Assistent mode
    :id: TEST_MANUAL_FIELD_CAPTURE
    :status: manual
-   :links: REQ_FW_FIELD_CAPTURE, REQ_FW_ASSIST_GATE
+   :links: REQ_FW_FIELD_CAPTURE, REQ_FW_FIELD_CAPTURE_GATE, REQ_FW_ASSIST_GATE
 
    ``firmware/README.md`` "Manual test checklist": in Assistent mode the
    "Aufnahme" switch is off after a fresh flash and ``status`` reports
@@ -564,8 +576,12 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    while the recogniser ran, and each ``field: saved`` line lands after its
    window's ``assist: recogniser off``. Toggling the switch over the console
    while a window is open shows no outlier either: the NVS write behind the
-   toggle is deferred to the window's closing edge. Run by hand on real
-   M5Stack CoreS3 hardware; not automated.
+   toggle is deferred to the window's closing edge. ``field thresh 0.60`` is
+   reported back by ``status`` and shown on the badge as ``REC 0.60``, survives
+   a reset, and is refused outside 0.30-0.85; with it set, a spoken phrase that
+   peaks below 0.85 must still produce a take (a near-miss the shipped gate
+   would have dropped), and one spoken in the same mode with capture **off**
+   must not. Run by hand on real M5Stack CoreS3 hardware; not automated.
 
 .. note::
 

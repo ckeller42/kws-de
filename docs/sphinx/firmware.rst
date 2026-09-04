@@ -60,6 +60,23 @@ the file is written, so the capture cannot slow a recognise step. The
 serial console can set the same switch (``field on|off``) and ``status``
 reports it along with the number of takes saved and dropped.
 
+**While capture is armed the wake gate is deliberately looser than the
+shipped one** (:need:`REQ_FW_FIELD_CAPTURE_GATE`). A field take exists only
+because the wake word fired, so a set gathered at ``WAKE_THRESHOLD`` (0.85)
+contains no near-misses and no false alarms — precisely the two kinds of clip
+the wake model is short of. The capture threshold
+(``field thresh <0.30..0.85>``, default 0.60, persisted beside the toggle) is
+the value that same gate compares against; the two-step and refractory logic
+around it is unchanged, and there is no second detector. It applies *only*
+while capture is on **and** the mode is Assistent (``field_gate_thresh()``,
+host-tested), and it can only ever lower the bar, never raise it. ``status``
+prints it (``field on thresh 0.60 takes N dropped N``) and the badge reads
+"REC 0.60" whenever it differs from production, so the screen always says
+which detector the takes on the card came from. Each take's ``wake_prob`` is
+the peak of the run that fired, which is what lets ``kws-qc`` say per take
+whether the production gate would have fired at all
+(:need:`REQ_PIPE_FIELD_LABELS`).
+
 Measured on the CoreS3 over 13 capturing windows, the recognise step time
 *inside* a capturing window was 38-42 ms (5 trace samples; the trace prints
 every 50 recogniser steps and a window is only ~25), against 38-45 ms over

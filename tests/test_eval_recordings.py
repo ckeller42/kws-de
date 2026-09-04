@@ -243,22 +243,30 @@ def _qc_root(tmp_path):
     parsable (one of which, c.wav, is parsable but NOT compared: the device gave
     no answer, because the ring truncated it), 2 compared, 1 agreeing, plus one
     REJECTED take that still counts as a take -- plus a guided `words` row that
-    must be ignored. spk03: 1 field take, parsable and agreeing."""
+    must be ignored. spk03: 1 field take, parsable and agreeing.
+
+    The last three columns are the loose-capture-gate ones. spk02 carries two
+    near-misses (b, c: a wake clip whose wake_prob is below the 0.85 production
+    gate, and c is below the 0.60 capture gate as well) and one false alarm
+    (d: no wake clip, yet a wake_prob the production gate would have fired on)."""
     root = tmp_path / "qc"
     cols = (
         "file,set,prompt,speaker,verdict,reason,transcript,match_score,"
-        "rms_dbfs,peak_dbfs,dur_ms,device_intent,agrees,truncated\n"
+        "rms_dbfs,peak_dbfs,dur_ms,device_intent,agrees,truncated,"
+        "wake_prob,would_fire,wake_clip\n"
     )
     (root / "s1").mkdir(parents=True)
     (root / "s1" / "qc.csv").write_text(
         cols
-        + "a.wav,field,Licht an,spk02,approve,,Hey Bus Licht an,1.0,-20,-6,3500,Licht an,1,0\n"
-        + "b.wav,field,Licht an,spk02,approve,,Hey Bus Licht aus,1.0,-20,-6,3500,Licht aus,0,0\n"
+        + "a.wav,field,Licht an,spk02,approve,,Hey Bus Licht an,1.0,-20,-6,3500,Licht an,1,0,"
+        + "0.91,1,1\n"
+        + "b.wav,field,Licht an,spk02,approve,,Hey Bus Licht aus,1.0,-20,-6,3500,Licht aus,0,0,"
+        + "0.62,0,1\n"
         + "c.wav,field,Heizung waermer,spk02,approve,,Hey Bus Heizung waermer,1.0,-20,-6,"
-        + "3500,,,1\n"
-        + "d.wav,field,,spk02,approve,,wann fahren wir los,1.0,-20,-6,3500,,,0\n"
-        + "g.wav,field,,spk02,reject,empty_transcript,,0.0,-20,-6,3500,,,0\n"
-        + "e.wav,words,Licht,spk02,approve,,Licht,1.0,-20,-6,800,,,\n"
+        + "3500,,,1,0.55,0,1\n"
+        + "d.wav,field,,spk02,approve,,wann fahren wir los,1.0,-20,-6,3500,,,0,0.90,1,0\n"
+        + "g.wav,field,,spk02,reject,empty_transcript,,0.0,-20,-6,3500,,,0,0.70,0,\n"
+        + "e.wav,words,Licht,spk02,approve,,Licht,1.0,-20,-6,800,,,,0.0,,\n"
     )
     (root / "s1" / "report.md").write_text(
         "# QC s1\n\n## Field\n\n5 field takes, 4 approved, 3 parsable, 1 wake clips, "
@@ -268,7 +276,7 @@ def _qc_root(tmp_path):
     (root / "s2").mkdir(parents=True)
     (root / "s2" / "qc.csv").write_text(
         cols + "f.wav,field,Heizung waermer,spk03,approve,,Hey Bus Heizung waermer,1.0,-20,-6,"
-        "3500,Heizung waermer,1,0\n"
+        "3500,Heizung waermer,1,0,0.95,1,1\n"
     )
     (root / "s2" / "report.md").write_text(
         "# QC s2\n\n## Field\n\n1 field takes, 1 approved, 1 parsable, 1 wake clips, "
@@ -296,6 +304,10 @@ def test_field_figures_count_takes_parsable_compared_and_agreement(tmp_path):
         "parsable": 3,
         "compared": 2,
         "agree": 1,
+        "near_miss": 2,
+        "false_alarm": 1,
+        "near_miss_capture": 1,
+        "false_alarm_capture": 1,
     }
     assert fig["per_speaker"]["spk03"] == {
         "takes": 1,
@@ -304,7 +316,30 @@ def test_field_figures_count_takes_parsable_compared_and_agreement(tmp_path):
         "parsable": 1,
         "compared": 1,
         "agree": 1,
+        "near_miss": 0,
+        "false_alarm": 0,
+        "near_miss_capture": 0,
+        "false_alarm_capture": 0,
     }
+
+
+def test_field_figures_count_near_misses_and_false_alarms_at_both_gates(tmp_path):
+    # The whole point of capturing at a looser gate: takes the shipped 0.85 gate
+    # would have handled differently are the ones the wake model is short of.
+    # b/c open with "Hey Bus" but never reached 0.85 -- wakes production would
+    # have MISSED; d has no wake phrase at all yet cleared 0.85 -- production
+    # would have FIRED on it. The rejected row (no wake_clip) counts as neither.
+    fig = ev.field_figures(_qc_root(tmp_path))
+    assert fig["near_miss"] == 2
+    assert fig["false_alarm"] == 1
+    # ...and at the 0.60 capture gate only c (0.55) is a near-miss, only d (0.90)
+    # a false alarm: the loose gate recorded b, which neither gate would call a miss.
+    assert fig["near_miss_capture"] == 1
+    assert fig["false_alarm_capture"] == 1
+    md = ev.render_field_section(fig)
+    assert "2 near-misses (wake clip, would not have fired)" in md
+    assert "1 false alarms (no wake clip, would have fired)" in md
+    assert "at the capture gate 0.60: 1 near-misses, 1 false alarms" in md
 
 
 def test_recordings_section_carries_the_field_table(tmp_path):
@@ -317,8 +352,8 @@ def test_recordings_section_carries_the_field_table(tmp_path):
     assert "1 ring-truncated" in md
     # spk02: agree/compared = 1/2 = 0.500 (NOT 1/3 -- parsable is not the
     # denominator); spk03: 1/1 = 1.000.
-    assert "| spk02 | 5 | 4 | 3 | 0.500 |" in md
-    assert "| spk03 | 1 | 1 | 1 | 1.000 |" in md
+    assert "| spk02 | 5 | 4 | 3 | 0.500 | 2 | 1 |" in md
+    assert "| spk03 | 1 | 1 | 1 | 1.000 | 0 | 0 |" in md
     assert "AT CAPTURE TIME" in md  # says whose accuracy this is
 
 
@@ -333,7 +368,7 @@ def test_field_table_says_n_a_rather_than_nan_when_nothing_was_compared(tmp_path
         "unfiled": 0,
     }
     md = ev.render_field_section(fig)
-    assert "| spk09 | 2 | 2 | 0 | n/a |" in md
+    assert "| spk09 | 2 | 2 | 0 | n/a | 0 | 0 |" in md
     assert "nan" not in md
 
 
