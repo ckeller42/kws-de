@@ -511,13 +511,14 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 # model got right as an e2e miss. A guided sentence contains only
                 # the sentence; so does this. Word clips still come off the FULL
                 # take, whose Whisper timestamps they are indexed by.
-                end_s = max((float(w["end"]) for w in tr.get("words", [])), default=0.0)
+                ends = [float(w["end"]) for w in tr.get("words", [])]
                 t = Take(
                     file=t.file,
                     set="sentences",
                     prompt=intent_text(got),
                     speaker=t.speaker,
-                    span=(cut_s or 0.0, end_s + PHRASE_TAIL_S),
+                    # no word timestamps -> keep the whole take rather than a 0.3 s stub
+                    span=(cut_s or 0.0, max(ends) + PHRASE_TAIL_S) if ends else None,
                 )
             elif content_gate("negatives", "", row.transcript)[1] is None:
                 # Kept, not dropped: unparsable field speech is `_unknown_`
