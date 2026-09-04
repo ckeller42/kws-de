@@ -53,16 +53,24 @@ list of approved files that session produced — and keeps the whole of `WAKE_HO
 train and validation. Report held-out numbers separately from in-training ones; they are not the
 same measurement.
 
-### 2. Real clips are capped at a stated share of the positives
+### 2. State the real share — but do not cap it
 
 microWakeWord's `sampling_weight` is a global weight in one `random.choices` draw over every
 feature set, so a set's share of the positives is `w / sum(positive w)`. Round 5 gave ten real
 clips `sampling_weight: 5.0` against the TTS positives' `2.0` — **71 % of every positive batch
-drawn from ten unique recordings**. Round 6 holds the positive and negative weight totals fixed
-(7.0 and 45.0, so the positive:negative batch ratio does not move) and changes only the split
-within the positives: TTS `4.9`, real `2.1` → a **30 % real share**. Give real audio its own
-feature dir so that share is a number in the config rather than an accident of how many clips
-happen to exist.
+drawn from ten unique recordings**. That looks like overfitting, and round 6 tested capping it.
+
+**It is not overfitting, and capping it is harmful.** Recall stays pinned at the ceiling (every
+model fires on every real positive, held-out session included, at peak 0.996) while false wakes
+rise monotonically as the real share falls — 1–4, 15 and 33 false fires out of 48 TTS non-wake
+clips at 71 %, 50 % and 30 %. Nine thousand Piper "hey bus" clips can be satisfied by a loose
+"German speech with a stressed front syllable" feature, because the hard negatives opposing them
+are Piper too; ten real recordings through the device's own microphone are a far narrower target,
+and that narrowness is what rejects "hallo bus" and "der bus kommt gleich". Keep the real share
+high. If overfitting to few speakers is the worry, add speakers, not weight.
+
+Give real audio its own feature dir anyway, so the share is a number in the config rather than
+an accident of how many clips happen to exist — and state it in the report.
 
 ### 3. Hard negatives come from the same takes as the positives
 
@@ -85,6 +93,26 @@ the device's own wake detection, so its `wake/` clips hold only the tail fragmen
 100 ms frame energies of a take before trusting its cut: a good one opens with 200 ms of near
 silence. Training on fragments teaches the model to fire on a 0.2 s syllable, which is the
 false-accept failure mode that costs the most. Exclude them.
+
+### 4. Trim trailing silence off the real positives, or the wake fires a second late
+
+`gen_features_real.py` builds `Clips` with `remove_silence=False`, and
+`truncation_strategy: truncate_start` keeps the last 1,500 ms of each 3.2 s augmentation window.
+So a real take that carries a second of trailing silence after the phrase puts the positive
+label a second after the phrase *ends*, and the model dutifully learns to answer there — even on
+clips that have no trailing silence, because it learned the offset, not the clip.
+
+This is exactly what the guided takes did: 1.78–1.92 s files whose phrase ends at 0.76–1.16 s,
+i.e. **~1.04 s of trailing silence**, producing a measured 0.94–1.13 s delay between phrase end
+and wake. The model answers with two probability humps and the gate fires on the second one.
+Trimming the clips to the phrase (energy endpoint, ~0.25 s lead / 0.20 s tail) — or setting
+`remove_silence=True` — removes the whole second and lifts the first hump from 0.32 to 0.996,
+with no change to any accept or reject.
+
+Measure it, don't assume it: splice each clip into several seconds of real room tone so the
+microfrontend's noise and PCAN estimates are warm, then report fire time minus the *phrase*
+endpoint (energy-based), not minus the file end. A wake word that answers a second after you
+stop speaking feels broken in a way no accuracy number captures.
 
 ### Probing
 

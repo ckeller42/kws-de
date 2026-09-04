@@ -1739,6 +1739,47 @@ four probe voices, and on three ordinary commands spoken to the device in the he
 (1/48 and 3/48 here; E-series `WAKE-WIDTH-REPORT` measured 2/48 and 5/48) — the 15 and 33 sit
 far outside that spread.
 
+**And the same knob sets the fire latency, pulling the other way.** Splicing each wake clip
+into real room tone (3 s lead, 2.5 s tail, so the microfrontend's noise/PCAN estimates are warm)
+and measuring from the phrase end — an energy endpoint on the clip, not the file end — shows
+every model answering with two probability humps. At 71 % real share the first hump peaks at
+0.32-0.43, below the gate, so the 0.85 x 2 rule fires on the second hump about a second later:
+
+| real share | held-out session latency (median / max) | guided-take latency | first-hump peak (median) |
+|---|---|---|---|
+| 71.4 % (round 5a) | 1.13 s / 1.16 s | 0.94 s / 0.99 s | 0.316 / 0.430 |
+| 50.0 % (round 6b) | 1.13 s / 1.13 s | 1.02 s / 1.04 s | 0.590 / 0.650 |
+| 30.0 % (round 6) | 0.11 s / 0.11 s | 0.02 s / 0.06 s | 0.996 / 0.992 |
+
+**Root cause, and it is data alignment, not architecture.** The ten guided takes are 1.78-1.92 s
+files whose phrase ends at 0.76-1.16 s — they carry **~1.04 s of trailing silence**, against a
+0.94-1.13 s measured latency. `gen_features_real.py` builds `Clips` with `remove_silence=False`,
+and `truncation_strategy: truncate_start` keeps the last 1,500 ms of each 3.2 s augmentation
+window, so the positive label sits about a second after the phrase ends. The model learns that
+offset and applies it even to the tightly-cut field clips, which have 0.01 s of trailing silence
+and still fire 1.13 s late. The TTS positives are tight, so a TTS-dominated model fires at the
+phrase — which is why latency tracks the real share, and why round 6's low latency is a side
+effect of leaning on TTS rather than a fix.
+
+**Round 6c takes both.** Round-5a positive weights (71.4 % real, the share that keeps false
+wakes down), the real hard negatives, and the real positive clips silence-trimmed before feature
+generation (energy endpoint, 0.25 s lead / 0.20 s tail; 1.78-1.92 s becomes 0.93-1.33 s):
+
+| gate | round 5a | round 6c |
+|---|---|---|
+| held-out session fires / in-training real fires | 3/3, 10/10 @ 0.996 | 3/3, 10/10 @ 0.996 |
+| real non-wake fires (9 held out + 5 in-training + 49 room) | 0 | **0** |
+| fire latency, held-out / guided (median) | 1.13 s / 0.94 s | **0.08 s / -0.01 s** |
+| first-hump peak (median) | 0.316 / 0.430 | **0.996 / 0.996** |
+| TTS non-wake false fires / 48 | 1-4 | 9 |
+| tflite bytes / MACs | 58,080 / 24,736 | 58,080 / 24,736 |
+
+A full second of perceived wake latency removed at identical size and cost, with every
+real-audio gate held. The cost is 9/48 TTS near-miss false fires against round 5a's 1-4/48,
+concentrated on "hallo bus" and "der bus kommt gleich" in two Piper voices — the generic-voice
+margin the 2026-09-03 decision already priced in. Nothing was promoted; that trade is the
+user's call and the device check is a separate step.
+
 **Reading.** The 71 % share was not overfitting waiting to be corrected; it was doing the
 selectivity work, and this is the flip side of the 2026-09-03 decision to make the wake model
 deliberately user-customised. Nine thousand Piper "hey bus" clips can be satisfied by a loose
@@ -1748,10 +1789,11 @@ target, and that narrowness is what rejects the near-miss family. Cutting the re
 returns the model to round-4 behaviour, which fired on "licht küche an" at 0.988. If
 two-speaker overfitting is the worry the fix is **more real speakers, not less real weight** —
 a capacity/coverage answer, structurally the same conclusion E16 reached for the command model.
-The other half of the policy survives: the real hard negatives (command phrases cut after the
-wake phrase, plus speech-free room takes) cost nothing on any positive gate and round 6b is
-0/5 on them, so they should be kept and combined with round-5 positive weights, which is the
-untried cell and the obvious next run.
+The other half of the policy survives intact: the real hard negatives cost nothing on any gate
+in either 6b or 6c. And the latency result is the more useful one for the product — a wake word
+that answers a second after you stop speaking feels broken in a way no accuracy number
+captures, and it turned out to be one `remove_silence` flag and a trailing-silence trim, not a
+model problem. Any future real-clip set must be checked for this before training.
 
 **Two measurement bugs found first, both invisible until clips got short.** (1) The probe used
 for round 5's "10/10 real takes fire" and for every row of the width sweep scored a directory
