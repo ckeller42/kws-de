@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 Transcript = dict
 Transcriber = Callable[[Path], Transcript]
 
-CAP_MS = {"words": 4000, "sentences": 6000, "negatives": 6000, "wake": 4000}
+CAP_MS = {"words": 4000, "sentences": 6000, "negatives": 6000, "wake": 4000, "field": 4000}
 MIN_MS = 300
 MIN_RMS_DBFS = -45.0
 CLIP_DBFS = -0.5
@@ -39,6 +39,12 @@ NUM_WORDS = {"25": "fünfundzwanzig", "50": "fünfzig", "75": "fünfundsiebzig",
 # tight enough that ordinary German sentences don't accidentally match.
 _WAKE_RE = re.compile(r"(hey|hej|he|hei)(bus|buss|bos|boss)", re.IGNORECASE)
 
+# A wake phrase later than this into a field take is not that take's wake phrase
+# (the take starts 1.0 s before the fire, so the phrase sits in the first ~1 s).
+WAKE_MAX_S = 1.3
+# Kept after the end of "bus", so the wake clip is not cut mid-plosive.
+WAKE_TAIL_S = 0.15
+
 
 @dataclass
 class Take:
@@ -46,6 +52,8 @@ class Take:
     set: str
     prompt: str
     speaker: str
+    device_intent: str = ""  # what the device itself recognised (field takes only)
+    device_words: str = ""  # "<word>:<conf>" entries joined by '|'
 
 
 @dataclass
@@ -61,6 +69,8 @@ class QcRow:
     rms_dbfs: float
     peak_dbfs: float
     dur_ms: int
+    device_intent: str = ""  # verbatim from the device; NEVER used as a label
+    agrees: str = ""  # "1"/"0" device vs Whisper, "" when there is nothing to compare
 
 
 def normalise(text: str) -> list[str]:
@@ -97,6 +107,34 @@ def label_for_token(token: str) -> str | None:
         if normalise(w) == [token]:
             return w
     return None
+
+
+def field_wake_split(tr: Transcript) -> tuple[float | None, list[str]]:
+    """Split a field take's transcript into (seconds at which the wake clip
+    ends, the normalised command tokens after it). Returns `(None, all tokens)`
+    when the first two words are not the wake phrase inside the first
+    WAKE_MAX_S seconds — the take is then all command (or all junk), and
+    nothing is cut off as a wake clip."""
+    words = tr.get("words", [])
+    if len(words) >= 2:
+        glued = "".join(normalise(words[0]["word"]) + normalise(words[1]["word"]))
+        if _WAKE_RE.fullmatch(glued) and float(words[1]["end"]) <= WAKE_MAX_S:
+            rest = [t for w in words[2:] for t in normalise(w["word"])]
+            return float(words[1]["end"]) + WAKE_TAIL_S, rest
+    return None, normalise(tr.get("text", ""))
+
+
+def field_intent(tokens: list[str]):
+    """The Whisper-derived label for a field take: the command tokens mapped
+    back onto config labels and run through the SAME grammar the device uses
+    (`kws_de.grammar.parse`), with non-vocabulary words dropped — the identical
+    filter `required_tokens(..., "sentences")` applies to a guided prompt. An
+    `Intent` is a phrase label; a `Rejection` means the take is kept as
+    negative / `_unknown_` material, never dropped."""
+    from kws_de.grammar import parse
+
+    v = vocab()
+    return parse([label_for_token(t) for t in tokens if t in v])
 
 
 def _edit1(a: str, b: str) -> bool:
@@ -166,6 +204,11 @@ def content_gate(set_name: str, prompt: str, transcript_text: str) -> tuple[floa
             if h in counts and (len(h) >= 3 or counts[h] >= 2):
                 return 0.0, f"contains_command:{h}"
         return 1.0, None
+    if set_name == "field":
+        # Everything is kept: a field take is real usage, and speech the grammar
+        # cannot parse is exactly the negative/`_unknown_` material the model
+        # needs. Only silence (or a transcriber that returned nothing) rejects.
+        return (1.0, None) if heard else (0.0, "empty_transcript")
     if set_name == "wake":
         glued = "".join(heard)
         return (1.0, None) if _WAKE_RE.fullmatch(glued) else (0.0, f"wrong_word:{glued or '-'}")
@@ -237,6 +280,7 @@ def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
         rms_dbfs=round(m.get("rms_dbfs", 0.0), 1),
         peak_dbfs=round(m.get("peak_dbfs", 0.0), 1),
         dur_ms=m.get("dur_ms", 0),
+        device_intent=take.device_intent,
     )
     return row, tr
 
@@ -252,6 +296,10 @@ def read_sessions(incoming: Path) -> list[Take]:
                     set=r["set"],
                     prompt=r["prompt"],
                     speaker=r["speaker"],
+                    # a nine-column guided row never reaches these: DictReader
+                    # yields None for a column the row does not have
+                    device_intent=r.get("device_intent") or "",
+                    device_words=r.get("device_words") or "",
                 )
             )
     return takes
@@ -280,7 +328,8 @@ def segment_word(sig: np.ndarray, sr: int, start_s: float, end_s: float) -> np.n
 
 
 def _slug_of(path: Path) -> str:
-    return re.sub(r"_\d{3}\.wav$", "", path.name)
+    # "hallo-welt_001.wav" -> "hallo-welt"; a field take's "123456.wav" -> "123456"
+    return re.sub(r"_\d{3}\.wav$", "", path.name).removesuffix(".wav")
 
 
 def _clear_stamp(approved: Path, qc_dir: Path) -> None:
@@ -331,12 +380,16 @@ def _append_index(path: Path, row: dict) -> None:
 
 
 def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcriber) -> dict:
+    from kws_de.eval import intent_text
+    from kws_de.grammar import Intent
+
     incoming, qc_dir, approved = Path(incoming), Path(qc_dir), Path(approved)
     _clear_stamp(approved, qc_dir)
 
     takes = read_sessions(incoming)
     rows, words_rows, written, gap_files = [], [], [], []
     n_words = n_skipped = n_wake = 0
+    n_field = n_field_wake = n_field_parsable = n_field_agree = 0
     for t in takes:
         try:
             row, tr = judge(t, transcriber)
@@ -359,6 +412,45 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         rows.append(row)
         if row.verdict != "approve":
             continue
+        if t.set == "field":
+            n_field += 1
+            cut_s, tokens = field_wake_split(tr)
+            if cut_s is not None:
+                # the wake phrase is a real "Hey Bus" positive: file it exactly
+                # where the guided wake set goes, so it trains the wake model too
+                sig, sr = sf.read(t.file, dtype="float32", always_2d=True)
+                d = approved / "wake" / t.speaker
+                dst = d / f"{t.speaker}_{_next_no(d, t.speaker)}.wav"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                sf.write(dst, sig[: int(cut_s * sr), 0], sr, subtype="PCM_16")
+                written.append(str(dst.relative_to(approved)))
+                _append_index(
+                    approved / "wake" / "index.csv",
+                    {
+                        "file": str(dst.relative_to(approved)),
+                        "prompt": config.WAKE_WORD,
+                        "speaker": t.speaker,
+                    },
+                )
+                n_wake += 1
+                n_field_wake += 1
+            got = field_intent(tokens)
+            if isinstance(got, Intent):
+                n_field_parsable += 1
+                # Provenance only: the device's own words go through the SAME
+                # grammar, and the two Intents are compared. The device never
+                # supplies the label — `got` does. A truncated take carries no
+                # device_intent at all: nothing to compare, so `agrees` stays "".
+                if t.device_intent.strip():
+                    row.agrees = "1" if field_intent(normalise(t.device_intent)) == got else "0"
+                    n_field_agree += row.agrees == "1"
+                # From here the take IS an approved sentence take with a derived
+                # prompt: same phrase copy, same index row, same word segmentation.
+                t = Take(file=t.file, set="sentences", prompt=intent_text(got), speaker=t.speaker)
+            else:
+                # Kept, not dropped: unparsable field speech is `_unknown_`
+                # material, with the transcript itself as its prompt.
+                t = Take(file=t.file, set="negatives", prompt=row.transcript, speaker=t.speaker)
         if t.set == "words":
             tok = required_tokens(t.prompt, "words")[0]
             lab = label_for_token(tok)
@@ -463,6 +555,14 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
 
     approved_n = sum(r.verdict == "approve" for r in rows)
     rejects = [r for r in rows if r.verdict != "approve"]
+    if n_field:
+        agree_rate = f"{n_field_agree / n_field_parsable:.3f}" if n_field_parsable else "n/a"
+        field_section = (
+            f"\n## Field\n\n{n_field} field takes, {n_field_parsable} parsable, "
+            f"{n_field_wake} wake clips, device-Whisper agreement {agree_rate}.\n"
+        )
+    else:
+        field_section = ""
     (qc_dir / "report.md").write_text(
         f"# QC {incoming.name}\n\n{len(rows)} takes, {approved_n} approved, "
         f"{len(rejects)} rejected, {n_words} word clips written, "
@@ -474,6 +574,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         )
         + "\n## Segmentation gaps\n\n"
         + ("".join(f"- `{f}`\n" for f in gap_files) or "(none)\n")
+        + field_section
     )
     return {
         "takes": len(rows),
@@ -482,6 +583,9 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         "words_written": n_words,
         "words_skipped": n_skipped,
         "wake_written": n_wake,
+        "field_takes": n_field,
+        "field_parsable": n_field_parsable,
+        "field_agree": n_field_agree,
     }
 
 

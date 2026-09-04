@@ -186,6 +186,49 @@ def test_label_for_token():
     assert qc.label_for_token("fünfzig") == "fünfzig"
 
 
+def test_field_wake_split_cuts_the_wake_phrase_and_returns_the_command():
+    tr = {
+        "text": "Hey Bus Licht Küche an",
+        "words": [
+            {"word": "Hey", "start": 0.10, "end": 0.35},
+            {"word": "Bus", "start": 0.36, "end": 0.60},
+            {"word": "Licht", "start": 1.40, "end": 1.70},
+            {"word": "Küche", "start": 1.75, "end": 2.05},
+            {"word": "an", "start": 2.10, "end": 2.30},
+        ],
+    }
+    cut_s, tokens = qc.field_wake_split(tr)
+    assert cut_s == pytest.approx(0.75)  # end of "Bus" + WAKE_TAIL_S
+    assert tokens == ["licht", "küche", "an"]
+
+
+def test_field_wake_split_ignores_a_late_or_absent_wake_phrase():
+    # the phrase matches but lands after WAKE_MAX_S -> not this take's wake word
+    late = {
+        "text": "Hey Bus an",
+        "words": [
+            {"word": "Hey", "start": 1.20, "end": 1.45},
+            {"word": "Bus", "start": 1.46, "end": 1.80},
+            {"word": "an", "start": 1.90, "end": 2.10},
+        ],
+    }
+    assert qc.field_wake_split(late) == (None, ["hey", "bus", "an"])
+    # no wake phrase at all: nothing is cut, everything is command material
+    plain = {"text": "Licht an", "words": [{"word": "Licht", "start": 0.1, "end": 0.4}]}
+    assert qc.field_wake_split(plain) == (None, ["licht", "an"])
+
+
+def test_field_intent_uses_the_same_grammar_as_the_device():
+    from kws_de.grammar import Intent, Rejection
+
+    assert qc.field_intent(["licht", "küche", "an"]) == Intent("Licht", "Küche", "an")
+    # filler is dropped, exactly as the sentence prompts' token filter does
+    assert qc.field_intent(["mach", "licht", "bitte", "an"]) == Intent("Licht", None, "an")
+    # ordinary speech has no command tokens at all -> a Rejection, i.e. kept as
+    # negative / _unknown_ material, never dropped
+    assert isinstance(qc.field_intent(["wann", "fahren", "wir", "los"]), Rejection)
+
+
 def _phrase_transcriber(p: Path):
     if "_phrase_" in str(p):
         return {
@@ -224,6 +267,9 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
         "words_written": 4,
         "words_skipped": 0,
         "wake_written": 0,
+        "field_takes": 0,
+        "field_parsable": 0,
+        "field_agree": 0,
     }
     licht_files = sorted((appr / "words" / "Licht").glob("*.wav"))
     assert len(licht_files) == 2  # bare take + phrase-segmented word, distinct files
@@ -414,6 +460,119 @@ def test_run_qc_writes_approved_wake_set_and_is_idempotent(tmp_path):
     assert counts2 == counts
     assert len(list((appr / "wake" / "spk07").glob("*.wav"))) == 2
     assert len(list(csv.DictReader((appr / "wake" / "index.csv").open()))) == 2
+
+
+def _field_session(tmp_path, device_intent: str, device_words: str = "Licht:0.93|an:0.88") -> Path:
+    inc = tmp_path / "incoming" / "f1"
+    _wav(inc / "field" / "spk05" / "123456.wav", _tone(ms=3500))
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,"
+        "fire_ms,wake_prob,device_intent,device_words\n"
+        "spk05,t,,field/spk05/123456.wav,3500,-10,field,,123456,123456,0.910,"
+        f"{device_intent},{device_words}\n"
+    )
+    return inc
+
+
+def _field_transcriber(p: Path):
+    return {
+        "text": "Hey Bus Licht Küche an",
+        "words": [
+            {"word": "Hey", "start": 0.10, "end": 0.35},
+            {"word": "Bus", "start": 0.36, "end": 0.60},
+            {"word": "Licht", "start": 1.40, "end": 1.70},
+            {"word": "Küche", "start": 1.75, "end": 2.05},
+            {"word": "an", "start": 2.10, "end": 2.30},
+        ],
+    }
+
+
+def test_run_qc_field_take_splits_wake_labels_by_grammar_and_scores_agreement(tmp_path):
+    inc = _field_session(tmp_path, "Licht Küche an")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
+
+    assert counts["field_takes"] == 1
+    assert counts["field_parsable"] == 1
+    assert counts["field_agree"] == 1
+    assert counts["wake_written"] == 1
+
+    # the wake phrase became a wake clip, cut at the end of "Bus" + 0.15 s
+    wake_files = sorted((appr / "wake" / "spk05").glob("*.wav"))
+    assert len(wake_files) == 1
+    sig, sr = sf.read(wake_files[0], always_2d=True)
+    assert 0.70 <= len(sig) / sr <= 0.80
+
+    # the command became an approved phrase with the grammar-derived prompt,
+    # segmented into word clips exactly like a guided sentence take
+    idx = list(csv.DictReader((appr / "phrases" / "index.csv").open()))
+    assert idx[0]["prompt"] == "Licht Küche an" and idx[0]["speaker"] == "spk05"
+    assert (appr / "phrases" / "spk05" / "123456_001.wav").exists()
+    assert {p.parent.name for p in (appr / "words").rglob("*.wav")} == {"Licht", "Küche", "an"}
+
+    # provenance: the device's own intent is recorded and scored, never used
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["set"] == "field" and row["verdict"] == "approve"
+    assert row["device_intent"] == "Licht Küche an"
+    assert row["agrees"] == "1"
+    assert "## Field" in (qcd / "report.md").read_text()
+
+
+def test_run_qc_field_take_records_disagreement_without_relabelling(tmp_path):
+    inc = _field_session(tmp_path, "Licht an")  # device missed the zone
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
+    assert counts["field_parsable"] == 1 and counts["field_agree"] == 0
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["agrees"] == "0"
+    # the LABEL still comes from Whisper + grammar, never from the device
+    idx = list(csv.DictReader((appr / "phrases" / "index.csv").open()))
+    assert idx[0]["prompt"] == "Licht Küche an"
+
+
+def test_run_qc_truncated_field_take_has_no_device_answer_to_compare(tmp_path):
+    # a take the ring cut short carries empty device_intent/device_words: the
+    # device gave no answer, so there is nothing to agree or disagree with —
+    # but Whisper still labels it and it is still filed.
+    inc = _field_session(tmp_path, "", "")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
+    assert counts["field_takes"] == 1 and counts["field_parsable"] == 1
+    assert counts["field_agree"] == 0
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["verdict"] == "approve"
+    assert row["device_intent"] == "" and row["agrees"] == ""
+    idx = list(csv.DictReader((appr / "phrases" / "index.csv").open()))
+    assert idx[0]["prompt"] == "Licht Küche an"
+
+
+def test_run_qc_field_take_that_does_not_parse_is_kept_as_a_negative(tmp_path):
+    inc = _field_session(tmp_path, "")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+
+    def transcriber(p: Path):
+        return {
+            "text": "wann fahren wir los",
+            "words": [{"word": "wann", "start": 0.2, "end": 0.5}],
+        }
+
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["field_takes"] == 1 and counts["field_parsable"] == 0
+    assert counts["wake_written"] == 0  # no wake phrase in the transcript
+    idx = list(csv.DictReader((appr / "negatives" / "index.csv").open()))
+    assert idx[0]["prompt"] == "wann fahren wir los"  # the transcript is the prompt
+    assert (appr / "negatives" / "spk05" / "123456_001.wav").exists()
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["verdict"] == "approve" and row["agrees"] == ""
+
+
+def test_run_qc_field_take_with_an_empty_transcript_is_rejected(tmp_path):
+    inc = _field_session(tmp_path, "")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, lambda p: {"text": "", "words": []})
+    assert counts["rejected"] == 1 and counts["field_parsable"] == 0
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["reason"] == "empty_transcript"
 
 
 def test_cli_missing_sessions_csv_exits_2(tmp_path, monkeypatch):
