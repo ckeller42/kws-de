@@ -38,6 +38,16 @@ void recognise_set_active(bool on);
 void recognise_listen_for(uint32_t ms);
 /** @brief Copy the current recognise status under mutex. */
 void recognise_get_status(recognise_status_t *out);
+/**
+ * @brief Did a command fire during the current assist window? Clears the flag.
+ *
+ * The confirmation tone is owed by the recogniser but paid by whoever owns the
+ * window, because it must not sound until the window has shut: the speaker is
+ * two centimetres from the microphone, and a tone inside the window lands in
+ * the captured audio. Cleared by recognise_listen_for(), so an abandoned
+ * window cannot make the next one beep.
+ */
+bool recognise_take_command_fired(void);
 
 #ifdef __cplusplus
 }
