@@ -88,6 +88,18 @@ done
 Every TTS clip also gets one pitch/tempo-perturbed copy at build time
 (±2 semitones, 0.85–1.15× tempo); real clips do not.
 
+**Synthetic-clip gate.** No synthesised clip enters the dataset — or gets
+played at the device — unless Whisper confirms it is German and says its
+intended text. The build gates every clip it synthesises and logs what it
+dropped; a directory of clips generated elsewhere is checked with
+`kws-tts-check <dir>`, which reads the `manifest.csv` `kws_de.tts` writes
+beside the clips, writes `tts_check.csv`, exits non-zero if anything failed
+and, with `--quarantine`, moves the failures into `rejected/`. `say -v Eddy`
+picks the *English* Eddy on a machine that has both voices and says so
+nowhere — which is how a device test once ran on English "German" clips — so
+the `say` pool is the German voices `say -v '?'` really reports, by full
+name.
+
 ## Quick start
 
 ```bash

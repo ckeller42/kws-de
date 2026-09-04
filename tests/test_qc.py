@@ -1031,3 +1031,152 @@ def test_whisper_transcriber_smoke(tmp_path):
     tr = qc.whisper_transcriber("mlx-community/whisper-tiny-mlx")  # tiny: quick smoke only
     out = tr(_wav(tmp_path / "t.wav", _tone(ms=1200)))
     assert set(out) >= {"text", "words"}
+
+
+# --- synthetic (TTS) clip gate ---------------------------------------------------------
+
+
+def _fake_tts_transcriber(by_file: dict):
+    """Whisper stand-in: {filename: (text, language)}, and no model in CI."""
+
+    def transcribe(p: Path):
+        text, language = by_file[Path(p).name]
+        return {"text": text, "words": [], "language": language}
+
+    return transcribe
+
+
+def test_tts_gate_rejects_a_clip_that_is_not_german(tmp_path):
+    # The incident: macOS `say` silently uses an English voice when the German voice
+    # pack is missing, so the clip says the right thing in the wrong language.
+    wav = _wav(tmp_path / "a.wav", _tone(ms=900))
+    tr = _fake_tts_transcriber({"a.wav": ("Light kitchen on", "en")})
+    assert qc.tts_gate(wav, "Licht Küche an", tr) == (False, "language:en")
+
+
+def test_tts_gate_rejects_a_clip_that_says_the_wrong_text(tmp_path):
+    wav = _wav(tmp_path / "a.wav", _tone(ms=900))
+    tr = _fake_tts_transcriber({"a.wav": ("Heizung aus", "de")})
+    ok, reason = qc.tts_gate(wav, "Licht Küche an", tr)
+    assert not ok and reason.startswith("missing:")
+
+
+def test_tts_gate_accepts_the_intended_german_text(tmp_path):
+    wav = _wav(tmp_path / "a.wav", _tone(ms=900))
+    tr = _fake_tts_transcriber({"a.wav": ("Licht Küche an.", "de")})
+    assert qc.tts_gate(wav, "Licht Küche an", tr) == (True, None)
+
+
+def test_tts_gate_accepts_the_wake_phrase_via_the_wake_rule(tmp_path):
+    # "Hey Bus" holds no command vocabulary, so only the wake rule can judge it.
+    wav = _wav(tmp_path / "a.wav", _tone(ms=900))
+    tr = _fake_tts_transcriber({"a.wav": ("Hej Bus!", "de")})
+    assert qc.tts_gate(wav, "hey bus", tr) == (True, None)
+    tr = _fake_tts_transcriber({"a.wav": ("Hey Boss", "en")})
+    assert qc.tts_gate(wav, "hey bus", tr) == (False, "language:en")
+
+
+def test_tts_gate_rejects_a_non_german_clip_of_a_word_outside_the_vocabulary(tmp_path):
+    # "Camping" is a command label but not in DEVICES/ZONES/ACTIONS: an empty required-token
+    # list would accept any transcript at all, which is the hole the gate exists to close.
+    wav = _wav(tmp_path / "a.wav", _tone(ms=900))
+    tr = _fake_tts_transcriber({"a.wav": ("camping", "en")})
+    assert qc.tts_gate(wav, "camping", tr) == (False, "language:en")
+    tr = _fake_tts_transcriber({"a.wav": ("banane", "de")})
+    assert qc.tts_gate(wav, "camping", tr)[0] is False
+
+
+def test_tts_gate_cheap_checks_run_before_the_model(tmp_path):
+    def no_model(p):  # any call is a bug: these rejects cost no transcription
+        raise AssertionError("transcriber called")
+
+    short = _wav(tmp_path / "short.wav", _tone(ms=100))
+    assert qc.tts_gate(short, "licht", no_model)[1].startswith("duration:")
+    long_ = _wav(tmp_path / "long.wav", _tone(ms=11000))
+    assert qc.tts_gate(long_, "licht", no_model)[1].startswith("duration:")
+    silent = _wav(tmp_path / "silent.wav", np.zeros(16000))
+    assert qc.tts_gate(silent, "licht", no_model) == (False, "silent")
+    assert qc.tts_gate(tmp_path / "gone.wav", "licht", no_model)[1].startswith("unreadable:")
+
+
+def test_tts_gate_rejects_a_transcript_with_no_language(tmp_path):
+    wav = _wav(tmp_path / "a.wav", _tone(ms=900))
+    assert qc.tts_gate(wav, "licht", lambda p: {"text": "licht", "words": []}) == (
+        False,
+        "language:?",
+    )
+
+
+def _tts_dir(tmp_path):
+    """Three synthesised clips with the manifest kws_de.tts.synthesize writes."""
+    from kws_de import tts
+
+    for name, text, voice, engine in (
+        ("ok.wav", "licht an", "Anna", "say"),
+        ("english.wav", "licht an", "Samantha", "say"),
+        ("wrong.wav", "licht an", "de_DE-thorsten-medium", "piper"),
+    ):
+        tts.append_manifest(_wav(tmp_path / name, _tone(ms=900)), text, voice, engine)
+    return _fake_tts_transcriber(
+        {
+            "ok.wav": ("Licht an.", "de"),
+            "english.wav": ("Light on.", "en"),
+            "wrong.wav": ("Heizung aus.", "de"),
+        }
+    )
+
+
+def test_tts_check_reads_the_manifest_and_writes_a_verdict_per_clip(tmp_path):
+    from kws_de import tts
+
+    tr = _tts_dir(tmp_path)
+    counts = qc.tts_check(tmp_path / tts.MANIFEST_NAME, tr)
+    assert (counts["ok"], counts["failed"]) == (1, 2)
+    with (tmp_path / "tts_check.csv").open() as fh:
+        rows = {r["file"]: r for r in csv.DictReader(fh)}
+    assert rows["ok.wav"]["ok"] == "1" and rows["ok.wav"]["language"] == "de"
+    assert rows["english.wav"]["reason"] == "language:en"
+    assert rows["english.wav"]["transcript"] == "Light on."
+    assert rows["wrong.wav"]["reason"].startswith("missing:")
+    # a whole voice that is not German reads as 100 % failed
+    assert counts["by_voice"]["say/Samantha"] == (0, 1)
+    assert counts["by_voice"]["say/Anna"] == (1, 0)
+    # nothing moved without --quarantine
+    assert (tmp_path / "english.wav").exists()
+
+
+def test_tts_check_quarantine_moves_the_failing_clips(tmp_path):
+    from kws_de import tts
+
+    tr = _tts_dir(tmp_path)
+    qc.tts_check(tmp_path / tts.MANIFEST_NAME, tr, quarantine=True)
+    assert (tmp_path / "ok.wav").exists()
+    assert not (tmp_path / "english.wav").exists()
+    assert {p.name for p in (tmp_path / "rejected").glob("*.wav")} == {"english.wav", "wrong.wav"}
+
+
+def test_tts_check_cli_exits_non_zero_when_a_clip_fails(tmp_path, monkeypatch, capsys):
+    tr = _tts_dir(tmp_path)
+    monkeypatch.setattr(qc, "whisper_transcriber", lambda *a, **k: tr)
+    monkeypatch.setattr("sys.argv", ["kws-tts-check", str(tmp_path)])
+    with pytest.raises(SystemExit) as e:
+        qc.tts_check_main()
+    assert e.value.code == 1
+    assert "1 ok / 2 failed" in capsys.readouterr().out
+
+
+def test_tts_check_cli_exits_zero_when_every_clip_passes(tmp_path, monkeypatch):
+    from kws_de import tts
+
+    tts.append_manifest(_wav(tmp_path / "ok.wav", _tone(ms=900)), "licht an", "Anna", "say")
+    tr = _fake_tts_transcriber({"ok.wav": ("Licht an.", "de")})
+    monkeypatch.setattr(qc, "whisper_transcriber", lambda *a, **k: tr)
+    monkeypatch.setattr("sys.argv", ["kws-tts-check", str(tmp_path / tts.MANIFEST_NAME)])
+    qc.tts_check_main()  # no SystemExit
+
+
+def test_tts_check_cli_without_a_manifest_exits_2(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["kws-tts-check", str(tmp_path)])
+    with pytest.raises(SystemExit) as e:
+        qc.tts_check_main()
+    assert e.value.code == 2

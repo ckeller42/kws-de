@@ -27,6 +27,11 @@
 #                 fragment of the phrase -- are fixed in kws_de.qc (#58) and checked by
 #                 scripts/audit-approved.py, so a clean tree needs no exclusions. See
 #                 train/mww/README.md.
+#   WAKE_TTS_DIRS space-separated synthetic-clip directories to run kws-tts-check over
+#                 before feature generation (relative to MWW_DIR unless absolute;
+#                 default generated_samples_v3/{positives,negatives}). Each needs the
+#                 manifest.csv kws_de.tts writes; a directory without one cannot be
+#                 vouched for and fails the check. Set to " " to skip.
 #   WAKE_BASELINE model to compare against (default $KWS_DATA_ROOT/models/hey_bus.tflite)
 set -euo pipefail
 
@@ -115,6 +120,18 @@ done
 
 cd "$MWW_DIR"
 if [ "$skip_train" = 0 ]; then
+  # The synthetic positives/negatives are most of the training set and nobody ever
+  # listens to them: a voice that turned out not to be German would train the wake word
+  # on the wrong language. Gate them before they become features — kws-tts-check exits
+  # non-zero on any failing clip, and set -e stops the round here.
+  # shellcheck disable=SC2086 # the list is space-separated by contract
+  for d in ${WAKE_TTS_DIRS:-generated_samples_v3/positives generated_samples_v3/negatives}; do
+    case $d in /*) ;; *) d=$MWW_DIR/$d ;; esac
+    [ -d "$d" ] || continue
+    echo "== tts-check $d"
+    (cd "$repo" && uv run --no-sync kws-tts-check "$d")
+  done
+
   # Real audio gets its own feature dirs so its share of a batch is a number in the
   # training config, not an accident of how many clips happen to exist.
   echo "== features"
