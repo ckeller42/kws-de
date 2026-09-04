@@ -53,14 +53,20 @@ Everything lives under ``$KWS_DATA_ROOT/data/recordings/``:
      spkNN/_phrase_/<slug>_NNN.wav        sentence takes
      spkNN/_neg_/<slug>_NNN.wav           negative-phrase takes
      spkNN/hey-bus/NNN.wav                wake-word ("Hey Bus") takes
+     field/spkNN/<boot-ms>.wav            field takes, captured in Assistent
+                                           mode (set=field, no prompt)
      sessions.csv                         speaker,pulled,prompt,file,ms,
-                                           peak_dbfs,set,seed,ts (merged
-                                           across every speaker in the pull)
+                                           peak_dbfs,set,seed,ts,fire_ms,
+                                           wake_prob,device_intent,
+                                           device_words (merged across every
+                                           speaker in the pull; the last four
+                                           are empty for a guided take)
      logs/recognise-<ts>.log              recognise-mode detection log, if any
    qc/<same-name>/
      qc.csv                               one row per take: file,set,prompt,
                                            speaker,verdict,reason,transcript,
-                                           match_score,rms_dbfs,peak_dbfs,dur_ms
+                                           match_score,rms_dbfs,peak_dbfs,
+                                           dur_ms,device_intent,agrees
      words.csv                            one row per SEGMENTED keyword clip
      written.txt                          approved-relative paths this stamp
                                            wrote, for idempotent re-runs
@@ -143,6 +149,49 @@ Whisper's word span is turned into a 1 s window centred on its midpoint
 alongside the bare word takes already at 1 s. Whisper runs at
 ``temperature=0`` (greedy) and its model id is recorded in ``report.md``,
 so a QC run is reproducible for a given model version.
+
+A **field take** (``set=field``, captured in Assistent mode) takes a
+different route through the same rules
+(:need:`REQ_PIPE_FIELD_LABELS`). It has no prompt to match against, so the
+content gate approves anything that transcribed to something, and its
+duration cap is the firmware's ring budget (9800 ms) rather than a
+sentence's 6000 ms — a window extends on every fire inside it, so a
+legitimately long take is not an anomaly. The transcript is then split: a
+"Hey Bus" ending in the first 1.3 s becomes a ``wake`` clip, and the rest is
+run through the *same* ``kws_de.grammar.parse`` the device's vocabulary
+feeds.
+
+Un-welding is the one rule the field path needs that the guided path does
+not. The guided matcher can glue *known prompt* tokens together to absorb
+Whisper writing "Lichtdach" for "Licht Dach"; a field take has no prompt, so
+the split has to run the other way — a token that decomposes **completely**
+into a run of vocabulary words is split back apart ("lichtküche" ->
+"licht küche"), and one that does not is left exactly as heard, so "dank",
+"anzug" and "banane" are never quietly turned into commands. Without it a
+perfectly good spoken command is filed as a negative, which is worse than
+losing it: it poisons the ``_unknown_`` class with the very words the model
+must recognise.
+
+A valid intent becomes the label and the take is filed as an approved
+phrase — prompt, index row and word segmentation exactly as for a guided
+sentence. Anything else is kept as a negative with the transcript as its
+prompt, with one guard: the transcript still has to pass the ordinary
+negatives content gate, so speech the grammar rejected but that *does*
+carry command vocabulary is left unfiled rather than entering either the
+unknown class or the false-accept set. Nothing is thrown away for merely
+failing to parse — unparsable real speech is precisely the ``_unknown_``
+material the model needs — and the report's Field line counts what was left
+unfiled, so the gap is visible rather than silent.
+
+The device's own intent travels with the take into ``qc.csv``
+(``device_intent``) next to an ``agrees`` flag, and
+``kws-eval --recordings`` reports it as a separate **Field** section. It is
+the accuracy of the model that was *deployed* when the recording happened —
+a different model from the one being evaluated — and it is never used as a
+label. The agreement rate is taken over the takes the device actually
+answered: a ring-truncated take carries no device prediction at all, and
+counting those as disagreements would quietly depress a figure the device
+never had a chance to earn.
 
 The two evaluation figures
 ---------------------------

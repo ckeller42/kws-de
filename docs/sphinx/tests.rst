@@ -45,6 +45,22 @@ binary is a small ``assert``-based program built by
    through ``stream_push`` and asserts the fired-event sequence (debounce,
    gap, re-fire) matches expectations.
 
+.. test:: Field-take window arithmetic and the capture toggle
+   :id: TEST_FIELD_SPAN
+   :status: passing
+   :links: REQ_FW_FIELD_CAPTURE, REQ_FW_HOST_TESTS_NO_IDF
+
+   ``firmware/test/test_field.c``: asserts that capture is off after
+   ``field_reset`` (opt-in), that an enabled fire yields the pre-roll +
+   window span ending exactly at the window's close, that a second fire
+   inside an open window keeps the first fire's position (one interaction,
+   one take), that an **extended** window is captured whole rather than cut
+   back to ``ASSIST_WINDOW_MS``, that a window longer than the ring's budget
+   is cut at the *end* with ``truncated`` set and the pre-roll intact, that
+   ``field_disarm`` prevents a second copy, that a fire in the first second
+   after boot shortens the take instead of reading in front of the ring, and
+   that turning capture off drops a pending take.
+
 .. test:: WAV header bytes at three sample counts
    :id: TEST_WAV_HEADER
    :status: passing
@@ -298,6 +314,30 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
    The 4000 ms wake cap rides on
    ``test_audio_gate_ok_clipped_quiet_short``'s per-set cap checks.
 
+.. test:: QC field mode: wake split, grammar labels, agreement
+   :id: TEST_QC_FIELD_MODE
+   :status: passing
+   :links: REQ_PIPE_FIELD_LABELS, REQ_PIPE_QC_CONTENT, REQ_PIPE_APPROVED_LAYOUT
+
+   ``tests/test_qc.py``: ``field_wake_split`` cuts at the end of "Bus"
+   + 0.15 s and returns the command tokens, accepts a single glued ``HeyBus``
+   span as well as the two-span spelling, and ignores a wake phrase that lands
+   after 1.3 s or is absent; ``field_intent`` drops filler, un-welds a token
+   that decomposes completely into vocabulary words ("lichtküche") while
+   leaving ordinary speech ("dank", "anzug", "banane") whole, and returns the
+   same ``Intent`` the device's grammar would; the field audio cap is the
+   firmware's ring budget, so a 5000 ms take approves and a 9900 ms one is
+   ``too_long``. ``run_qc`` on a field session writes the wake clip, files the
+   command as an approved phrase with the grammar-derived prompt in the row's
+   ``prompt`` column (plus its word clips), records ``device_intent`` /
+   ``agrees``, keeps an unparsable take as a negative with the transcript as
+   its prompt, leaves an unparsable take that still carries command vocabulary
+   **unfiled** rather than poisoning the negatives, computes the agreement
+   rate over the takes the device actually answered, is idempotent on a
+   re-run, and rejects an empty transcript (``empty_transcript``). A
+   disagreeing device intent changes ``agrees`` and nothing else — the label
+   still comes from Whisper.
+
 .. test:: ingest.sh pulls a session without deleting on the remote host
    :id: TEST_INGEST
    :status: passing
@@ -323,6 +363,22 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
    convention cannot drift between producer and consumer; the report names
    the model file it measured, data-root-relative, and a second run rewrites
    its section in place instead of appending a second copy.
+
+.. test:: Field section of the recordings eval
+   :id: TEST_EVAL_FIELD
+   :status: passing
+   :links: REQ_PIPE_FIELD_LABELS, REQ_PIPE_EVAL_LABELS
+
+   ``tests/test_eval_recordings.py``: ``field_figures`` counts takes,
+   parsable takes (non-empty ``prompt``), compared takes
+   (``agrees in ("0", "1")``) and agreements per speaker across several
+   ``qc/<stamp>/`` directories, sums the unfiled count out of each stamp's
+   ``report.md``, and ignores non-field rows — the fixture deliberately
+   includes a take that parsed but was never compared, so an agreement rate
+   taken over *parsable* instead of *compared* fails the test. The rendered
+   section carries the per-speaker table and says the agreement is the
+   accuracy of the model deployed *at capture time*; with no field takes
+   there is no Field section at all.
 
 .. test:: Stage-duration ETA: ledger, prediction math, Timed, and the CLI
    :id: TEST_ETA
@@ -491,8 +547,28 @@ CoreS3 before merging changes that touch it. See ``firmware/README.md``
    console port working again afterwards. Run by hand on real M5Stack
    CoreS3 hardware; not automated.
 
+.. test:: On-device field capture in Assistent mode
+   :id: TEST_MANUAL_FIELD_CAPTURE
+   :status: manual
+   :links: REQ_FW_FIELD_CAPTURE, REQ_FW_ASSIST_GATE
+
+   ``firmware/README.md`` "Manual test checklist": in Assistent mode the
+   "Aufnahme" switch is off after a fresh flash and ``status`` reports
+   ``field off takes 0 dropped 0``; turning it on shows the "REC" badge and
+   survives a reset; one interaction ("Hey Bus" + a command) adds exactly one
+   ``field/<spkNN>/<boot-ms>.wav`` and one ``field.csv`` row visible over
+   USB-drive mode, and ``status`` counts it. A second "Hey Bus" *inside* the
+   open window must still yield exactly **one** take, named after the first
+   fire and longer than a single-window take. The recognise step time logged
+   inside the window shows no 100-300 ms outlier, i.e. no file write happened
+   while the recogniser ran, and each ``field: saved`` line lands after its
+   window's ``assist: recogniser off``. Run by hand on real M5Stack CoreS3
+   hardware; not automated.
+
 .. note::
 
    ``REQ_FW_RECORD_CLIP_REJECT``, ``REQ_FW_STORAGE_MIN_FREE``, and
    ``REQ_FW_DATA_NOT_COMMITTED`` have no test linked above — see
    :doc:`traceability` for why these are open gaps rather than omissions.
+   The field checklist above exercises Assistent mode's wiring on hardware
+   but does not force a near-full volume, so the storage floor stays a gap.

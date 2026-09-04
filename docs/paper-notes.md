@@ -1251,6 +1251,93 @@ path, validated by reproducing E15's deployed-w32 row exactly. A `--model` flag 
 obvious fix if width sweeps become routine. Also, `command_v3_w48_qat_metadata.json` still
 carries the stock `budgets.macs` of 3,000,000, which both new widths exceed; nothing
 enforces it, but a deploy should either raise the declared budget or note the overrun.
+### E17 — field capture: real interactions as training data (2026-09-04, measured on the CoreS3)
+
+Assistent mode now optionally keeps what it hears. With the "Aufnahme" switch on,
+every wake fire arms one *field take* — the second before the fire plus the command
+window that fire opened — which the record task copies out of the always-on audio
+ring and writes **after** the window has closed, with the recogniser already switched
+off. That ordering is the whole design: a FAT write on this device costs 100–300 ms,
+more than a full recognise step, so capturing during the window would have changed the
+very behaviour being captured.
+
+The take spans the window that actually happened, not a constant. A second "Hey Bus"
+inside an open window extends it, and the extension has to reach the audio too, or the
+device's own answer would name words that fall past the end of the WAV. So the span is
+pre-roll + the real close-minus-first-fire, the *first* fire is latched (the file name,
+`fire_ms` and `wake_prob` stay anchored to the phrase the audio begins with), and only
+the ring caps the length — at 9.8 s, cut at the end, never at the front. A take that
+did get cut carries no device prediction at all, because it can no longer say which
+fires are still inside its own audio.
+
+**Measured on the device, one session, 13 capturing windows, 13 takes, 0 dropped.**
+The recognise step time inside a capturing window stayed at **38–42 ms** (5 trace
+samples; invoke 33.5–34.9 ms), against **38–45 ms** over 4 samples in the same assist
+mode with capture switched **off** (invoke 33.6–34.4 ms) — the capturing band sits
+inside the non-capturing one, and no sample anywhere near the 100–300 ms a write costs
+appears in either run. Each take's `field: saved` line landed 967–986 ms *after* its
+window's `assist: recogniser off`. The extending-window case checks out end to end: a
+second console fire 1.0 s into an open window produced one file of 73,088 samples
+against 56,272 for a single-window take, named after the first fire.
+
+The trace interval is worth stating, because it bounds how hard this measurement can
+be pushed: the recogniser prints its step cost every 50 steps and a window is only
+about 25, so roughly every second window contributes one sample. Thirteen windows buy
+five numbers. That is enough to exclude a 100–300 ms outlier, a two-order-of-magnitude
+effect, and not enough to resolve a 2 ms one.
+
+The label never comes from the device. On the workstation the take is transcribed by
+the same Whisper model as every guided take; a "Hey Bus" in the first 1.3 s is cut off
+as a wake positive, and the remaining words are run through the *same*
+`kws_de.grammar.parse` the firmware's vocabulary feeds. A valid intent becomes the
+phrase label, and the take joins training exactly like a guided sentence take (phrase
+clip, index row, per-word segmentation); anything that does not parse is kept as
+`_unknown_` material rather than discarded — real speech that the grammar rejects is
+the negative data this model is chronically short of.
+
+One rule had to be invented for the field path, and it is the mirror image of a guided
+one. The guided matcher glues *known prompt* tokens together when Whisper writes
+"Lichtdach" for "Licht Dach". A field take has no prompt, so the same failure has to be
+undone from the other side: a token that decomposes **completely** into a run of
+vocabulary words is split back apart, and one that does not is left exactly as heard.
+The bug that forced it was concrete — a real "Licht Küche an" came back as
+"Lichtküche an", failed to parse, and was filed as a *negative*, which is worse than
+losing the take: it teaches the model that its own command words are not commands.
+
+What the device *did* recognise is kept beside the label and scored against it. That
+gives a figure no synthetic evaluation can: **field accuracy**, the deployed model's
+agreement with the transcript on real, unprompted interactions in the van. The
+agreement is counted over the takes the device actually answered, not over every take
+that parsed, so a ring-truncated take with no device answer cannot depress a number it
+never had a chance to earn.
+
+**First-session figures: pending the first pull.** The takes now on the device are
+console-injected (`wakefire`) windows with nothing spoken into them, so they carry no
+speech to transcribe and no device intent to compare; and the pull itself is blocked by
+a host-side fault, not a firmware one — a locked screen on the workstation makes macOS
+eject the `KWSREC` volume ~250 ms after it attaches, so `ingest.sh` times out (it now
+names that cause and the recovery in its error message). Once a real session is
+captured with the screen unlocked, these numbers come from:
+
+```bash
+scripts/ingest.sh -H <device-host>          # pulls field/ into incoming/<stamp>/
+kws-qc data/recordings/incoming/<stamp>     # -> qc/<stamp>/report.md, "## Field" line
+kws-eval --recordings data/recordings/approved --prefix features_v3 --qat
+```
+
+The QC report's Field line gives takes, parsable, wake clips, unfiled and the agreement
+over compared takes; `kws-eval --recordings` renders the same figures per speaker in
+its own **Field** section. Until then the row stays empty rather than guessed — the
+rule for this file is real numbers only, and a pipeline that has so far seen only
+synthetic fixtures and one hand-assembled real-audio smoke has not yet measured
+anything.
+
+Two honest caveats already visible. The agreement figure will belong to whichever model
+was flashed at capture time, not to the model a later report evaluates —
+`kws-eval --recordings` prints it in its own **Field** section for that reason. And a
+field take is self-selected: it exists only because the wake word fired, so it measures
+command accuracy *given* a successful wake, and says nothing about missed wakes, for
+which no trigger exists.
 
 ## Open questions
 
