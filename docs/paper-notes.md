@@ -1761,6 +1761,14 @@ and still fire 1.13 s late. The TTS positives are tight, so a TTS-dominated mode
 phrase — which is why latency tracks the real share, and why round 6's low latency is a side
 effect of leaning on TTS rather than a fix.
 
+This is the model-side counterpart to E17. That entry measured the same ~1.17 s detection
+latency from the capture side and paid for it by widening the field-take pre-roll to 2.5 s, so
+the phrase would still be inside the recording by the time the fire landed. Both readings are
+right and they compose: E17 makes capture correct against the model we have, and round 6c
+removes the latency the pre-roll was sized to absorb. If 6c is promoted, `FIELD_LEAD_IN_MS` and
+the pre-roll can shrink back toward the phrase length — but only *after* a device measurement
+confirms the latency on hardware, and not in the same change that swaps the model.
+
 **Round 6c takes both.** Round-5a positive weights (71.4 % real, the share that keeps false
 wakes down), the real hard negatives, and the real positive clips silence-trimmed before feature
 generation (energy endpoint, 0.25 s lead / 0.20 s tail; 1.78-1.92 s becomes 0.93-1.33 s):
