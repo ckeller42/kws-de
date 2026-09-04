@@ -4,6 +4,7 @@
 #include <cstring>
 #include "arena.h"
 #include "audio.h"
+#include "beep.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -69,6 +70,7 @@ static bool s_parity_pending;        /* log both paths' output on the next step 
 #endif
 static FILE *s_log;
 static volatile int64_t s_off_at_us;   /* assist window deadline, 0 = run until told otherwise */
+static volatile bool s_cmd_fired;      /* assist mode: a command fired in this window, tone still owed */
 
 static void log_fire(const char *word, float conf)
 {
@@ -347,6 +349,19 @@ static void recognise_task(void *)
         recognise_status_t copy = s_st;
         xSemaphoreGive(s_lock);
         if (fired >= 0) { ESP_LOGI(TAG, "fired %s %.2f (%lu ms)", KWS_LABELS[fired], (double)probs[fired], (unsigned long)ms); log_fire(KWS_LABELS[fired], probs[fired]); }
+        /* Confirmation tone. A fire on _unknown_ is the model saying it heard
+           speech it has no command for, so it stays silent (stream_is_command).
+           In assist mode the tone is only *owed* here and played by the wake
+           task when the window closes — the recogniser's own deadline can
+           expire while the window is still open (a second wake fire extends the
+           gate without re-arming the deadline), and a tone inside the window
+           would be captured by the microphone and end up in a field-capture
+           take. Outside assist there is no window, so it plays straight away;
+           beep_double() only posts to the beep task either way. */
+        if (stream_is_command(fired)) {
+            if (app_get_mode() == UI_MODE_ASSIST) s_cmd_fired = true;
+            else beep_double();
+        }
         /* Only when the recognise screen is actually on display. In assist mode
            the wake task owns the screen (ui_assist_refresh) and this screen's
            LVGL objects were never created — painting them took the display lock
@@ -401,7 +416,14 @@ extern "C" void recognise_listen_for(uint32_t ms)
     s_st.window_intent[0] = 0;
     s_st.window_words[0] = 0;
     xSemaphoreGive(s_lock);
+    s_cmd_fired = false;      /* a new window never inherits the last one's owed tone */
     s_off_at_us = esp_timer_get_time() + (int64_t)ms * 1000;
     s_active = true;
+}
+extern "C" bool recognise_take_command_fired(void)
+{
+    bool v = s_cmd_fired;
+    s_cmd_fired = false;
+    return v;
 }
 extern "C" void recognise_get_status(recognise_status_t *out) { xSemaphoreTake(s_lock, portMAX_DELAY); *out = s_st; xSemaphoreGive(s_lock); }

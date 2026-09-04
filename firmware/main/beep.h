@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 /**
- * @brief Open the speaker codec and pre-render the tone.
+ * @brief Open the speaker codec, pre-render both tones and start the beep task.
  *
  * Safe to call when the microphone is already capturing. Logs and gives up if
  * the codec cannot be opened — a missing beep must never stop wake detection.
@@ -36,6 +36,16 @@ void beep_init(void);
  * see wake.cc.
  */
 void beep_play(void);
+
+/**
+ * @brief Confirm a recognised command with two short pips. Non-blocking.
+ *
+ * Posts to the beep task (priority 1) and returns immediately, so it can be
+ * called from either model task without adding audio I/O to an inference path.
+ * A request arriving while a pair is still playing queues exactly one repeat.
+ * No-op if beep_init() failed.
+ */
+void beep_double(void);
 
 #ifdef __cplusplus
 }

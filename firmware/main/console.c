@@ -1,6 +1,7 @@
 #include "console.h"
 #include <stdio.h>
 #include <string.h>
+#include "beep.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_log.h"
@@ -58,6 +59,9 @@ static void handle_line(char *line)
         else if (strcmp(arg, "usb") == 0) m = UI_MODE_USB;
         else { printf("err unknown mode %s\n", arg); return; }
         app_set_mode(m);
+        printf("ok\n");
+    } else if (strcmp(cmd, "beep") == 0) {
+        beep_double();                     /* speaker check: the confirmation tone, no speaking required */
         printf("ok\n");
     } else if (strcmp(cmd, "wakefire") == 0) {
         wake_inject_fire();                /* measurement hook: see wake.h */
