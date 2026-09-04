@@ -112,6 +112,10 @@ test_command_smoke: test_command_smoke.c $(GEN_DIR)/command_infer.c $(GEN_DIR)/c
 	$(CC) $(CFLAGS) -I$(ESP_NN)/include -c $(GEN_DIR)/command_infer.c -o command_infer_smoke.o
 	$(CC) $(ESP_NN_CFLAGS) -o $@ test_command_smoke.o command_infer_smoke.o $(ESP_NN_SRCS) -lm
 
+# Also the generated vector headers: they are produced from whatever model the
+# generator was last pointed at, and a stale one silently fails a hand-run
+# parity target against perfectly good committed C.
 clean:
 	rm -f $(TESTS) test_infer_parity test_wake_parity test_command_parity *.o
+	rm -f $(GEN_DIR)/*_infer_vectors.h $(GEN_DIR)/conv_probe.c $(GEN_DIR)/conv_probe_vectors.h
 .PHONY: all clean test_infer_parity test_wake_parity test_command_parity

@@ -1063,7 +1063,18 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
     # esp-nn's kernels want 16-byte-aligned operands; the generated constant
     # tables are copied into the (aligned) scratch by the S3 kernels themselves,
     # so only the buffers the kernels read and write directly are declared so.
-    statics = [f"static int8_t arena[{ctx.arena.size}] __attribute__((aligned(16)));"]
+    # Placement is the caller's call, not the generator's: define
+    # <NAME>_INFER_ARENA_ATTR to a section attribute (ESP-IDF's EXT_RAM_BSS_ATTR,
+    # say) to move the arena out of internal .bss. Alignment and every offset
+    # handed to esp-nn are unaffected -- the attribute only changes the section.
+    upper = name.upper()
+    statics = [
+        f"#ifndef {upper}_INFER_ARENA_ATTR",
+        f"#define {upper}_INFER_ARENA_ATTR",
+        "#endif",
+        f"{upper}_INFER_ARENA_ATTR static int8_t arena[{ctx.arena.size}] "
+        "__attribute__((aligned(16)));",
+    ]
     if ctx.scratch_bytes:
         statics.append(f"static int8_t *const scratch = arena + {ctx.arena.scratch_offset};")
     statics += [
@@ -1145,7 +1156,13 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
         f"#define {name.upper()}_INFER_INPUT_LEN {in_len}\n"
         f"#define {name.upper()}_INFER_OUTPUT_LEN {out_len}\n"
         "/* Transient arena: activations + esp-nn scratch, live only for the "
-        "duration of one call. */\n"
+        "duration of one call. It is one static array, so where it lands is a "
+        "link-time choice: define "
+        f"{name.upper()}_INFER_ARENA_ATTR when compiling {name}_infer.c to a "
+        "section attribute (ESP-IDF's EXT_RAM_BSS_ATTR puts it in PSRAM) to "
+        "keep it out of internal .bss. The array stays 16-byte aligned and "
+        "every offset handed to esp-nn is unchanged either way; only the speed "
+        "of the memory behind it differs. */\n"
         f"#define {name.upper()}_INFER_ARENA_BYTES {ctx.arena.size}\n"
         "/* Bytes at the end of the arena reserved for esp-nn's scratch buffer, "
         "sized from the widest op by this module's port of "
@@ -1317,12 +1334,25 @@ def model_bytes(path) -> bytes:
     keeps "the model the interpreter runs" and "the model the generated code
     runs" the same object by construction, and it is also the only source CI
     can see at all (models/ is not in the repository).
+
+    Parsing a C array out of a header is a text scrape, so it is checked rather
+    than trusted: the array's own declared length and the flatbuffer's "TFL3"
+    identifier both have to agree with what came out. A future header that puts
+    a second initialiser, an attribute block or a braced comment in the file
+    would otherwise silently fold those numbers into the model.
     """
     path = pathlib.Path(path)
     if path.suffix != ".h":
         return path.read_bytes()
-    body = path.read_text().split("{", 1)[1].rsplit("}", 1)[0]
-    return bytes(int(v, 0) for v in re.findall(r"0[xX][0-9a-fA-F]+|\d+", body))
+    text = path.read_text()
+    body = text.split("{", 1)[1].rsplit("}", 1)[0]
+    blob = bytes(int(v, 0) for v in re.findall(r"0[xX][0-9a-fA-F]+|\d+", body))
+    declared = re.search(r"_len\s*=\s*(\d+)", text)
+    if declared and int(declared.group(1)) != len(blob):
+        raise ValueError(f"{path}: array declares {declared.group(1)} bytes, parsed {len(blob)}")
+    if blob[4:8] != b"TFL3":
+        raise ValueError(f"{path}: not a TFLite flatbuffer (no TFL3 identifier at offset 4)")
+    return blob
 
 
 def write(model_path, name: str, out_dir) -> dict[str, int]:

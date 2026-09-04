@@ -9,7 +9,10 @@
 #error "esp-nn SKIP_NUDGE requantisation is not bit-exact; this model was generated for the exact path"
 #endif
 
-static int8_t arena[15680] __attribute__((aligned(16)));
+#ifndef WAKE_INFER_ARENA_ATTR
+#define WAKE_INFER_ARENA_ATTR
+#endif
+WAKE_INFER_ARENA_ATTR static int8_t arena[15680] __attribute__((aligned(16)));
 static int8_t *const scratch = arena + 128;
 static int8_t ring0[832] __attribute__((aligned(16)));
 static int8_t ring1[576] __attribute__((aligned(16)));

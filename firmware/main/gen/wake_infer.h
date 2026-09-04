@@ -5,7 +5,7 @@
 
 #define WAKE_INFER_INPUT_LEN 120
 #define WAKE_INFER_OUTPUT_LEN 1
-/* Transient arena: activations + esp-nn scratch, live only for the duration of one call. */
+/* Transient arena: activations + esp-nn scratch, live only for the duration of one call. It is one static array, so where it lands is a link-time choice: define WAKE_INFER_ARENA_ATTR when compiling wake_infer.c to a section attribute (ESP-IDF's EXT_RAM_BSS_ATTR puts it in PSRAM) to keep it out of internal .bss. The array stays 16-byte aligned and every offset handed to esp-nn is unchanged either way; only the speed of the memory behind it differs. */
 #define WAKE_INFER_ARENA_BYTES 15680
 /* Bytes at the end of the arena reserved for esp-nn's scratch buffer, sized from the widest op by this module's port of esp_nn_get_*_scratch_size_esp32s3. The firmware asks the real esp-nn for the same number on the chip and refuses to run the generated path if it answers more than this. */
 #define WAKE_INFER_SCRATCH_BYTES 15552

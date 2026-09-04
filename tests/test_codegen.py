@@ -645,6 +645,37 @@ def test_model_bytes_reads_the_firmware_c_array():
     assert blob[4:8] == b"TFL3"
 
 
+def test_model_bytes_refuses_a_header_that_is_not_a_model(tmp_path):
+    """The parse is a text scrape, so its two invariants are enforced in the
+    function rather than only being true of today's two headers."""
+    truncated = tmp_path / "short.h"
+    truncated.write_text("const unsigned int g_model_len = 3;\nconst char g[] = {1, 2};\n")
+    with pytest.raises(ValueError, match="declares 3 bytes, parsed 2"):
+        codegen.model_bytes(truncated)
+    not_a_model = tmp_path / "other.h"
+    not_a_model.write_text("static const char x[] = {0, 1, 2, 3, 4, 5, 6, 7};\n")
+    with pytest.raises(ValueError, match="not a TFLite flatbuffer"):
+        codegen.model_bytes(not_a_model)
+
+
+def test_model_config_quantisation_describes_the_embedded_model():
+    """What actually makes the two inference paths agree: recognise.cc quantises
+    its features with model_config.h's constants, and both paths then run the
+    blob in model_data.h. An export that wrote one header and not the other
+    would leave that silently false -- so read the constants back out of the
+    blob itself instead of trusting they were written together."""
+    tf = pytest.importorskip("tensorflow")
+    blob = codegen.model_bytes(EMBEDDED_COMMAND)
+    itp = tf.lite.Interpreter(model_content=blob)
+    itp.allocate_tensors()
+    scale, zero_point = itp.get_input_details()[0]["quantization"]
+    classes = int(itp.get_output_details()[0]["shape"][-1])
+    config_h = (GEN / "model_config.h").read_text()
+    assert f"#define KWS_MODEL_INPUT_SCALE {scale:.8e}f" in config_h
+    assert f"#define KWS_MODEL_INPUT_ZERO_POINT {int(zero_point)}" in config_h
+    assert f"#define KWS_MODEL_NUM_CLASSES {classes}" in config_h
+
+
 def test_command_check_is_clean_against_the_committed_headers():
     """Runs in CI too (no KWS_DATA_ROOT needed), unlike the wake equivalent:
     a codegen.py edit that changes what the command emitters produce, without

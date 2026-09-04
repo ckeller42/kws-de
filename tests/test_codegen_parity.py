@@ -108,9 +108,11 @@ def test_layer_is_byte_identical(model, path, op_index, what):
 WAKE_TAKES = config.DATA_DIR / "recordings" / "approved" / "wake"
 needs_wake = pytest.mark.skipif(not WAKE.exists(), reason=f"{WAKE} absent (KWS_DATA_ROOT)")
 # COMMAND itself is always present (it is in the repo); what these tests still
-# need is the feature split they draw real clips from.
+# need is the feature split they draw their real clips from, which lives under
+# DATA_DIR -- skip on what is actually used, so a data root with models but no
+# splits skips instead of erroring.
 needs_command = pytest.mark.skipif(
-    not config.MODELS_DIR.exists(), reason="KWS_DATA_ROOT feature splits absent"
+    not config.DATA_DIR.exists(), reason="KWS_DATA_ROOT feature splits absent"
 )
 
 
@@ -202,9 +204,9 @@ def test_whole_command_model_matches_the_interpreter(tmp_path):
     cheap synthetic vectors stay too as an edge-of-range check.
 
     Generates into `tmp_path`, not `firmware/main/gen` (S-3): same reasoning
-    as the wake test above, and command_infer.{c,h} are not even committed
-    yet (Task 8), so this only mattered for `git status` noise before -- now
-    it generates nowhere near the tracked directory at all.
+    as the wake test above. command_infer.{c,h} are committed now, so writing
+    into the tracked directory would not merely be `git status` noise -- it
+    would overwrite the shipped artefacts with a build fixture.
     """
     from kws_de import dataset
 
