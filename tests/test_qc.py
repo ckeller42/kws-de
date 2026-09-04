@@ -246,6 +246,12 @@ def test_field_intent_splits_a_welded_compound_but_not_ordinary_speech():
     v = qc.vocab()
     for word in ("dank", "anzug", "angst", "banane", "ankommen"):
         assert qc._split_glued(word, v) == [word]
+    # ...but real verbs that DO decompose completely ("auslesen" -> "aus lesen")
+    # are split, and the safety then comes from the grammar, not the splitter.
+    # Pin that interaction: a wrong split must never reach a training label.
+    for word in ("auslesen", "anlesen"):
+        assert len(qc._split_glued(word, v)) == 2
+        assert isinstance(qc.field_intent([word]), Rejection)
 
 
 def test_field_intent_uses_the_same_grammar_as_the_device():
@@ -298,6 +304,8 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
         "words_skipped": 0,
         "wake_written": 0,
         "field_takes": 0,
+        "field_approved": 0,
+        "field_truncated": 0,
         "field_parsable": 0,
         "field_agree": 0,
     }
@@ -500,14 +508,22 @@ def test_audio_gate_field_take_may_be_longer_than_one_window(tmp_path):
     assert qc.audio_gate(_wav(tmp_path / "f10.wav", _tone(ms=9900)), "field")[1] == "too_long"
 
 
-def _field_session(tmp_path, device_intent: str, device_words: str = "Licht:0.93|an:0.88") -> Path:
+def _field_session(
+    tmp_path,
+    device_intent: str,
+    device_words: str = "Licht:0.93|an:0.88",
+    window_ms: int = 2500,
+) -> Path:
+    # 3500 ms of audio = FIELD_PREROLL_MS (1000) + a 2500 ms window, i.e. the
+    # whole window fitted the ring: not truncated. A larger window_ms with the
+    # same wav is what a ring-truncated take looks like on the host.
     inc = tmp_path / "incoming" / "f1"
-    _wav(inc / "field" / "spk05" / "123456.wav", _tone(ms=3500))
+    _wav(inc / "field" / "spk05" / "1-123456.wav", _tone(ms=3500))
     (inc / "sessions.csv").write_text(
         "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,"
-        "fire_ms,wake_prob,device_intent,device_words\n"
-        "spk05,t,,field/spk05/123456.wav,3500,-10,field,,123456,123456,0.910,"
-        f"{device_intent},{device_words}\n"
+        "fire_ms,wake_prob,device_intent,device_words,window_ms\n"
+        "spk05,t,,field/spk05/1-123456.wav,3500,-10,field,,123456,123456,0.910,"
+        f"{device_intent},{device_words},{window_ms}\n"
     )
     return inc
 
@@ -531,6 +547,8 @@ def test_run_qc_field_take_splits_wake_labels_by_grammar_and_scores_agreement(tm
     counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
 
     assert counts["field_takes"] == 1
+    assert counts["field_approved"] == 1
+    assert counts["field_truncated"] == 0
     assert counts["field_parsable"] == 1
     assert counts["field_agree"] == 1
     assert counts["wake_written"] == 1
@@ -545,8 +563,16 @@ def test_run_qc_field_take_splits_wake_labels_by_grammar_and_scores_agreement(tm
     # segmented into word clips exactly like a guided sentence take
     idx = list(csv.DictReader((appr / "phrases" / "index.csv").open()))
     assert idx[0]["prompt"] == "Licht Küche an" and idx[0]["speaker"] == "spk05"
-    assert (appr / "phrases" / "spk05" / "123456_001.wav").exists()
+    phrase = appr / "phrases" / "spk05" / "1-123456_001.wav"
+    assert phrase.exists()
     assert {p.parent.name for p in (appr / "words").rglob("*.wav")} == {"Licht", "Küche", "an"}
+
+    # the phrase clip is the COMMAND, not the whole take: it starts after the
+    # wake phrase (0.60 + 0.15 s) and ends 0.3 s past the last word (2.30 s), so
+    # ~1.85 s, not the full 3.5 s. eval streams this clip end to end, and the
+    # pre-roll plus trailing silence would be streamed with it.
+    psig, psr = sf.read(phrase, always_2d=True)
+    assert 1.80 <= len(psig) / psr <= 1.90
 
     # provenance: the device's own intent is recorded and scored, never used
     row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
@@ -571,20 +597,28 @@ def test_run_qc_field_agreement_rate_counts_only_takes_the_device_answered(tmp_p
     # one compared take that agrees + one truncated take with no device answer:
     # the rate is 1.000 over the COMPARED takes, not 0.500 over the parsable ones.
     inc = tmp_path / "incoming" / "f1"
-    _wav(inc / "field" / "spk05" / "123456.wav", _tone(ms=3500))
-    _wav(inc / "field" / "spk05" / "123457.wav", _tone(ms=3500))
+    _wav(inc / "field" / "spk05" / "1-123456.wav", _tone(ms=3500))
+    _wav(inc / "field" / "spk05" / "1-123457.wav", _tone(ms=3500))
     (inc / "sessions.csv").write_text(
         "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,"
-        "fire_ms,wake_prob,device_intent,device_words\n"
-        "spk05,t,,field/spk05/123456.wav,3500,-10,field,,123456,123456,0.910,"
-        "Licht Küche an,Licht:0.93|an:0.88\n"
-        "spk05,t,,field/spk05/123457.wav,3500,-10,field,,123457,123457,0.910,,\n"
+        "fire_ms,wake_prob,device_intent,device_words,window_ms\n"
+        "spk05,t,,field/spk05/1-123456.wav,3500,-10,field,,123456,123456,0.910,"
+        "Licht Küche an,Licht:0.93|an:0.88,2500\n"
+        "spk05,t,,field/spk05/1-123457.wav,3500,-10,field,,123457,123457,0.910,,,9000\n"
     )
     qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
     counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
     assert counts["field_takes"] == 2 and counts["field_parsable"] == 2
     assert counts["field_agree"] == 1
-    assert "device-Whisper agreement 1.000" in (qcd / "report.md").read_text()
+    # the second take held 3500 ms of a 1000 + 9000 ms span: the ring cut it, and
+    # THAT is why it carries no device answer. Readable on the host at last.
+    assert counts["field_truncated"] == 1
+    report = (qcd / "report.md").read_text()
+    assert "device-Whisper agreement 1.000" in report
+    assert "1 ring-truncated" in report
+    rows = {r["file"].rsplit("/", 1)[-1]: r for r in csv.DictReader((qcd / "qc.csv").open())}
+    assert rows["1-123456.wav"]["truncated"] == "0"
+    assert rows["1-123457.wav"]["truncated"] == "1"
 
 
 def test_run_qc_field_take_records_disagreement_without_relabelling(tmp_path):
@@ -603,7 +637,7 @@ def test_run_qc_truncated_field_take_has_no_device_answer_to_compare(tmp_path):
     # a take the ring cut short carries empty device_intent/device_words: the
     # device gave no answer, so there is nothing to agree or disagree with —
     # but Whisper still labels it and it is still filed.
-    inc = _field_session(tmp_path, "", "")
+    inc = _field_session(tmp_path, "", "", window_ms=9000)
     qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
     counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
     assert counts["field_takes"] == 1 and counts["field_parsable"] == 1
@@ -611,6 +645,9 @@ def test_run_qc_truncated_field_take_has_no_device_answer_to_compare(tmp_path):
     row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
     assert row["verdict"] == "approve"
     assert row["device_intent"] == "" and row["agrees"] == ""
+    # and the reason is now readable on the host: 3500 ms of audio for a
+    # 1000 + 9000 ms span means the ring cut it, not that nothing was heard.
+    assert row["truncated"] == "1" and counts["field_truncated"] == 1
     idx = list(csv.DictReader((appr / "phrases" / "index.csv").open()))
     assert idx[0]["prompt"] == "Licht Küche an"
 
@@ -630,7 +667,7 @@ def test_run_qc_field_take_that_does_not_parse_is_kept_as_a_negative(tmp_path):
     assert counts["wake_written"] == 0  # no wake phrase in the transcript
     idx = list(csv.DictReader((appr / "negatives" / "index.csv").open()))
     assert idx[0]["prompt"] == "wann fahren wir los"  # the transcript is the prompt
-    assert (appr / "negatives" / "spk05" / "123456_001.wav").exists()
+    assert (appr / "negatives" / "spk05" / "1-123456_001.wav").exists()
     row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
     assert row["verdict"] == "approve" and row["agrees"] == ""
     assert row["prompt"] == ""  # nothing parsed -> no derived label
@@ -662,6 +699,10 @@ def test_run_qc_field_take_with_an_empty_transcript_is_rejected(tmp_path):
     qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
     counts = qc.run_qc(inc, qcd, appr, lambda p: {"text": "", "words": []})
     assert counts["rejected"] == 1 and counts["field_parsable"] == 0
+    # "field takes" is every field row, rejected ones included; "approved" is the
+    # separate number. Both reports count it this way, so they cannot disagree.
+    assert counts["field_takes"] == 1 and counts["field_approved"] == 0
+    assert "1 field takes, 0 approved" in (qcd / "report.md").read_text()
     row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
     assert row["reason"] == "empty_transcript"
 

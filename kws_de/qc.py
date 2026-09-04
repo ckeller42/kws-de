@@ -53,6 +53,13 @@ _WAKE_RE = re.compile(r"(hey|hej|he|hei)(bus|buss|bos|boss)", re.IGNORECASE)
 WAKE_MAX_S = 1.3
 # Kept after the end of "bus", so the wake clip is not cut mid-plosive.
 WAKE_TAIL_S = 0.15
+# Kept after the last word of a field take's command, so the phrase clip is not
+# cut mid-plosive either.
+PHRASE_TAIL_S = 0.3
+# firmware/main/field.h's FIELD_PREROLL_MS: audio the device keeps in front of the
+# wake fire. `ms < FIELD_PREROLL_MS + window_ms` is how a ring-truncated take is
+# read off the two columns the pull carries (REQ_FW_FIELD_CAPTURE).
+FIELD_PREROLL_MS = 1000
 
 
 @dataclass
@@ -63,6 +70,9 @@ class Take:
     speaker: str
     device_intent: str = ""  # what the device itself recognised (field takes only)
     device_words: str = ""  # "<word>:<conf>" entries joined by '|'
+    window_ms: int = 0  # how long the assist window was really open (field takes only)
+    # seconds to cut for the phrase clip; None means the whole file
+    span: tuple[float, float] | None = None
 
 
 @dataclass
@@ -80,6 +90,7 @@ class QcRow:
     dur_ms: int
     device_intent: str = ""  # verbatim from the device; NEVER used as a label
     agrees: str = ""  # "1"/"0" device vs Whisper, "" when there is nothing to compare
+    truncated: str = ""  # "1"/"0" the ring cut this field take short, "" for a guided take
 
 
 def normalise(text: str) -> list[str]:
@@ -294,6 +305,12 @@ def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
     if reason is None:
         tr = transcriber(take.file)
         score, reason = content_gate(take.set, take.prompt, tr.get("text", ""))
+    # A field take the device cut to fit its audio ring holds less than the
+    # pre-roll plus the window it recorded. Marked here so the truncated ones are
+    # distinguishable downstream from takes the recogniser simply never answered.
+    truncated = ""
+    if take.set == "field" and take.window_ms:
+        truncated = "1" if m.get("dur_ms", 0) < FIELD_PREROLL_MS + take.window_ms else "0"
     row = QcRow(
         file=str(take.file),
         set=take.set,
@@ -307,6 +324,7 @@ def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
         peak_dbfs=round(m.get("peak_dbfs", 0.0), 1),
         dur_ms=m.get("dur_ms", 0),
         device_intent=take.device_intent,
+        truncated=truncated,
     )
     return row, tr
 
@@ -326,6 +344,7 @@ def read_sessions(incoming: Path) -> list[Take]:
                     # yields None for a column the row does not have
                     device_intent=r.get("device_intent") or "",
                     device_words=r.get("device_words") or "",
+                    window_ms=int(r.get("window_ms") or 0),
                 )
             )
     return takes
@@ -414,7 +433,11 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
     takes = read_sessions(incoming)
     rows, words_rows, written, gap_files = [], [], [], []
     n_words = n_skipped = n_wake = 0
-    n_field = n_field_wake = n_field_parsable = 0
+    # "field takes" is EVERY field row in the session, approved or not; approved
+    # is reported next to it, never instead of it. kws_de.eval.field_figures
+    # counts the same way off qc.csv, so the two reports agree on one session.
+    n_field = n_field_approved = n_field_truncated = 0
+    n_field_wake = n_field_parsable = 0
     n_field_compared = n_field_agree = n_field_unfiled = 0
     for t in takes:
         try:
@@ -436,10 +459,13 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             )
             tr = {"text": "", "words": []}
         rows.append(row)
+        if t.set == "field":
+            n_field += 1
+            n_field_truncated += row.truncated == "1"
         if row.verdict != "approve":
             continue
         if t.set == "field":
-            n_field += 1
+            n_field_approved += 1
             cut_s, tokens = field_wake_split(tr)
             if cut_s is not None:
                 # the wake phrase is a real "Hey Bus" positive: file it exactly
@@ -477,11 +503,22 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                     n_field_agree += int(row.agrees == "1")
                 # From here the take IS an approved sentence take with a derived
                 # prompt: same phrase copy, same index row, same word segmentation.
-                # N.B. the phrase clip is the WHOLE take, so it opens with the
-                # pre-roll and "Hey Bus" — approved/phrases/ is not command-only
-                # audio for field-derived rows (harmless: a wake word emits no
-                # command event in eval._stream_events).
-                t = Take(file=t.file, set="sentences", prompt=intent_text(got), speaker=t.speaker)
+                # The clip is cut to the COMMAND — from the end of the wake phrase
+                # to the last word Whisper heard — because eval streams every
+                # approved/phrases/ row through the command model end to end: the
+                # pre-roll and up to several seconds of trailing silence would be
+                # streamed too, and a spurious event there would score a take the
+                # model got right as an e2e miss. A guided sentence contains only
+                # the sentence; so does this. Word clips still come off the FULL
+                # take, whose Whisper timestamps they are indexed by.
+                end_s = max((float(w["end"]) for w in tr.get("words", [])), default=0.0)
+                t = Take(
+                    file=t.file,
+                    set="sentences",
+                    prompt=intent_text(got),
+                    speaker=t.speaker,
+                    span=(cut_s or 0.0, end_s + PHRASE_TAIL_S),
+                )
             elif content_gate("negatives", "", row.transcript)[1] is None:
                 # Kept, not dropped: unparsable field speech is `_unknown_`
                 # material, with the transcript itself as its prompt.
@@ -512,7 +549,11 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             d = approved / "phrases" / t.speaker
             dst = d / f"{slug}_{_next_no(d, slug)}.wav"
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(t.file.read_bytes())
+            if t.span is None:
+                dst.write_bytes(t.file.read_bytes())
+            else:  # a field take: only the command part of it is the phrase
+                lo, hi = (int(s * sr) for s in t.span)
+                sf.write(dst, sig[max(lo, 0) : hi], sr, subtype="PCM_16")
             written.append(str(dst.relative_to(approved)))
             _append_index(
                 approved / "phrases" / "index.csv",
@@ -602,8 +643,10 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         # one: a truncated take has no device intent to agree or disagree with.
         agree_rate = f"{n_field_agree / n_field_compared:.3f}" if n_field_compared else "n/a"
         field_section = (
-            f"\n## Field\n\n{n_field} field takes, {n_field_parsable} parsable, "
-            f"{n_field_wake} wake clips, {n_field_unfiled} unparsed (vocab present), "
+            f"\n## Field\n\n{n_field} field takes, {n_field_approved} approved, "
+            f"{n_field_parsable} parsable, {n_field_wake} wake clips, "
+            f"{n_field_unfiled} unparsed (vocab present), "
+            f"{n_field_truncated} ring-truncated, "
             f"device-Whisper agreement {agree_rate} over {n_field_compared} compared.\n"
         )
     else:
@@ -611,7 +654,9 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
     (qc_dir / "report.md").write_text(
         f"# QC {incoming.name}\n\n{len(rows)} takes, {approved_n} approved, "
         f"{len(rejects)} rejected, {n_words} word clips written, "
-        f"{n_skipped} word clips skipped, {n_wake} wake clips written.\n\n## Rejects\n\n"
+        f"{n_skipped} word clips skipped, {n_wake} wake clips written "
+        "(word and wake counts mix guided takes with field-derived clips; "
+        "the Field section below separates them).\n\n## Rejects\n\n"
         + "".join(
             f"- `{Path(r.file).relative_to(incoming)}` — reject: {r.reason} "
             f'(heard: "{r.transcript}")\n'
@@ -628,7 +673,9 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         "words_written": n_words,
         "words_skipped": n_skipped,
         "wake_written": n_wake,
-        "field_takes": n_field,
+        "field_takes": n_field,  # every field row, approved or not
+        "field_approved": n_field_approved,
+        "field_truncated": n_field_truncated,
         "field_parsable": n_field_parsable,
         "field_agree": n_field_agree,
     }

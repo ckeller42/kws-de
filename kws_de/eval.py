@@ -143,12 +143,21 @@ def _trained_speakers(manifest_path) -> tuple[set[str], bool, str | None]:
     return speakers, True, manifest.get("built_at")
 
 
+#: Per-speaker field counters, summed into the same top-level keys.
+_FIELD_KEYS = ("takes", "approved", "truncated", "parsable", "compared", "agree")
+
+
 def field_figures(qc_root) -> dict:
     """Per-speaker field-capture figures, read from every `qc/<stamp>/qc.csv`
     plus each stamp's `report.md` (for the one figure `qc.csv` cannot carry).
 
     Contract shipped by `kws_de.qc.run_qc` (task-4-report.md "Fix round 1",
-    ruling R-9 -- NOT the older agrees-based reading): a row is **parsable**
+    ruling R-9 -- NOT the older agrees-based reading): **takes** is every field
+    row in the session, approved or not, and **approved** is reported beside it
+    rather than instead of it -- `run_qc`'s report.md Field line says the same
+    two numbers. A row is **truncated** iff its `truncated` column is `"1"`: the
+    device's ring cut the take short (`ms < FIELD_PREROLL_MS + window_ms`), which
+    is why it carries no device answer. A row is **parsable**
     iff its `prompt` is non-empty (`run_qc` writes `prompt = intent_text(got)`
     only for a parsed field row); a row is **compared** iff `agrees` is `"0"`
     or `"1"` -- empty means either unparsable OR the device gave no answer
@@ -162,11 +171,10 @@ def field_figures(qc_root) -> dict:
     stamp's report.md Field line, so it is regex-read from there and summed;
     stamps with no report.md (or no Field section) contribute 0."""
     import csv
-    import re
     from collections import defaultdict
     from pathlib import Path
 
-    per_spk: dict = defaultdict(lambda: {"takes": 0, "parsable": 0, "compared": 0, "agree": 0})
+    per_spk: dict = defaultdict(lambda: dict.fromkeys(_FIELD_KEYS, 0))
     unfiled = 0
     for stamp in sorted(Path(qc_root).iterdir()):
         csv_path = stamp / "qc.csv"
@@ -178,6 +186,8 @@ def field_figures(qc_root) -> dict:
                     continue
                 s = per_spk[r["speaker"]]
                 s["takes"] += 1
+                s["approved"] += r.get("verdict") == "approve"
+                s["truncated"] += r.get("truncated") == "1"
                 if r.get("prompt"):
                     s["parsable"] += 1
                 if r.get("agrees") in ("0", "1"):
@@ -188,14 +198,8 @@ def field_figures(qc_root) -> dict:
             m = re.search(r"(\d+) unparsed \(vocab present\)", report_path.read_text())
             if m:
                 unfiled += int(m.group(1))
-    return {
-        "per_speaker": dict(per_spk),
-        "takes": sum(s["takes"] for s in per_spk.values()),
-        "parsable": sum(s["parsable"] for s in per_spk.values()),
-        "compared": sum(s["compared"] for s in per_spk.values()),
-        "agree": sum(s["agree"] for s in per_spk.values()),
-        "unfiled": unfiled,
-    }
+    total = {k: sum(s[k] for s in per_spk.values()) for k in _FIELD_KEYS}
+    return {"per_speaker": dict(per_spk), **total, "unfiled": unfiled}
 
 
 def render_field_section(field: dict) -> str:
@@ -205,33 +209,40 @@ def render_field_section(field: dict) -> str:
     the model measured above (the field-derived phrases/words/negatives
     themselves already sit in the in-training / held-out figures above,
     filed through the same approved/ paths as guided takes)."""
-    parsable_rate = field["parsable"] / field["takes"] if field["takes"] else float("nan")
+    parsable_rate = _rate(field["parsable"], field["takes"])
     unfiled_bit = f", {field['unfiled']} unparsed (vocab present)" if field["unfiled"] else ""
+    trunc_bit = f", {field['truncated']} ring-truncated" if field["truncated"] else ""
     out = ["\n## Field\n"]
     out.append(
-        f"{field['takes']} field takes, {field['parsable']} parsable "
-        f"({parsable_rate:.3f}){unfiled_bit}. Agreement is the device's own intent vs "
-        "the Whisper-derived one AT CAPTURE TIME -- the accuracy of whatever model "
-        "was deployed then, not of the model measured above. The field-derived "
-        "phrases, words and negatives themselves are counted in the two figures "
-        "above, under the same in-training / held-out labels as guided takes.\n"
+        f"{field['takes']} field takes, {field['approved']} approved, "
+        f"{field['parsable']} parsable ({parsable_rate}){unfiled_bit}{trunc_bit}. "
+        "Takes counts every field row, approved or not. Agreement is the device's "
+        "own intent vs the Whisper-derived one AT CAPTURE TIME -- the accuracy of "
+        "whatever model was deployed then, not of the model measured above. The "
+        "field-derived phrases, words and negatives themselves are counted in the "
+        "two figures above, under the same in-training / held-out labels as guided "
+        "takes.\n"
     )
-    out.append("| speaker | field takes | parsable | device-Whisper agreement |\n|---|---|---|---|")
+    out.append(
+        "| speaker | field takes | approved | parsable | device-Whisper agreement |"
+        "\n|---|---|---|---|---|"
+    )
     for spk in sorted(field["per_speaker"]):
         s = field["per_speaker"][spk]
-        agree = s["agree"] / s["compared"] if s["compared"] else float("nan")
-        out.append(f"| {spk} | {s['takes']} | {s['parsable']} | {agree:.3f} |")
+        out.append(
+            f"| {spk} | {s['takes']} | {s['approved']} | {s['parsable']} | "
+            f"{_rate(s['agree'], s['compared'])} |"
+        )
     return "\n".join(out) + "\n"
 
 
-_EMPTY_FIELD = {
-    "per_speaker": {},
-    "takes": 0,
-    "parsable": 0,
-    "compared": 0,
-    "agree": 0,
-    "unfiled": 0,
-}
+def _rate(num: int, den: int) -> str:
+    """A rate, or "n/a" when there is nothing to divide by -- the same spelling
+    kws_de.qc's report.md uses, so neither report ever prints `nan`."""
+    return f"{num / den:.3f}" if den else "n/a"
+
+
+_EMPTY_FIELD = {"per_speaker": {}, **dict.fromkeys(_FIELD_KEYS, 0), "unfiled": 0}
 
 
 def eval_recordings(
