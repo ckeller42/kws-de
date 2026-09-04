@@ -919,7 +919,7 @@ each, medians over the ~5 s trace lines with the cold first one dropped:
 | free internal at recogniser start | 36,231 B | **59,679 B** | 8,431 B |
 | every app_main task created? | yes | yes | **no** — record's 8 KB stack fails |
 | recognise task stack high-water | 6,368 B of 10,240 | 6,516 B of 10,240 | 6,436 B of 10,240 |
-| app image | 1,165,696 B | **1,001,616 B** | 1,001,632 B |
+| app image | 1,165,696 B (as built at `78fa92c`) | **1,001,616 B** | 1,001,632 B |
 | `selftest int8 out:` (23 bytes, golden vector) | `-128,…,-36,…,0,-94,…,-127,…` | byte-identical | byte-identical |
 | live `parity:` line (PARITY_LOG=y) | — | **`parity: 0/23 output bytes differ`** | build too tight to run |
 
@@ -974,6 +974,70 @@ one `model_config.h`'s quantisation constants describe, with nothing failing lou
 `model_data.h`), which makes the model the device runs the single source of truth — and, as a
 side effect, puts the command model's byte-exact freshness check inside CI, where the wake
 model's could never go because `models/` is not in the repository.
+
+### E14 — one esp-nn scratch region for both models (2026-09-04, measured on the CoreS3)
+
+Review finding on E12/E13's arrangement, and a real latent bug: each generated model carved
+its esp-nn scratch out of the end of its own arena, on the theory that a crossed pointer would
+at worst read the other model's scratch. Scratch is a **write** target, and the two reserves
+differ by 4,336 B. esp-nn's kernels reach it through file-static globals — one per kernel
+family for the whole image, not one per model — so in assist mode, where the wake task
+(priority 3) preempts the recogniser (priority 2) on the same core, the command model's
+depthwise could run with the wake arena's pointer and write 4,336 B past the end of a
+15,680 B array in internal `.bss`. Silent, heap-adjacent corruption; small per step, and
+assist mode runs both models continuously.
+
+Fixed in two halves. The generator now emits one shared region, `kws_infer_scratch`, sized to
+the widest op of *any* shipped model (19,888 B), 16-byte aligned, in internal `.bss`, pointed
+at once per inference entry rather than once per kernel; the arenas hold activations only.
+The firmware serialises the two evaluations on one mutex (`firmware/main/infer_lock.h`) — the
+models contend only inside an assist window, and the wait is bounded by one command inference,
+which the wake task absorbs because it reads from an audio ring holding a second of history.
+Re-measured, same session, same method as E12/E13:
+
+| | E12/E13 (scratch inside each arena) | E14 (one shared region) |
+|---|---|---|
+| wake arena / state / scratch | 15,680 + 4,200 B (scratch inside the arena) | **128 + 4,200 B, + 19,888 B shared** |
+| command arena / state / scratch | 51,248 B PSRAM (scratch inside) | **31,360 B PSRAM, + 19,888 B shared internal** |
+| wake step | 1,281 µs | **1,250 µs** |
+| wake evaluation | 1,220 µs | 1,248 µs |
+| wake within-window spread | ±151 µs | **±97 µs** |
+| recognise step (arena in PSRAM) | 33.0 ms | **31 ms** |
+| command evaluation (arena in PSRAM) | 28,726 µs | **27,283 µs** |
+| free internal, wake up | 81,371 B | 77,291 B (−4,080) |
+| free internal, recogniser start | 59,679 B | 55,239 B (−4,440) |
+| app image | 1,001,616 B | 1,002,560 B (+944: the scratch-query functions) |
+| `selftest int8 out:` | `-128,…,-36,…,0,-94,…,-127,…` | byte-identical |
+
+**The interesting row is the command model's.** Its scratch used to live in the PSRAM arena;
+sharing put it in internal RAM, and that alone recovers nearly all of E13's arena-placement
+gap — 28.7 → 27.3 ms, against 27.0 ms for moving the whole 51 KB arena internal — for 4,336 B
+of internal RAM instead of 51,248 B. The kernels hit scratch on every output row and the
+activations far less often, so scratch is the half worth the fast memory. E13's conclusion
+stands but sharpens: the placement question is not "arena in PSRAM or not", it is "which part
+of the working set is worth internal SRAM".
+
+The wake numbers moved within the noise of the trace (the step is a mean per 2 s window, the
+evaluation figure a single sample from it); the fix adds one mutex pair and three pointer
+stores per step. Bit-exactness is unchanged at every level: `wake smoke: 0/64`,
+`command smoke: 0/368`, `wake parity: 0/635`, `command parity: 0/1564`, and the device's
+always-on `selftest int8 out:` line byte for byte.
+
+Two smaller things from the same review, both about guards that checked one half of a
+symmetric pair. The boot scratch guard's dimensions used to be a hand copy of the generated C
+into `wake.cc`/`recognise.cc`; a regenerated model would have left it querying the *previous*
+geometry, getting an answer that fits, and passing — the exact failure it exists to prevent,
+with a green boot log in front of it. The generator now emits `<model>_infer_scratch_query()`
+from the same dimensions it emits the kernels from, and the firmware calls that; the device
+answers 15,552 B and 19,888 B, exactly what the Python port reserved. And the model-stamp
+drift check covered the command pair only, though the wake model is the one whose `.tflite`
+CI can never see; it now loops over both.
+
+### E12/E13 memory rows, superseded
+
+Every arena figure in E12 and E13 predates E14: the esp-nn scratch was inside those arenas
+and is now a separate shared region. The step and evaluation timings in E12/E13 stand as
+measured; E14's table gives the current ones.
 
 ## Open questions
 

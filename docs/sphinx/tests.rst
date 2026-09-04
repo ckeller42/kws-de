@@ -118,7 +118,7 @@ binary is a small ``assert``-based program built by
    ``tests/test_codegen_parity.py`` extends the byte-for-byte comparison to
    the command model over 4 synthetic vectors plus 64 real test-split feature
    windows (``command parity: 0/1564 bytes differ (68 clips, arena
-   51248 B)``). Both generate
+   31360 B)``). Both generate
    their vectors into a scratch directory, never into the committed
    ``firmware/main/gen``. Zero LSB difference is the pass condition
    throughout; one differing byte fails.
@@ -137,14 +137,19 @@ binary is a small ``assert``-based program built by
    :links: REQ_FW_INFER_GENERATED, REQ_FW_ARENA_PLACEMENT
 
    ``tests/test_codegen.py``: the first-fit lifetime planner's arena for each
-   model is asserted to be at or below the ``KWS_WAKE_ARENA_BYTES`` /
+   model, plus its ring state and its share of the shared esp-nn scratch
+   region, is asserted to be at or below the ``KWS_WAKE_ARENA_BYTES`` /
    ``KWS_MODEL_ARENA_BYTES`` the firmware allocates for TFLM today, read from
    the committed ``firmware/main/gen/`` headers, and the per-op esp-nn scratch
    sizes are pinned to hand-derived
    ``esp_nn_get_*_scratch_size_esp32s3`` values (15,552 B for the wake model's
    widest convolution, 19,888 B for the command model's 3x3 depthwise). The
-   device confirms that figure at boot by asking the real esp-nn on the real
-   chip for the same op, and refuses the generated path if it answers more.
+   device confirms those figures at boot by asking the real esp-nn on the real
+   chip — through ``<model>_infer_scratch_query()``, which the generator emits
+   from the same dimensions it emits the kernels from — and refuses the
+   generated path if it answers more. A further test asserts that the query's
+   dimension declarations are character-for-character the kernels' own, so a
+   regenerated model cannot leave the guard asking about an op it dropped.
 
 Python tests (pytest)
 ----------------------

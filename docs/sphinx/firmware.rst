@@ -51,42 +51,59 @@ The command model, like the wake model, runs on the generated inference path
 by default (:need:`REQ_FW_INFER_GENERATED`); the default build carries no
 interpreter at all. Measured on the CoreS3 in one session, ~100 s of
 recognition per path, medians over the ~5 s trace lines with the cold first
-one dropped: **step 46 -> 33 ms** and **model evaluation 41.7 -> 28.7 ms**
-(-31 %). The ~13 ms saved is almost exactly the ``rest`` column of the
+one dropped: **step 46 -> 31 ms** and **model evaluation 41.7 -> 27.3 ms**
+(-35 %). The ~14 ms saved is almost exactly the ``rest`` column of the
 interpreter's own trace (dispatch, tensor bookkeeping and reference-C glue):
 the esp-nn kernels are the same on both paths, so the generated code deleted
 the overhead rather than making the arithmetic faster. The spec's "at least
-2x" target is therefore **not** met at 1.45x — the remaining 28 ms is kernel
+2x" target is therefore **not** met at 1.53x — the remaining 27 ms is kernel
 time for this model's 49x10x32 activations, which is a model-size question,
 not a code-generation one.
 
 Where the arena lives is a Kconfig choice (``KWS_INFER_COMMAND_ARENA``), and
 the default is PSRAM. The generated arena is one static array, so unlike the
 interpreter's heap allocation its placement is settled at link time; putting
-it in internal ``.bss`` is measurably faster — **28.7 -> 27.0 ms**, and the
-step drops 33 -> 31 ms — but 51,248 B is more internal SRAM than this device
-has to give. Internal placement leaves 8,431 B free at recogniser start, and
-the record task's 8 KB stack (task stacks must be internal and cannot move to
+all 51,248 B of it in internal ``.bss`` was measurably faster than putting all
+of it in PSRAM — **28.7 -> 27.0 ms** — but that is more internal SRAM than
+this device has to give. What sits in internal RAM now is only the 19,888 B
+esp-nn scratch region both models share, and that alone accounts for nearly
+all of the difference: the PSRAM default measures **27.3 ms** for 4,336 B more
+internal RAM instead of 51,248 B. The kernels hit scratch on every row and the
+activations far less often, so it is the half worth the fast memory. Moving
+the whole arena internal leaves 8,431 B free at recogniser start, and the
+record task's 8 KB stack (task stacks must be internal and cannot move to
 PSRAM) then fails to be created:
 
 .. code-block:: text
 
    E (27435) record: record task (8192 B stack) not created: free internal 8035, largest block 7680
 
-With the arena in PSRAM the same figure is **59,679 B** and every task starts.
-So 1.7 ms buys back 51 KB of the scarcest memory on the board; internal is
-kept as the opt-in for measurement builds, where that 1.7 ms is the point. The
+With the arena in PSRAM the same figure is **55,239 B** and every task starts.
+So a fifth of a millisecond buys back 51 KB of the scarcest memory on the
+board; internal is kept as the opt-in for measurement builds. The
 interpreter's own arena never fit internal either (``command arena 65536 B
 does not fit internal RAM (free 47019, largest block 31744) — using PSRAM``),
 so the comparison above is PSRAM against PSRAM.
 
-The boot line reads ``inference: generated (esp-nn), 51248 B arena (static,
-PSRAM) + 0 B state, esp-nn scratch 19888 B queried / 19888 B reserved; TFLM
-not built in; free internal <n>`` — it names the placement that was actually
-linked, and the scratch figure is the larger of what the chip's own
-``esp_nn_get_depthwise_conv_scratch_size`` and ``esp_nn_get_conv_scratch_size``
-answer for this model's widest ops, checked against what the generator
-reserved. Building with ``CONFIG_KWS_INFER_PARITY_LOG=y`` runs both paths on
+The boot line reads ``inference: generated (esp-nn), 31360 B arena (static,
+PSRAM) + 0 B state + 19888 B shared scratch, esp-nn scratch 19888 B queried /
+19888 B reserved; TFLM not built in; free internal <n>`` — it names the
+placement that was actually linked, and the queried figure is what the chip's
+own ``esp_nn_get_*_scratch_size_esp32s3`` answer for **every** op of this model
+that takes scratch, asked by a query function the generator emits next to the
+kernels themselves (so it cannot describe a model that is no longer there) and
+checked against what the generator reserved.
+
+That scratch region is shared with the wake model, and deliberately: esp-nn's
+kernels reach their scratch through file-static globals, one per kernel family
+for the whole image, so two models with separate regions do not get one each —
+whichever set the pointer last owns it, and the other model then *writes* into
+it. One region sized for the widest op of either, and the two evaluations
+serialised on one mutex (``firmware/main/infer_lock.h``), is what makes that
+safe. The two only contend inside an assist window, and the wait is bounded by
+one command inference (~27 ms) — which the wake task absorbs, because it reads
+from an audio ring holding a second of history and catches up on the next
+iteration. Building with ``CONFIG_KWS_INFER_PARITY_LOG=y`` runs both paths on
 the same live features once per mode entry and logs
 ``parity: 0/23 output bytes differ``; that build keeps both interpreters and is
 tight enough that the record task does not start (it says so in the log), so
@@ -106,18 +123,20 @@ menu.
 The model itself runs on the generated inference path by default
 (:need:`REQ_FW_INFER_GENERATED`), and the default build carries no interpreter
 at all. Measured on the CoreS3 in one session, same build otherwise, two
-minutes of the peak trace per path: **wake step 1.89 -> 1.28 ms** (mean
-of the 2 s trace windows), within-window spread ±502 -> ±151 µs, and
-**free internal RAM after the wake model is set up 58,511 -> 81,371 B** —
-the generated path's 15,680 B arena and 4,200 B of ring state are ``.bss``,
-and the interpreter's 40,960 B tensor arena is never allocated. The boot line
-reads ``inference: generated (esp-nn), 15680 B arena + 4200 B state, esp-nn
-conv scratch 15552 B queried / 15552 B reserved; TFLM not built in; free
-internal <n>``: the queried figure is what the chip's own
+minutes of the peak trace per path: **wake step 1.89 -> 1.25 ms** (median of
+the per-window means the 2 s trace prints), within-window spread ±502 ->
+±97 µs, and **free internal RAM after the wake model is set up 58,511 ->
+77,291 B** — the generated path's 128 B arena, 4,200 B of ring state and its
+share of the 19,888 B shared esp-nn scratch are ``.bss``, and the
+interpreter's 40,960 B tensor arena is never allocated. The boot line
+reads ``inference: generated (esp-nn), 128 B arena + 4200 B state + 19888 B
+shared scratch, esp-nn scratch 15552 B queried / 15552 B reserved; TFLM not
+built in; free internal <n>``: the queried figure is what the chip's own
 ``esp_nn_get_conv_scratch_size_esp32s3`` answers for this model's widest
-convolution, checked against what the generator reserved — a larger answer
-makes the firmware refuse the generated path rather than let the kernels
-overrun the arena into the ring state.
+convolution, asked by a generated query function rather than by dimensions
+copied into this file by hand, and checked against what the generator
+reserved — a larger answer makes the firmware refuse the generated path
+rather than let the kernels overrun the shared scratch region.
 
 ``CONFIG_KWS_INFER_PARITY_LOG=y`` builds the interpreter back in as a
 reference (and re-allocates its arena): on entering the mode both paths run on

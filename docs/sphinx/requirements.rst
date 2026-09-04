@@ -357,25 +357,35 @@ Recogniser
    ``QuantizeMultiplier`` integer math, activation ranges with TFLM's own
    rounding, and ``LOGISTIC`` is a 256-entry table read out of the reference
    kernel itself. The generated footprint replaces, not supplements, the TFLM
-   arena in the default build. Wake: a 15,680 B transient arena (activations
-   plus esp-nn scratch, of which 15,552 B is the reserved scratch block) plus
-   4,200 B of persistent ring state in ``.bss``, against the 40,960 B arena the
-   interpreter allocates. Command: a 51,248 B transient arena (19,888 B of it
-   scratch) and no state at all, against the 65,536 B arena the interpreter
-   allocates. The generated arena is one static array, so its placement is a
+   arena in the default build. Wake: a 128 B transient arena plus 4,200 B of
+   persistent ring state in ``.bss``, against the 40,960 B arena the
+   interpreter allocates. Command: a 31,360 B transient arena and no state at
+   all, against the 65,536 B arena the interpreter allocates. Both then work in
+   one shared 19,888 B esp-nn scratch region, sized for the widest op of either
+   — esp-nn's kernels reach their scratch through file-static globals, one per
+   kernel family for the whole image, so a region per model would be handed to
+   the other model's kernels, which *write* into it. The two evaluations are
+   serialised on one mutex (``firmware/main/infer_lock.h``); they contend only
+   inside an assist window, and the wait is bounded by one command inference.
+   The generated arena is one static array, so its placement is a
    link-time choice (Kconfig ``KWS_INFER_COMMAND_ARENA``) rather than an
-   allocation: PSRAM by default, internal SRAM as a measurement opt-in worth
-   1.7 ms of the ~28.7 ms evaluation. PSRAM is the default because 51,248 B of
-   internal SRAM is more than the board has spare — claiming it leaves 8,431 B
-   free and the record task's stack, which must be internal, is then never
-   created (:need:`REQ_FW_ARENA_PLACEMENT`).
-   Neither reserve is taken on trust: at boot the firmware asks the chip's own
-   ``esp_nn_get_conv_scratch_size_esp32s3`` (wake) or
-   ``esp_nn_get_depthwise_conv_scratch_size_esp32s3`` (command) for that
-   model's widest op and refuses to run the generated path if the answer
-   exceeds ``WAKE_INFER_SCRATCH_BYTES`` / ``COMMAND_INFER_SCRATCH_BYTES`` from
-   the generated header, since the failure it guards against is a silent
-   overrun out of the arena.
+   allocation: PSRAM by default, internal SRAM as a measurement opt-in. The
+   scratch region stays internal either way, which is where nearly all of that
+   choice's ~1.7 ms lived: the default now measures ~27.3 ms for 4,336 B more
+   internal RAM instead of 51,248 B. PSRAM is the default for the arena because
+   51,248 B of internal SRAM is more than the board has spare — claiming it
+   leaves 8,431 B free and the record task's stack, which must be internal, is
+   then never created (:need:`REQ_FW_ARENA_PLACEMENT`).
+   Neither reserve is taken on trust: at boot the firmware calls
+   ``<model>_infer_scratch_query()``, generated beside the kernels from the
+   same dimensions, which asks the chip's own
+   ``esp_nn_get_*_scratch_size_esp32s3`` for every op of that model that takes
+   scratch, and refuses to run the generated path if the answer exceeds
+   ``WAKE_INFER_SCRATCH_BYTES`` / ``COMMAND_INFER_SCRATCH_BYTES`` from the
+   generated header. Generating the query rather than hand-copying the
+   dimensions is what stops a regenerated model leaving the guard asking about
+   an op that is no longer there, since the failure it guards against is a
+   silent overrun out of the shared scratch region.
 
 .. req:: TFLite Micro stays as a build-time fallback
    :id: REQ_FW_INFER_FALLBACK
@@ -393,11 +403,11 @@ Recogniser
    once per mode entry; that build is tight enough that the record task is not
    created (logged, not silent), so it verifies rather than ships. The
    interpreter is a fallback for a model the generator refuses, not a
-   configuration the device has room to run alongside the generated one.
-   ``CONFIG_KWS_INFER_PARITY_LOG`` (default off) brings it back as an
-   on-device reference and logs both paths' output for the same input once per
-   mode entry, on real device audio — a developer-verification switch, not a
-   shipping one. The gating semantics around the model are untouched either
+   configuration the device has room to run alongside the generated one. Both
+   configurations are built in CI — the ``firmware-build`` job runs
+   ``idf.py build`` a second time with ``CONFIG_KWS_INFER_GENERATED=n`` — so
+   the fallback cannot rot behind an edit that only compiles under the
+   default. The gating semantics around the model are untouched either
    way: threshold, consecutive-step count and refractory period
    (:need:`REQ_FW_WAKE_DETECT`) see the same probability byte.
 

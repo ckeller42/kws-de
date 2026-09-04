@@ -495,16 +495,25 @@ figures:
      - ``firmware/main/gen/model_data.h``
      - CONV_2D, then 3x (DEPTHWISE_CONV_2D, CONV_2D 1x1), MEAN,
        FULLY_CONNECTED, SOFTMAX — 10 ops
-     - 51,248 B arena (incl. 19,888 B esp-nn scratch), 0 B state; in PSRAM by
-       default (Kconfig ``KWS_INFER_COMMAND_ARENA``)
+     - 31,360 B arena, 0 B state, plus 19,888 B of the shared esp-nn scratch
+       region; arena in PSRAM by default (Kconfig
+       ``KWS_INFER_COMMAND_ARENA``), scratch always internal
 
    * - Wake
      - ``firmware/main/gen/wake_model_data.h``
      - the streaming stem CONV_2D, the depthwise/1x1 stack over ring buffers,
        FULLY_CONNECTED, LOGISTIC, QUANTIZE — 14 ops after the streaming
        rewrite
-     - 15,680 B arena (incl. 15,552 B esp-nn scratch), 4,200 B ring state;
-       always internal SRAM — small, and it runs every 30 ms
+     - 128 B arena, 4,200 B ring state (3,792 B of history plus one step's
+       408 B of new rows), 15,552 B of the shared scratch region; all internal
+       SRAM — small, and it runs every 30 ms
+
+The scratch region is one 19,888 B array for both models, not a block of each
+model's arena: esp-nn's kernels reach their scratch through file-static
+globals, one per kernel family for the whole image, so separate regions would
+be handed to the wrong model's kernels — and scratch is written, not just
+read. The firmware serialises the two evaluations
+(``firmware/main/infer_lock.h``); they only contend inside an assist window.
 
 Both are generated from the C array the firmware embeds, not from
 ``models/*.tflite``: a retrain rewrites the ``.tflite`` without touching the
