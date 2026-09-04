@@ -425,6 +425,38 @@ main users**, the same "user-customised, in-training" policy the command
 model follows (:need:`REQ_PIPE_EVAL_LABELS`), not tuned to work for an
 arbitrary voice.
 
+**Round 6d — TTS near-miss hard negatives, deployed (2026-09-04).** Round 6c matched
+round 5 on every real-audio gate and cut fire latency by roughly a second, but
+regressed on TTS near-misses (9/48 against round 5's 1-4/48), concentrated on the
+"hallo bus" / "der bus kommt gleich" family — a wrong pairing of the "hey"-ish onset
+and the "bus"-ish nucleus. Round 6d adds that family as Piper hard negatives on top of
+round 6c's weights, unchanged size and MACs (58,080 B / 24,736 MACs):
+
+.. list-table::
+   :header-rows: 1
+
+   * - Probe
+     - Round 5a (was deployed)
+     - Round 6d (deployed)
+   * - Held-out session fires (3) / in-training real fires (10)
+     - 3/3 / 10/10 @ 0.996
+     - 3/3 / 10/10 @ 0.996
+   * - Held-out / in-training real non-wake
+     - 0/9 (worst 0.758) / 0/5 (worst 0.406)
+     - 0/9 (worst 0.402) / 0/5 (worst 0.598)
+   * - TTS non-wake, seen / unseen voices
+     - 6/46 / 2/36
+     - **4/46** / 2/36
+   * - Fire latency, held-out (median)
+     - 1.13 s
+     - **0.14 s**
+
+Full acceptance table and TTS-quality-gate method: ``HEYBUS-R6D-REPORT.md`` in the
+training directory, and ``docs/paper-notes.md`` E22/E24. ``KWS_WAKE_MODEL_ID`` moved
+from ``hey_bus.tflite@dd9db24f 2026-09-03`` to ``hey_bus.tflite@5fcdaf63 2026-09-04``;
+the previous round-5 bytes are kept on disk as ``hey_bus.v5.tflite``. Architecture,
+arena, and scratch are unchanged (see below).
+
 How a new main user adds their voice
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -442,8 +474,9 @@ loop and ``scripts/data-loop.sh`` for running it in one command.
 Wake model anatomy
 ~~~~~~~~~~~~~~~~~~~~
 
-microWakeWord's streaming graph, read straight from ``hey_bus.tflite`` (the
-round-5 model measured above) via ``kws_de.model_graph`` -- one node per
+microWakeWord's streaming graph, read straight from ``hey_bus.tflite`` (round 6d as
+deployed, same architecture as every round back to round 4 -- weights differ, the
+graph below does not) via ``kws_de.model_graph`` -- one node per
 compute op, one "ring N x C" node per resource-variable state
 (:need:`REQ_FW_WAKE_FRONTEND_PARITY`; those rings are what let a 3-frame,
 30 ms Invoke see 1.85 s of context, see below).
@@ -459,7 +492,7 @@ compute op, one "ring N x C" node per resource-variable state
 
       $ export KWS_DATA_ROOT=/path/to/data-root
       $ uv run --no-sync kws-model-graph "$KWS_DATA_ROOT/models/hey_bus.tflite" \
-          --out docs/sphinx/_generated/hey_bus.dot --title "Hey Bus wake model (round 5)"
+          --out docs/sphinx/_generated/hey_bus.dot --title "Hey Bus wake model (round 6d)"
 
 .. list-table:: Layer table (compute and state ops of the 49 in the graph)
    :header-rows: 1
