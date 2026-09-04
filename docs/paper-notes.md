@@ -1900,6 +1900,74 @@ peaks below the *capture* threshold is still invisible, so the near-miss count i
 bound on the misses, never the miss rate — there is no threshold at which a
 self-triggering recorder can observe what failed to trigger it.
 
+### E22 — near-miss hard negatives fix the round-6c regression (wake, 2026-09-04, host-only)
+
+Round 6c had removed ~1 s of fire latency and matched the installed round 5a on every
+real-audio gate, and lost exactly one row: TTS near-misses, 9/48 against 1–4/48. That row is a
+*family* — the "hey"-ish onset and the "bus"-ish nucleus in the wrong pairing ("hallo bus",
+"der bus kommt gleich", "hey du") — not scattered speech, so round 6d generates the family as
+hard negatives (130 Piper clips: the phrase halves alone, in near pairings, and inside everyday
+sentences carrying the same syllables, four voices × two rates) in its own feature dir, added
+*on top of* round 6c's weights rather than paid for out of them. Nothing else changed.
+
+**It works, and it generalises.** Every model scored on one fixed gate set, written to disk once
+and reused, because Piper is not deterministic and round 6's gate re-synthesised on every run —
+round 5a scored 1/48 and 3/48 on what was meant to be one measurement.
+
+| gate | round 5a (installed) | round 6c | **round 6d** |
+|---|---|---|---|
+| held-out session 0849 fires (3) | 3/3 @ 0.996 | 3/3 @ 0.996 | **3/3 @ 0.996** |
+| in-training real fires (10 guided) | 10/10 @ 0.996 | 10/10 @ 0.996 | **10/10 @ 0.996** |
+| spk05 set (5) | 5/5 @ 0.996 | 5/5 @ 0.996 | **5/5 @ 0.996** |
+| held-out real non-wake (9) | 0/9, worst 0.758 | 0/9, worst 0.309 | **0/9, worst 0.402** |
+| in-training real non-wake (5) | 0/5, worst 0.406 | 0/5, worst 0.254 | **0/5, worst 0.598** |
+| room noise, in-training (40) / held out (9) | 0/40, 0/9 | 0/40, 0/9 | **0/40, 0/9** |
+| TTS non-wake, **seen** voices (46 fixed clips) | 6/46 | **18/46** | **4/46** |
+| TTS non-wake, **unseen** voices (36 fixed clips) | 2/36 | **11/36** | **2/36**, worst 0.938 |
+| TTS unseen-voice "hey bus" (2) | 1/2 | 1/2 | **1/2** |
+| fire latency, held-out / guided (median) | 1.13 / 0.94 s | 0.08 / −0.01 s | **0.14 / 0.23 s** |
+| first-hump peak (median) | 0.316 / 0.430 | 0.996 / 0.996 | **0.996 / 0.996** |
+| size / MACs | 58,080 B / 24,736 | 58,080 B / 24,736 | **58,080 B / 24,736** |
+
+The negatives were generated in four voices and the improvement shows up in the other three,
+which is the difference between learning the family and memorising the gate — so the gate set is
+split into a seen half and an unseen half, and a round that only improves the seen half fails.
+Round 6d's entire seen-voice residue is `de_DE-mls-medium`, the one voice whose *short-phrase*
+output the clip quality gate flags as unintelligible (1 of 7 gate clips transcribes back, against
+4–5 of 7 elsewhere) while it passes a long calibration sentence perfectly. A synthetic gate can
+be limited by the synthesiser rather than by the model, and the way to see that is to transcribe
+the gate clips.
+
+**Quality-gating synthesised audio is worth doing and worth doing at two levels.** The prompt was
+a device test that played English `say` voices believed to be German. A per-voice calibration
+sentence (Whisper must return `de` and the sentence verbatim) catches that decisively: all seven
+cached `de_DE-*` Piper voices pass at coverage 1.00 and both English `say` control voices are
+rejected at `lang=en`, rendering an English sentence rather than mispronounced German. The
+per-clip form of the same check, though, cannot be enforced on the material this round needs: for
+**correct** German Piper output of a 0.4 s "hey du" or "hallo bus", Whisper returns `fr`, `da`,
+`ja` or `zh`, and it hears "Lichtkirche" for a correct "Licht Küche" in every voice. Enforced
+below ~5 tokens it deletes precisely the near-misses. So: enforce per voice always, enforce per
+clip where the clip is long enough to read, and log the rest.
+
+**The internal metric disagrees for the third round running, and this time it disagrees the other
+way.** Round 6d cuts microWakeWord's own false-reject rate by twelve points at the 0.85 operating
+point (0.740 vs round 5a's 0.868) and pays for that willingness with 2.06 false accepts per hour
+on its English ambient set, where round 5a has 0.000. Rounds 6 and 6b showed that metric cannot
+see German near-misses; this round shows it *can* see something the German gates do not, namely
+willingness on hours of continuous speech. Our own real-ambient evidence is 2.9 minutes of the
+device's room tone (49 takes, 0 fires, worst peak 0.273) — clean, but not five hours. It neither
+vetoes round 6d nor clears it; it names what a device soak has to answer, and E21's loose capture
+gate is exactly the instrument for that soak.
+
+ETA ledger: predicted 14.9 min (range 13.3–16.7, 10 runs), actual **13.37 min** (−10.3 %, inside
+the range). Full report in the training directory as `HEYBUS-R6D-REPORT.md`.
+
+**Recommendation: deploy `hey_bus_r6d.tflite` — after a few hours of field-capture soak on the
+device, not instead of one.** It is the best candidate on every measurement taken against real
+audio and German speech, at identical size and MACs, and it keeps round 6c's ~0.8 s latency win.
+Nothing was promoted: `hey_bus.tflite` and `firmware/main/gen/` are untouched, no firmware was
+built or flashed, and no audio was played to any device or speaker in this round.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
