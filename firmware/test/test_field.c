@@ -9,6 +9,16 @@ int main(void)
     uint32_t start = 0, len = 0;
     bool cut = true;
 
+    /* The pre-roll is a measured value, not a free parameter: the wake model
+       fires ~0.2-0.3 s past the end of a ~0.7 s "Hey Bus", so a shorter one
+       starts inside the phrase and cuts its onset. Everything below is written
+       in the macros and would pass at any value, so pin it here — and note that
+       kws_de/qc.py's FIELD_PREROLL_MS carries the same number for the
+       truncation test and has to move with it. */
+    assert(FIELD_PREROLL_MS == 1500);
+    /* The ring still has room for the wider take (the cap is on the total). */
+    assert(FIELD_TAKE_SAMPLES <= FIELD_MAX_TAKE_SAMPLES);
+
     /* Off by default: a wake fire arms nothing and no span is offered. Capture
        is opt-in — this is the assertion that says so. */
     field_reset(&f);
@@ -51,7 +61,7 @@ int main(void)
     field_disarm(&f);
     assert(!field_take_span(&f, ASSIST_WINDOW_MS, &start, &len, &cut));
 
-    /* A fire in the first second after boot shortens the take instead of
+    /* A fire less than a pre-roll after boot shortens the take instead of
        reading in front of the start of the ring. */
     field_reset(&f);
     field_set_enabled(&f, true);

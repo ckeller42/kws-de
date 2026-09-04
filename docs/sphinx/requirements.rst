@@ -734,7 +734,7 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    :status: implemented
 
    In ``UI_MODE_ASSIST``, with capture switched **on**, every wake fire arms
-   one *field take*: the 1.0 s in front of the arming fire
+   one *field take*: the 1.5 s in front of the arming fire
    (``FIELD_PREROLL_MS``) plus the assist window that fire opened, copied out
    of the audio ring and saved as
    ``storage_root()/field/<spkNN>/<boot>-<ms>.wav`` (16 kHz mono int16) with one
@@ -809,7 +809,7 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    to the guided nine) is transcribed whole by the same Whisper model, prompt and
    padding as every other take. If the first one or two word spans match the
    wake regex ``(hey|hej|he|hei)(bus|buss|bos|boss)`` — one span, because
-   Whisper sometimes writes "HeyBus", or two — and end inside the first 1.3 s,
+   Whisper sometimes writes "HeyBus", or two — and end inside the first 1.8 s,
    ``[0, end of "bus" + 0.15 s]`` is cut as a ``wake`` clip into
    ``approved/wake/<spkNN>/``. The remaining words are normalised, filtered to
    the command vocabulary and run through ``kws_de.grammar.parse`` — the same

@@ -17,8 +17,13 @@
 #include "audio.h"
 #include "gen/features_config.h"
 
-/** Audio kept in front of the wake fire, so the take contains the wake phrase. */
-#define FIELD_PREROLL_MS 1000
+/** Audio kept in front of the wake fire, so the take contains the wake phrase.
+ *  1.5 s, not 1.0 s: the wake model fires ~0.2-0.3 s *after* the end of a
+ *  ~0.7 s "Hey Bus", so 1.0 s back from the fire already lands inside the
+ *  phrase and cuts its onset — only 3 of 11 real takes still transcribed with
+ *  the wake phrase intact. The cap below is on the whole take, so widening the
+ *  pre-roll costs the tail of a long chain of fires, nothing else. */
+#define FIELD_PREROLL_MS 1500
 #define FIELD_PREROLL_SAMPLES (KWS_SAMPLE_RATE * FIELD_PREROLL_MS / 1000)
 #define FIELD_WINDOW_SAMPLES (KWS_SAMPLE_RATE * ASSIST_WINDOW_MS / 1000)
 #define FIELD_TAKE_SAMPLES (FIELD_PREROLL_SAMPLES + FIELD_WINDOW_SAMPLES)

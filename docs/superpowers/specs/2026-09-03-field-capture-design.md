@@ -29,13 +29,13 @@ Non-goals: capturing missed wakes (no trigger exists), any cloud component, mode
 - **Capture = copy after the window, never during it.** The wake task already knows the fire
   position in the audio ring (`audio_write_pos()` at the fire). The `assist_gate` keeps
   `fire_pos`. When the window closes (2.5 s after the fire) and the toggle is on, `wake.cc`
-  posts `REC_CMD_FIELD_TAKE {start = fire_pos − 1.0 s, len = 3.5 s, prob, device_intent,
+  posts `REC_CMD_FIELD_TAKE {start = fire_pos − 1.5 s, len = 4.0 s, prob, device_intent,
   device_words}` to the recorder. The recorder copies that span out of the audio ring into its
   PSRAM take buffer and saves it with the existing `save_take()` path. No file I/O happens while
   the recogniser is active (measured in wave 2: a FAT write costs 100–300 ms on flash).
-- **Audio ring length.** The ring must hold ≥ 1.0 s + 2.5 s + the recorder's worst-case latency
+- **Audio ring length.** The ring must hold ≥ 1.5 s + 2.5 s + the recorder's worst-case latency
   to start the copy (a full recogniser step plus scheduling, < 0.2 s). `AUDIO_RING_SAMPLES` is
-  checked against 4.0 s at compile time (`static_assert`) and raised if needed; the assist
+  checked against 4.2 s at compile time (`static_assert`) and raised if needed; the assist
   window length and the pre-roll are single constants next to it.
 - **Layout and metadata.** `storage_root()/field/spkNN/<boot-ms>.wav` (16 kHz mono int16, like
   every take; speaker id = the current NVS id, no bump per interaction, so one boot of one user

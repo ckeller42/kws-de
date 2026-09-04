@@ -1254,7 +1254,7 @@ enforces it, but a deploy should either raise the declared budget or note the ov
 ### E17 — field capture: real interactions as training data (2026-09-04, measured on the CoreS3)
 
 Assistent mode now optionally keeps what it hears. With the "Aufnahme" switch on,
-every wake fire arms one *field take* — the second before the fire plus the command
+every wake fire arms one *field take* — the pre-roll before the fire plus the command
 window that fire opened — which the record task copies out of the always-on audio
 ring and writes **after** the window has closed, with the recogniser already switched
 off. That ordering is the whole design: a FAT write on this device costs 100–300 ms,
@@ -1306,8 +1306,33 @@ inside a window read **42 ms**, and toggling the switch off and on again *while 
 window was open* produced no outlier at all — the headline numbers above are unchanged,
 which is the point: the fix removed a hazard the sampling was too coarse to have caught.
 
+Then the first real pull rejected **all 60 takes as clipped**, peak −0.0/−0.1 dBFS, and
+the ring copy was the obvious suspect — wrongly. The block of full-scale samples in
+every take measures 996.7–1000.0 Hz and 2,416–2,455 samples long; `beep.c` plays 1 kHz
+for 150 ms (2,400 samples). It is the device's own wake-confirmation tone, played at
+the fire — which is the instant a take is built around — coming back into the ring at
+roughly full scale, because the speaker sits centimetres from the microphone on the
+same shared I2S codec. It landed 13.9–63.7 ms past the pre-roll boundary in every take
+(the jitter is the LVGL repaint between the two calls), takes with two fires carry two
+blocks, and with that region excluded the takes peak at 181–700 counts, below −45 dBFS.
+Nothing was wrong with the copy at all: the field path faithfully recorded the
+recorder. The tone is now muted while capture is armed, rather than edited out of the
+WAV afterwards, so the audio and the take's own `device_words` keep describing the same
+sound. Three takes on the fixed build peak at **137–434 counts (−47.6…−37.6 dBFS)** with
+zero samples above 2,000, against 32,768 and 0.0 dBFS before. The lesson is the cheap
+one: a self-recording device records itself, and "the copy must be corrupt" is a much
+more attractive hypothesis than "we are hearing ourselves".
+
+The pre-roll is now **1.5 s, not the 1.0 s** the measurements above were taken with. The
+wake model fires ~0.2–0.3 s *after* the end of a ~0.7 s "Hey Bus", so a second of
+look-back starts inside the phrase: only 3 of 11 real takes still transcribed with the
+wake phrase intact. The ring cap is on the whole take, so the wider pre-roll costs
+nothing but the tail of a long chain of fires. The host-side split window moved with it
+(`WAKE_MAX_S` 1.3 → 1.8 s): it tests when the phrase *ends*, so it is a function of the
+pre-roll and silently stops finding the phrase if the two drift apart.
+
 The label never comes from the device. On the workstation the take is transcribed by
-the same Whisper model as every guided take; a "Hey Bus" in the first 1.3 s is cut off
+the same Whisper model as every guided take; a "Hey Bus" in the first 1.8 s is cut off
 as a wake positive, and the remaining words are run through the *same*
 `kws_de.grammar.parse` the firmware's vocabulary feeds. A valid intent becomes the
 phrase label, and the take joins training exactly like a guided sentence take (phrase

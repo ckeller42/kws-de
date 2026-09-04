@@ -52,7 +52,7 @@ stays open. Back path: **Menu** -> menu.
 An **"Aufnahme"** switch on this screen turns *field capture* on
 (:need:`REQ_FW_FIELD_CAPTURE`). It is off until switched on once, is
 remembered across reboots, and while on the screen carries a small red
-"REC" badge. With it on, every interaction — the second before the arming
+"REC" badge. With it on, every interaction — the 1.5 s before the arming
 wake fire plus the window it opened — is saved to
 ``storage_root()/field/<spkNN>/`` together with what the device itself
 recognised, *after* the window closes: the recogniser is already off when

@@ -161,7 +161,7 @@ content gate approves anything that transcribed to something, and its
 duration cap is the firmware's ring budget (9800 ms) rather than a
 sentence's 6000 ms — a window extends on every fire inside it, so a
 legitimately long take is not an anomaly. The transcript is then split: a
-"Hey Bus" ending in the first 1.3 s becomes a ``wake`` clip, and the rest is
+"Hey Bus" ending in the first 1.8 s becomes a ``wake`` clip, and the rest is
 run through the *same* ``kws_de.grammar.parse`` the device's vocabulary
 feeds.
 

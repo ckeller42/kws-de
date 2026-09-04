@@ -217,9 +217,9 @@ def test_field_wake_split_ignores_a_late_or_absent_wake_phrase():
     late = {
         "text": "Hey Bus an",
         "words": [
-            {"word": "Hey", "start": 1.20, "end": 1.45},
-            {"word": "Bus", "start": 1.46, "end": 1.80},
-            {"word": "an", "start": 1.90, "end": 2.10},
+            {"word": "Hey", "start": 1.70, "end": 1.95},
+            {"word": "Bus", "start": 1.96, "end": 2.30},
+            {"word": "an", "start": 2.40, "end": 2.60},
         ],
     }
     assert qc.field_wake_split(late) == (None, ["hey", "bus", "an"])
@@ -524,15 +524,15 @@ def _field_session(
     device_words: str = "Licht:0.93|an:0.88",
     window_ms: int = 2500,
 ) -> Path:
-    # 3500 ms of audio = FIELD_PREROLL_MS (1000) + a 2500 ms window, i.e. the
+    # 4000 ms of audio = FIELD_PREROLL_MS (1500) + a 2500 ms window, i.e. the
     # whole window fitted the ring: not truncated. A larger window_ms with the
     # same wav is what a ring-truncated take looks like on the host.
     inc = tmp_path / "incoming" / "f1"
-    _wav(inc / "field" / "spk05" / "1-123456.wav", _tone(ms=3500))
+    _wav(inc / "field" / "spk05" / "1-123456.wav", _tone(ms=4000))
     (inc / "sessions.csv").write_text(
         "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,"
         "fire_ms,wake_prob,device_intent,device_words,window_ms\n"
-        "spk05,t,,field/spk05/1-123456.wav,3500,-10,field,,123456,123456,0.910,"
+        "spk05,t,,field/spk05/1-123456.wav,4000,-10,field,,123456,123456,0.910,"
         f"{device_intent},{device_words},{window_ms}\n"
     )
     return inc
@@ -607,20 +607,20 @@ def test_run_qc_field_agreement_rate_counts_only_takes_the_device_answered(tmp_p
     # one compared take that agrees + one truncated take with no device answer:
     # the rate is 1.000 over the COMPARED takes, not 0.500 over the parsable ones.
     inc = tmp_path / "incoming" / "f1"
-    _wav(inc / "field" / "spk05" / "1-123456.wav", _tone(ms=3500))
-    _wav(inc / "field" / "spk05" / "1-123457.wav", _tone(ms=3500))
+    _wav(inc / "field" / "spk05" / "1-123456.wav", _tone(ms=4000))
+    _wav(inc / "field" / "spk05" / "1-123457.wav", _tone(ms=4000))
     (inc / "sessions.csv").write_text(
         "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,"
         "fire_ms,wake_prob,device_intent,device_words,window_ms\n"
-        "spk05,t,,field/spk05/1-123456.wav,3500,-10,field,,123456,123456,0.910,"
+        "spk05,t,,field/spk05/1-123456.wav,4000,-10,field,,123456,123456,0.910,"
         "Licht Küche an,Licht:0.93|an:0.88,2500\n"
-        "spk05,t,,field/spk05/1-123457.wav,3500,-10,field,,123457,123457,0.910,,,9000\n"
+        "spk05,t,,field/spk05/1-123457.wav,4000,-10,field,,123457,123457,0.910,,,9000\n"
     )
     qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
     counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
     assert counts["field_takes"] == 2 and counts["field_parsable"] == 2
     assert counts["field_agree"] == 1
-    # the second take held 3500 ms of a 1000 + 9000 ms span: the ring cut it, and
+    # the second take held 4000 ms of a 1500 + 9000 ms span: the ring cut it, and
     # THAT is why it carries no device answer. Readable on the host at last.
     assert counts["field_truncated"] == 1
     report = (qcd / "report.md").read_text()
@@ -655,8 +655,8 @@ def test_run_qc_truncated_field_take_has_no_device_answer_to_compare(tmp_path):
     row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
     assert row["verdict"] == "approve"
     assert row["device_intent"] == "" and row["agrees"] == ""
-    # and the reason is now readable on the host: 3500 ms of audio for a
-    # 1000 + 9000 ms span means the ring cut it, not that nothing was heard.
+    # and the reason is now readable on the host: 4000 ms of audio for a
+    # 1500 + 9000 ms span means the ring cut it, not that nothing was heard.
     assert row["truncated"] == "1" and counts["field_truncated"] == 1
     idx = list(csv.DictReader((appr / "phrases" / "index.csv").open()))
     assert idx[0]["prompt"] == "Licht Küche an"

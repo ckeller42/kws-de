@@ -322,7 +322,7 @@ Run via ``uv run pytest tests/`` (CI's ``test`` job in ``ci.yml``).
    ``tests/test_qc.py``: ``field_wake_split`` cuts at the end of "Bus"
    + 0.15 s and returns the command tokens, accepts a single glued ``HeyBus``
    span as well as the two-span spelling, and ignores a wake phrase that lands
-   after 1.3 s or is absent; ``field_intent`` drops filler, un-welds a token
+   after 1.8 s or is absent; ``field_intent`` drops filler, un-welds a token
    that decomposes completely into vocabulary words ("lichtküche") while
    leaving ordinary speech ("dank", "anzug", "banane") whole, and returns the
    same ``Intent`` the device's grammar would; the field audio cap is the
