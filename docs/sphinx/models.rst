@@ -69,7 +69,12 @@ one of exactly two labels, never mixed — ``held-out`` or
 The last row is the model on the device — ``KWS_MODEL_ID
 "command_v3_w48_qat.tflite@8fa81d08 2026-09-04"``, 25,832 B: the same
 DS-CNN with its channel count raised from 32 to 48, so 11,111 parameters
-and 4,234,704 MACs against 5,879 and 2,070,496.
+and 4,234,704 MACs against 5,879 and 2,070,496. On the CoreS3 that costs a
+**46–47 ms recognise step** against a 100 ms budget (from 31 ms), with the
+command evaluation at 42.2 ms and 45,431 B of internal RAM still free when
+the recogniser starts. Invoke time rose 1.55x on 2.05x the MACs — wider is
+cheaper per MAC here, because 48 channels fill esp-nn's SIMD lanes and the
+fixed per-op costs do not grow with the arithmetic.
 
 The row above it is the model it replaced, and that one is the only row in
 the table that went *down* on both real-voice columns. It shipped anyway,
@@ -90,7 +95,7 @@ real-voice metric bar phrase intent *and* asks for 59,632 B of shared
 internal scratch against width 48's 29,824 B, because esp-nn's depthwise
 kernel drops to a slower, larger-scratch path for channel counts that are
 not a multiple of 16. Full side-by-side tables: ``docs/paper-notes.md``
-§3 — E15 (the session-2 deploy), E16 (the width sweep), E17 (this deploy).
+§3 — E15 (the session-2 deploy), E16 (the width sweep), E18 (this deploy).
 
 The v2 row is what the recorder pipeline exists to fix: a model reporting
 ~0.9 on its own synthetic/MSWC split recognised roughly a quarter of what

@@ -1399,11 +1399,12 @@ field take is self-selected: it exists only because the wake word fired, so it m
 command accuracy *given* a successful wake, and says nothing about missed wakes, for
 which no trigger exists.
 
-### E18 — deploying the width-48 command model (2026-09-04, host-side; device measurement pending)
+### E18 — deploying the width-48 command model (2026-09-04, measured on the CoreS3)
 
 E16 recommended width 48 and left one thing open: the runtime was a MAC-scaled estimate, not
-a measurement. This entry does the deploy and every host-side check; the device numbers are
-marked **pending** below and filled in from the CoreS3 in the same rig as E12–E15.
+a measurement. This entry does the deploy, every host-side check, and the measurement — which
+turns out to be the interesting part, because the estimate was wrong by 25 % in the
+comfortable direction.
 
 The deploy is E15's procedure with the width flag added. `--width` suffixes the *output*
 artefacts only — the QAT SavedModel to load still has to be named in full, so `--model` and
@@ -1492,34 +1493,81 @@ not one byte more. The 15,680 B the arena gained landed in PSRAM, where `idf.py 
 it under "Flash Data `.bss`" at 47,040 B — which is also the cheapest possible confirmation
 that `KWS_INFER_COMMAND_ARENA_PSRAM` is still in force and the arena did not quietly fall
 back to internal SRAM. Free internal at recogniser start should therefore land near
-55,103 - 9,936 = **~45,167 B** (E15 measured 55,103 B), comfortably above E14's 23,879 B
-"every task created" mark and far from E13's 8,431 B, where the record task's 8 KB stack
-failed to spawn. **Device: pending** — the boot line reports the real figure.
+55,103 - 9,936 = ~45,167 B (E15 measured 55,103 B). **The device reports 45,431 B** — 264 B
+above the prediction, comfortably clear of E14's 23,879 B "every task created" mark and far
+from E13's 8,431 B, where the record task's 8 KB stack failed to spawn. Predicting a
+device RAM figure from a host link map to within 0.6 % is worth recording as a method: the
+arena and the scratch are both static arrays, so the whole placement question is answerable
+before flashing, and only the residual heap use is not.
 
-The boot guard is unchanged in shape and now carries the new number: `command_infer.c`
-emits `command_infer_scratch_query()` from the same dimensions it emits the kernels from,
-and `recognise.cc` refuses the generated path if the chip's own
+The boot guard is unchanged in shape and answers the new number. `command_infer.c` emits
+`command_infer_scratch_query()` from the same dimensions it emits the kernels from, and
+`recognise.cc` refuses the generated path if the chip's own
 `esp_nn_get_*_scratch_size_esp32s3` answers more than `COMMAND_INFER_SCRATCH_BYTES`. Width 48
-keeps the fast `channels % 16 == 0` depthwise path (E16), so the expected answer is
-29,824 B queried against 29,824 B reserved.
+keeps the fast `channels % 16 == 0` depthwise path (E16), and the two boot lines confirm the
+Python port and the real esp-nn agree on the chip:
 
-**Expected runtime, and what will settle it.** MAC-scaling E15's measured 27.3 ms command
-evaluation by 2.05x gives ~55.8 ms, and the recognise step ~59 ms against a 100 ms budget.
-Real-time holds with room, but CPU load roughly doubles, and in assist mode the recogniser
-shares a core with the wake task whose mutex wait is bounded by one command inference. That
-is the number this entry exists to replace:
+```text
+wake: inference: generated (esp-nn), 128 B arena + 4200 B state + 29824 B shared scratch,
+  esp-nn scratch 15552 B queried / 15552 B reserved; TFLM not built in; free internal 67483
+recognise: inference: generated (esp-nn), 47040 B arena (static, PSRAM) + 0 B state +
+  29824 B shared scratch, esp-nn scratch 29824 B queried / 29824 B reserved; TFLM not built
+  in; free internal 45431
+```
 
-| | E15 (w32, measured) | E18 (w48) |
+**Runtime: the MAC-scaled estimate was 25 % pessimistic.** MAC-scaling E15's measured
+27.3 ms command evaluation by the 2.05x MAC ratio predicted ~55.8 ms and a ~59 ms recognise
+step. The device measures **42.2 ms and a 46–47 ms step**:
+
+| | E15 (w32, measured) | E18 (w48, measured) |
 |---|---|---|
-| recognise step, arena in PSRAM | 31 ms | ~59 ms est. — **device: pending** |
-| command evaluation | 27,108–27,451 µs | ~55,800 µs est. — **device: pending** |
-| wake step | 1,245–1,287 µs | unchanged expected — **device: pending** |
-| free internal, recogniser start | 55,103 B | ~45,167 B est. — **device: pending** |
-| `selftest int8 out:` | `-124,-128,-112,…` | **device: pending** (must differ) |
+| recognise step, arena in PSRAM | 31 ms | **46–47 ms** (47/47/47/47/46/46/46 over seven traces) |
+| command evaluation | 27,108–27,451 µs | **42,175–42,425 µs** |
+| front-end, per step | — | 472–485 µs over 7–8 new frames |
+| wake step (assist mode) | 1,245–1,287 µs | **1,226–1,276 µs**, ±41–149 µs |
+| free internal, recogniser start | 55,103 B | **45,431 B** |
+| duty, continuous `mode recognise` | 1000/1000 wall, 239 ms/s | **1000/1000 wall, 320 ms/s** |
+| app image | 1,002,560 B | 1,008,688 B |
+| recogniser task stack free | — | 3,896 B |
 
-If it measures badly the fallback is staying at w32 — **not** stepping down to w40, which
-E16 showed asks for 59,632 B of shared internal scratch, thirty kilobytes more than the
-larger model, because 40 channels miss esp-nn's 16-alignment fast path.
+Invoke time goes up **1.55x on 2.05x the MACs**, so the wider model is markedly cheaper per
+MAC than the narrower one. Two things plausibly explain it and this measurement does not
+separate them: 48 channels fill esp-nn's SIMD lanes where 32 leave some idle, and the
+per-op fixed costs — the scratch pointer set-up, the requantisation loop preamble, the
+ten-op dispatch — are constant while the arithmetic grows. It is the same lesson as E16's
+alignment cliff seen from the other side: on this kernel library the channel count decides
+which code path runs, and MACs are a poor predictor across paths. **MAC-scaling is a fine
+way to decide whether to bother measuring, and a bad number to put in a table.**
+
+The practical margin is what matters. The step budget is 100 ms and the step is 46–47 ms, so
+the recogniser is at 47 % of real-time against 31 % before — CPU load up by half, not
+doubled as feared. In continuous recognise the duty logger reads 320 ms of inference per wall
+second against E15's 239 ms. The wake step is unchanged at 1,226–1,276 µs against E15's
+1,245–1,287 µs, which is the confirmation worth having: the shared scratch region grew by
+9,936 B for the command model's sake and the wake model, which shares it, pays nothing for
+that.
+
+**Verdict: deployed.** Step 46–47 ms against a ~65 ms acceptance bar, free internal 45,431 B
+against a ~40 KB bar. Had it measured badly the fallback was staying at w32 — **not** stepping
+down to w40, which E16 showed asks for 59,632 B of shared internal scratch, thirty kilobytes
+more than the larger model, because 40 channels miss esp-nn's 16-alignment fast path.
+
+**The selftest line, and an unplanned confidence measurement.** `selftest int8 out:` is the
+golden MFCC vector pushed through the deployed weights, so it is the one line that *must*
+change or the flash did not take:
+
+```text
+E15 (w32)  -124,-128,-112,-128,-128,-128,-112,-125,-127,-119,-37,-107,-127,-128,-90,-112,-127,-128,-128,-128,-128,-90,-125,
+E18 (w48)  -124,-128,-127,-127,-128,-126,-122,-128,-127,-89,49,-127,-127,-128,-124,-126,-127,-128,-127,-128,-127,-116,-125,
+```
+
+Both models put the peak at index 10 (`auf`), which is the right answer, but the margin is
+not comparable. Dequantised with the shared output scale (3.90625e-03, zero point -128) the
+winning posterior goes **0.355 -> 0.691**, and every runner-up flattens toward -128: w32's
+second and third places sat at -37/-90/-90, w48's at 49 then -89 and -116. On this one
+vector the wider model is roughly twice as confident and much better separated, which is a
+mechanism for the real-voice gains in E16's table rather than a restatement of them — the
+detector thresholds and `min_consecutive` gate on exactly this margin.
 
 **Host checks, all clean.** `kws-fwgen --check firmware/main/gen` and both `kws-codegen
 --check` runs (command and wake) exit 0 with no drift warning. `make -C firmware/test`:
@@ -1558,9 +1606,23 @@ row reads 0.538 / 0.605 and not the 0.615 / 0.737 of the table above it — and 
 that quote the arena and scratch sizes as current fact (`models.rst`, `firmware.rst`,
 `requirements.rst`, `tests.rst`, plus the `KWS_INFER_COMMAND_ARENA` Kconfig help) now carry
 47,040 / 29,824. Where a number was a *device measurement* at width 32 — the 27.3 -> 27.0 ms
-placement delta, 55,239 B versus 23,879 B free — it is left alone and labelled as measured at
-width 32, because restamping a measurement with an estimate is exactly the mistake E15
-recorded.
+arena-placement delta, 55,239 B versus 23,879 B free — it is left alone and labelled as
+measured at width 32. Those two are still w32-only figures even now: this session measured
+the PSRAM configuration, which is the shipped default, and never rebuilt with the arena
+internal, so there is no w48 number for that comparison and inventing one from the w48 step
+time would repeat E15's mistake in a new place.
+
+**Two rig notes, neither a firmware finding.** The assist-mode duty line reads `recogniser
+active 0/1000 of wall, inference 0 ms per wall second` across the whole 45 s capture, because
+no wake fire happened — the session was driven over SSH with nobody at the device to say "Hey
+Bus", and the wake peaks stayed between 0.000 and 0.242 against the detector threshold. So
+the *loaded* assist figure is not measured here. Scaling E15's measured window (250/1000 of
+wall, 70 ms of inference per wall second at a 27.3 ms evaluation) by the new 42.2 ms gives
+~108 ms per wall second, which is an estimate and is flagged as one. What the capture does
+establish is the thing that could have gone wrong and did not: the wake model's own step is
+unchanged while it shares a scratch region that grew by 9,936 B. And the microSD failed its
+mount probe again (`sdmmc_card_init failed (0x107)`, falling back to the flash partition) —
+the same defective card as E12's.
 
 ## Open questions
 

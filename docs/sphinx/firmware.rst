@@ -103,9 +103,11 @@ below), so the choice covers only the activations — 47,040 B at the deployed
 width 48. Measured at width 32 (31,360 B of activations) it was worth
 **27.3 -> 27.0 ms**: the kernels hit scratch on every output row and the
 activations far less often, so the part that was worth the fast memory is
-already there. The device measured 55,239 B free at recogniser start with the
-arena in PSRAM and 23,879 B with it internal, and every ``app_main`` task
-started either way.
+already there. That measurement has not been repeated at width 48 — the
+internal-arena build was not made — so it stays a width-32 figure. At width 32
+the device measured 55,239 B free at recogniser start with the arena in PSRAM
+and 23,879 B with it internal, and every ``app_main`` task started either way;
+at the deployed width 48, with the arena in PSRAM, it measures **45,431 B**.
 
 Earlier — when the arena still carried the scratch and the choice moved all
 51,248 B — internal placement was worth 28.7 -> 27.0 ms and left only 8,431 B,
