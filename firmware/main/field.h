@@ -17,13 +17,30 @@
 #include "audio.h"
 #include "gen/features_config.h"
 
-/** Audio kept in front of the wake fire, so the take contains the wake phrase.
- *  1.5 s, not 1.0 s: the wake model fires ~0.2-0.3 s *after* the end of a
- *  ~0.7 s "Hey Bus", so 1.0 s back from the fire already lands inside the
- *  phrase and cuts its onset — only 3 of 11 real takes still transcribed with
- *  the wake phrase intact. The cap below is on the whole take, so widening the
- *  pre-roll costs the tail of a long chain of fires, nothing else. */
-#define FIELD_PREROLL_MS 1500
+/** How long after the END of the phrase the wake model's fire lands.
+ *  Measured, not assumed (E17): the 13 approved "Hey Bus" clips, replayed
+ *  through the firmware feature path spliced into real room tone so the
+ *  front-end is warm, meet the firmware gate (WAKE_THRESHOLD twice in a row) a
+ *  median 1.06 s and at worst 1.20 s after the phrase ends. The model answers
+ *  one phrase with two humps; the first barely grazes the threshold and only
+ *  the second, ~1 s later, clears it reliably. The 0.2-0.3 s this used to be
+ *  budgeted at was the first hump, which is why the pre-roll kept landing
+ *  behind the phrase. */
+#define FIELD_WAKE_LATENCY_MS 1200
+/** How long the phrase itself runs. Real "Hey Bus" clips measure 0.35-0.9 s;
+ *  budget the long end, since it is the onset that gets cut. */
+#define FIELD_PHRASE_MS 900
+/** Room tone kept in front of the phrase, so the wake clip QC cuts out of the
+ *  take does not start flush against the take's first sample. */
+#define FIELD_LEAD_IN_MS 400
+
+/** Audio kept in front of the wake fire, so the take contains the wake phrase
+ *  WHOLE. A fire is the model's answer to a phrase that ended
+ *  FIELD_WAKE_LATENCY_MS before it and ran FIELD_PHRASE_MS before that, so the
+ *  pre-roll has to reach past both — anything less starts inside the phrase or
+ *  behind it. The cap below is on the whole take, so widening the pre-roll
+ *  costs the tail of a long chain of fires, nothing else. */
+#define FIELD_PREROLL_MS (FIELD_WAKE_LATENCY_MS + FIELD_PHRASE_MS + FIELD_LEAD_IN_MS)
 #define FIELD_PREROLL_SAMPLES (KWS_SAMPLE_RATE * FIELD_PREROLL_MS / 1000)
 #define FIELD_WINDOW_SAMPLES (KWS_SAMPLE_RATE * ASSIST_WINDOW_MS / 1000)
 #define FIELD_TAKE_SAMPLES (FIELD_PREROLL_SAMPLES + FIELD_WINDOW_SAMPLES)
