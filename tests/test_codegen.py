@@ -696,18 +696,18 @@ def test_command_check_is_clean_against_the_committed_headers():
 def test_command_write_then_check_roundtrips(tmp_path):
     info = codegen.write(EMBEDDED_COMMAND, "command", tmp_path)
     assert info == {
-        "arena_bytes": 31360,
-        "scratch_bytes": 19888,
+        "arena_bytes": 47040,
+        "scratch_bytes": 29824,
         "ring_bytes": 0,
         "state_bytes": 0,
         "ops": 10,
     }
     header = (tmp_path / "command_infer.h").read_text()
-    assert "#define COMMAND_INFER_ARENA_BYTES 31360" in header
+    assert "#define COMMAND_INFER_ARENA_BYTES 47040" in header
     assert "#define COMMAND_INFER_STATE_BYTES 0" in header
     # The firmware compares the on-chip esp-nn depthwise scratch query against
     # this macro and refuses to run the generated path if the chip wants more.
-    assert "#define COMMAND_INFER_SCRATCH_BYTES 19888" in header
+    assert "#define COMMAND_INFER_SCRATCH_BYTES 29824" in header
     assert (tmp_path / "command_smoke_vectors.h").exists()
     assert codegen.check(EMBEDDED_COMMAND, "command", tmp_path) == []
 
@@ -737,7 +737,7 @@ def test_models_share_one_scratch_region_and_export_a_query_for_it():
     """
     c = codegen.generate(codegen.model_bytes(EMBEDDED_COMMAND), "command")["command_infer.c"]
     assert "extern int8_t kws_infer_scratch[];" in c  # linked with other models
-    assert "static int8_t kws_infer_scratch[19888]" in c  # linked alone
+    assert "static int8_t kws_infer_scratch[29824]" in c  # linked alone
     assert "*const scratch = arena" not in c
     assert "esp_nn_set_conv_scratch_buf(kws_infer_scratch);" in c
     assert c.count("    set_scratch();") == 2  # init, and every inference entry
