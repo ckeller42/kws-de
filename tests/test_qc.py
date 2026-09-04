@@ -218,6 +218,36 @@ def test_field_wake_split_ignores_a_late_or_absent_wake_phrase():
     assert qc.field_wake_split(plain) == (None, ["licht", "an"])
 
 
+def test_field_wake_split_accepts_a_single_glued_wake_span():
+    # Whisper sometimes emits the whole phrase as ONE span; gluing only words[0:2]
+    # would then produce "heybuslicht", which never matches -> wake positive lost.
+    tr = {
+        "text": "HeyBus Licht Küche an",
+        "words": [
+            {"word": "HeyBus", "start": 0.10, "end": 0.60},
+            {"word": "Licht", "start": 1.40, "end": 1.70},
+            {"word": "Küche", "start": 1.75, "end": 2.05},
+            {"word": "an", "start": 2.10, "end": 2.30},
+        ],
+    }
+    assert qc.field_wake_split(tr) == (pytest.approx(0.75), ["licht", "küche", "an"])
+
+
+def test_field_intent_splits_a_welded_compound_but_not_ordinary_speech():
+    from kws_de.grammar import Intent, Rejection
+
+    # Whisper welds German compounds; "Lichtküche" is a real transcript from this
+    # task's field smoke, and losing it files a correct command as _unknown_.
+    assert qc.field_intent(["lichtküche", "an"]) == Intent("Licht", "Küche", "an")
+    assert qc.field_intent(["lichtan"]) == Intent("Licht", None, "an")
+    assert isinstance(qc.field_intent(["ich", "habe", "angst"]), Rejection)
+    # only a token that decomposes COMPLETELY into vocabulary words is split, so
+    # ordinary German words that merely START with a keyword are left whole
+    v = qc.vocab()
+    for word in ("dank", "anzug", "angst", "banane", "ankommen"):
+        assert qc._split_glued(word, v) == [word]
+
+
 def test_field_intent_uses_the_same_grammar_as_the_device():
     from kws_de.grammar import Intent, Rejection
 
@@ -462,6 +492,14 @@ def test_run_qc_writes_approved_wake_set_and_is_idempotent(tmp_path):
     assert len(list(csv.DictReader((appr / "wake" / "index.csv").open()))) == 2
 
 
+def test_audio_gate_field_take_may_be_longer_than_one_window(tmp_path):
+    # a window EXTENDS on every fire inside it, so a take is not fixed at 3500 ms;
+    # the firmware's own ceiling is FIELD_MAX_TAKE_SAMPLES (9.8 s). Rejecting a
+    # 5 s two-fire take as too_long would throw away data spec §1 says is kept.
+    assert qc.audio_gate(_wav(tmp_path / "f5.wav", _tone(ms=5000)), "field")[1] is None
+    assert qc.audio_gate(_wav(tmp_path / "f10.wav", _tone(ms=9900)), "field")[1] == "too_long"
+
+
 def _field_session(tmp_path, device_intent: str, device_words: str = "Licht:0.93|an:0.88") -> Path:
     inc = tmp_path / "incoming" / "f1"
     _wav(inc / "field" / "spk05" / "123456.wav", _tone(ms=3500))
@@ -515,7 +553,38 @@ def test_run_qc_field_take_splits_wake_labels_by_grammar_and_scores_agreement(tm
     assert row["set"] == "field" and row["verdict"] == "approve"
     assert row["device_intent"] == "Licht Küche an"
     assert row["agrees"] == "1"
+    # the derived label reaches qc.csv, so "parsable" is readable off the row
+    # itself (non-empty prompt) rather than inferred from `agrees`
+    assert row["prompt"] == "Licht Küche an"
     assert "## Field" in (qcd / "report.md").read_text()
+
+    # the field wake clip takes a different write path (sf.write of a slice) than
+    # the guided one (read_bytes), so pin its idempotence too
+    counts2 = qc.run_qc(inc, qcd, appr, _field_transcriber)
+    assert counts2 == counts
+    assert len(list((appr / "wake" / "spk05").glob("*.wav"))) == 1
+    assert len(list((appr / "phrases" / "spk05").glob("*.wav"))) == 1
+    assert len(list(csv.DictReader((appr / "wake" / "index.csv").open()))) == 1
+
+
+def test_run_qc_field_agreement_rate_counts_only_takes_the_device_answered(tmp_path):
+    # one compared take that agrees + one truncated take with no device answer:
+    # the rate is 1.000 over the COMPARED takes, not 0.500 over the parsable ones.
+    inc = tmp_path / "incoming" / "f1"
+    _wav(inc / "field" / "spk05" / "123456.wav", _tone(ms=3500))
+    _wav(inc / "field" / "spk05" / "123457.wav", _tone(ms=3500))
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,"
+        "fire_ms,wake_prob,device_intent,device_words\n"
+        "spk05,t,,field/spk05/123456.wav,3500,-10,field,,123456,123456,0.910,"
+        "Licht Küche an,Licht:0.93|an:0.88\n"
+        "spk05,t,,field/spk05/123457.wav,3500,-10,field,,123457,123457,0.910,,\n"
+    )
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
+    assert counts["field_takes"] == 2 and counts["field_parsable"] == 2
+    assert counts["field_agree"] == 1
+    assert "device-Whisper agreement 1.000" in (qcd / "report.md").read_text()
 
 
 def test_run_qc_field_take_records_disagreement_without_relabelling(tmp_path):
@@ -564,6 +633,28 @@ def test_run_qc_field_take_that_does_not_parse_is_kept_as_a_negative(tmp_path):
     assert (appr / "negatives" / "spk05" / "123456_001.wav").exists()
     row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
     assert row["verdict"] == "approve" and row["agrees"] == ""
+    assert row["prompt"] == ""  # nothing parsed -> no derived label
+
+
+def test_run_qc_unparsable_field_take_with_command_words_is_not_filed_as_a_negative(tmp_path):
+    # "an Licht Küche" is a real command spoken out of order: the grammar rejects
+    # it, but filing it under negatives/ would teach the model that a genuine
+    # command is _unknown_ AND score a correct recognition as a false accept.
+    inc = _field_session(tmp_path, "")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+
+    def transcriber(p: Path):
+        return {
+            "text": "an Licht Küche",
+            "words": [{"word": "an", "start": 0.2, "end": 0.5}],
+        }
+
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["field_takes"] == 1 and counts["field_parsable"] == 0
+    assert not (appr / "negatives").exists()
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["prompt"] == "" and row["agrees"] == ""
+    assert "1 unparsed (vocab present)" in (qcd / "report.md").read_text()
 
 
 def test_run_qc_field_take_with_an_empty_transcript_is_rejected(tmp_path):
