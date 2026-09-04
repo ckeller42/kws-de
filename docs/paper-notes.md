@@ -1708,6 +1708,88 @@ before this branch was rebased onto E17, so with capture *disabled* — the capt
 added in the rebase rides on the same `s_field.enabled` predicate E17 already gates the wake
 tone with, and needs no separate device evidence.
 
+### E20 — the real-clip share is a safety knob, not overfitting (wake, 2026-09-04, host-only)
+
+Round 5 gave ten real "Hey Bus" recordings `sampling_weight: 5.0` against the TTS positives'
+`2.0`. microWakeWord draws every training batch with one `random.choices` over all feature
+providers (`microwakeword/data.py:540`), so that is **71 % of every positive batch coming from
+ten unique recordings** — which reads like textbook overfitting, and the round was run to
+correct it: cap the real share at 30 %, add hard negatives cut from the same field takes as the
+positives, hold out a whole recording session. Architecture, steps, lr and augmentation
+unchanged; the export is 58,080 B / 24,736 MACs in every run, identical to round 5.
+
+Two runs, both at fixed positive total 7.0. Round 6 put the split at 4.9 / 2.1 (30 % real) and
+held the negative total at 45.0 by trimming the TTS hard negatives 20 → 17 and `no_speech`
+5 → 3. That confounds two changes, so round 6b restored **every** round-5a negative weight
+exactly and split the positives 3.5 / 3.5 (50 % real), adding the real negatives on top. The
+result is monotone and it goes the wrong way:
+
+| real share of positives | TTS non-wake false fires / 48 | real held-out non-wake fires / 9 | held-out session fires / 3 | guided takes fire / 10 |
+|---|---|---|---|---|
+| 71.4 % (round 5a, installed) | **1–5** | **0/9** | 3/3 @ 0.996 | 10/10 @ 0.996 |
+| 50.0 % (round 6b) | 15 | 3/9 | 3/3 @ 0.996 | 10/10 @ 0.996 |
+| 30.0 % (round 6) | 33 | 3/9 | 3/3 @ 0.996 | 10/10 @ 0.996 |
+
+Recall is pinned at the ceiling throughout — every model fires on every real positive, held-out
+session included, at peak 0.996. The entire effect is on the safety side. At 30 % the model
+false-fires on "hallo bus", "der bus kommt gleich", "hey du" and "wie spät ist es" across all
+four probe voices, and on three ordinary commands spoken to the device in the held-out session
+("Kühlschrank aus" 0.922, "Licht aus" 0.996 ×2). The round-5a TTS figure is a range because
+`wake_neg_gate_probe.py` re-synthesises with Piper each run and Piper is not deterministic
+(1/48 and 3/48 here; E-series `WAKE-WIDTH-REPORT` measured 2/48 and 5/48) — the 15 and 33 sit
+far outside that spread.
+
+**Reading.** The 71 % share was not overfitting waiting to be corrected; it was doing the
+selectivity work, and this is the flip side of the 2026-09-03 decision to make the wake model
+deliberately user-customised. Nine thousand Piper "hey bus" clips can be satisfied by a loose
+"German speech with a stressed front syllable" feature, because the hard negatives opposing
+them are Piper too; ten real recordings through the device's own microphone are a far narrower
+target, and that narrowness is what rejects the near-miss family. Cutting the real weight
+returns the model to round-4 behaviour, which fired on "licht küche an" at 0.988. If
+two-speaker overfitting is the worry the fix is **more real speakers, not less real weight** —
+a capacity/coverage answer, structurally the same conclusion E16 reached for the command model.
+The other half of the policy survives: the real hard negatives (command phrases cut after the
+wake phrase, plus speech-free room takes) cost nothing on any positive gate and round 6b is
+0/5 on them, so they should be kept and combined with round-5 positive weights, which is the
+untried cell and the obvious next run.
+
+**Two measurement bugs found first, both invisible until clips got short.** (1) The probe used
+for round 5's "10/10 real takes fire" and for every row of the width sweep scored a directory
+with one interpreter and `reset_all_variables()` between clips. That zeroes the six ring-buffer
+resource variables but does not re-run the `CALL_ONCE` init subgraph, which fires once per
+interpreter lifetime — so scores depended on what ran before: the same clip read 0.031, 0.316
+or 0.996 across three orderings. (2) It padded with 0.5 s of leading silence against a ~1.9 s
+receptive field, so a tightly-cut field clip is scored on a half-filled ring. Neither shows on
+the 1.8 s guided takes of rounds 1–5, which is how both survived five rounds; both are fatal on
+0.2–0.7 s field cuts. `kws_de.wake.stream_wake_probs` now builds a fresh interpreter per call
+by construction and prepends `WAKE_CONTEXT_S = 2.0` s. Re-probed correctly, every round-1..5
+conclusion still holds.
+
+**The field data is mostly mislabelled, and it is a pipeline bug, not a QC judgement.** Each
+approved `spk18` clip was matched back to its source take by exact sample search. Session
+`…-0951` was recorded with no pre-roll — frame energy is already −20 to −32 dB in the first
+100 ms, where the good session opens with ~200 ms of near-silence — so the recording starts at
+or after the device's own wake detection and its eight `wake/` clips are 0.21–0.33 s tail
+fragments of a ~0.7 s phrase. The installed model scores all eight at its 0.316 floor, and
+scores five of the eight *full 4 s takes* at the same floor: the wake word is largely not in
+the audio. Whisper still transcribes them "Hey Bus, Licht an." because it completes the
+fragment from context, so the QC transcript agrees with a file that does not contain the word.
+Separately, the cutter writes the **whole take** whenever the wake word is not a leading cut,
+so four clips filed under `phrases/`/`negatives/` still contain "Hey Bus" — the installed model
+fires 0.996 on two of them. Training on either kind is actively harmful in opposite directions:
+fragments teach the model to fire on a 0.2 s syllable, and wake-bearing negatives teach it not
+to wake. All twelve were excluded; two negatives were recovered by trimming the known wake span.
+
+`scripts/wake-retrain.sh` now encodes the session-disjoint split (from each session's
+`written.txt`), the feature build and the probe, with `WAKE_EXCLUDE` for known-bad clips.
+ETA ledger: predicted 15.5 min, actual 16.34 min (+5 %) for round 6; predicted 15.7, actual
+13.31 (−15 %) for round 6b, which had the machine to itself. One tooling defect: `with_eta.sh`
+inherits `KWS_DATA_ROOT`, and a run launched without it writes its measurement to a repo-local
+fallback ledger instead of the shared one — three runs had accumulated there unnoticed.
+
+**Nothing was promoted.** The installed `hey_bus.tflite` is unchanged, `firmware/main/gen/` was
+not touched, and no device work was done (the CoreS3 was in use).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
