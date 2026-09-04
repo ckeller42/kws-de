@@ -324,7 +324,18 @@ static void recognise_task(void *)
            fires). fired_count still tracks how often the detector actually triggered. */
         strlcpy(s_st.word, KWS_LABELS[best], sizeof s_st.word);
         s_st.conf = probs[best];
-        if (fired >= 0) s_st.fired_count++;
+        if (fired >= 0) {
+            s_st.fired_count++;
+            /* Field capture's device prediction: what THIS window fired, in
+               order, kept next to the audio so the workstation can score the
+               deployed model against Whisper's label. Never a label itself. */
+            const char *w = KWS_LABELS[fired];
+            size_t n = strlen(s_st.window_intent);
+            snprintf(s_st.window_intent + n, sizeof s_st.window_intent - n, "%s%s", n ? " " : "", w);
+            n = strlen(s_st.window_words);
+            snprintf(s_st.window_words + n, sizeof s_st.window_words - n, "%s%s:%.2f",
+                     n ? "|" : "", w, (double)probs[fired]);
+        }
         recognise_status_t copy = s_st;
         xSemaphoreGive(s_lock);
         if (fired >= 0) { ESP_LOGI(TAG, "fired %s %.2f (%lu ms)", KWS_LABELS[fired], (double)probs[fired], (unsigned long)ms); log_fire(KWS_LABELS[fired], probs[fired]); }
@@ -376,6 +387,12 @@ extern "C" void recognise_set_active(bool on)
 }
 extern "C" void recognise_listen_for(uint32_t ms)
 {
+    /* A new window starts with an empty prediction: field capture reads these
+       back when the window closes and must not see the previous one's fires. */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_st.window_intent[0] = 0;
+    s_st.window_words[0] = 0;
+    xSemaphoreGive(s_lock);
     s_off_at_us = esp_timer_get_time() + (int64_t)ms * 1000;
     s_active = true;
 }

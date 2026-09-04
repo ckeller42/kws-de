@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include "arena.h"
 #include "assist_gate.h"
 #include "audio.h"
@@ -9,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "field.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -17,7 +19,9 @@
 #include "gen/wake_model_data.h"
 #include "infer_lock.h"
 #include "nn_timers.h"
+#include "nvs.h"
 #include "recognise.h"
+#include "record.h"
 #include "storage.h"
 #include "task.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -74,6 +78,14 @@ static FILE *s_log;
 static assist_gate_t s_gate;         /* assist mode only: when the recogniser may run */
 static bool s_listening;             /* last state pushed to recognise_set_active() */
 static volatile bool s_inject;       /* console-injected fire, see wake_inject_fire() */
+/* ponytail: s_field is written by the wake task (arm/disarm) and by
+   wake_field_set() from the UI/console task, without a mutex — the only shared
+   words are two bools that each task writes independently, so the worst race
+   costs one take, never a torn read. Give it s_lock if it ever grows a field
+   the two tasks must agree on. */
+static field_state_t s_field;        /* assist mode only: opt-in capture of real interactions */
+static uint32_t s_fire_ms;           /* ms-since-boot of the fire that armed s_field */
+static float s_fire_prob;            /* wake probability at that fire */
 
 static void log_fire(uint32_t ms, float prob)
 {
@@ -86,6 +98,23 @@ static void log_fire(uint32_t ms, float prob)
     if (!s_log) return;
     fprintf(s_log, "[Wake] %lu %.3f\n", (unsigned long)ms, (double)prob);
     fflush(s_log);
+}
+
+/* The window has closed: hand the recorder the span to copy. NOTHING is written
+   here — the copy and the FAT write happen on the record task, with the
+   recogniser already off, so no I/O can lengthen a recognise step. */
+static void post_field_take(void)
+{
+    field_take_t t = {};
+    if (!field_take_span(&s_field, &t.start, &t.len)) return;
+    field_disarm(&s_field);
+    recognise_status_t rst;
+    recognise_get_status(&rst);
+    t.fire_ms = s_fire_ms;
+    t.wake_prob = s_fire_prob;
+    strlcpy(t.intent, rst.window_intent, sizeof t.intent);
+    strlcpy(t.words, rst.window_words, sizeof t.words);
+    record_post_field_take(&t);
 }
 
 static void wake_task(void *)
@@ -180,6 +209,7 @@ static void wake_task(void *)
             deaf_until_us = 0;
             assist_gate_reset(&s_gate);
             if (s_listening) { s_listening = false; recognise_set_active(false); }
+            field_disarm(&s_field);     /* a new session never inherits a pending take */
             s_restart = false;
         }
         vTaskDelay(pdMS_TO_TICKS(WAKE_POLL_MS));
@@ -301,14 +331,23 @@ static void wake_task(void *)
                instead of continuously. */
             bool assist = app_get_mode() == UI_MODE_ASSIST;
             if (assist) {
-                if (fired) assist_gate_on_wake(&s_gate, now_ms);
+                if (fired) {
+                    assist_gate_on_wake(&s_gate, now_ms);
+                    field_on_wake(&s_field, audio_write_pos());
+                    s_fire_ms = now_ms;
+                    s_fire_prob = prob;
+                }
                 bool listen = assist_gate_tick(&s_gate, now_ms);
                 if (listen != s_listening) {
                     s_listening = listen;
                     /* Opening the window hands the recogniser its own deadline
                        so it stops even if this task stops being scheduled. */
-                    if (listen) recognise_listen_for(ASSIST_WINDOW_MS);
-                    else recognise_set_active(false);
+                    if (listen) {
+                        recognise_listen_for(ASSIST_WINDOW_MS);
+                    } else {
+                        recognise_set_active(false);
+                        post_field_take();
+                    }
                     ESP_LOGI(TAG, "assist: recogniser %s (window %lu)", listen ? "on" : "off",
                              (unsigned long)s_gate.windows);
                 }
@@ -344,6 +383,15 @@ extern "C" void wake_start(void)
     s_arena = arena_alloc(TAG, "wake", KWS_WAKE_ARENA_BYTES);
     assert(s_arena);
 #endif
+    /* Restore the opt-in capture toggle before the task exists, so it never
+       observes an unrestored one. */
+    nvs_handle_t h;
+    if (nvs_open("kws", NVS_READWRITE, &h) == ESP_OK) {
+        uint8_t on = 0;
+        if (nvs_get_u8(h, "field", &on) != ESP_OK) on = 0;   /* off until turned on once */
+        field_set_enabled(&s_field, on != 0);
+        nvs_close(h);
+    }
     /* Core 0, priority 3 — above the recogniser, which shares this core. In
        recognise mode only that one runs and in wake mode only this one, but
        assist mode has both live, which is why the inference lock exists. */
@@ -364,4 +412,16 @@ extern "C" void wake_get_status(wake_status_t *out)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *out = s_st;
     xSemaphoreGive(s_lock);
+}
+
+extern "C" bool wake_field_get(void) { return s_field.enabled; }
+
+extern "C" void wake_field_set(bool on)
+{
+    field_set_enabled(&s_field, on);
+    nvs_handle_t h;
+    if (nvs_open("kws", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "field", on ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
 }

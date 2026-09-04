@@ -64,6 +64,10 @@ void wake_set_active(bool on);
 void wake_inject_fire(void);
 /** @brief Copy the current wake status under mutex. */
 void wake_get_status(wake_status_t *out);
+/** @brief Is field capture on? Restored from NVS ("kws"/"field") at wake_start(). */
+bool wake_field_get(void);
+/** @brief Turn field capture on/off and persist it. Off drops any pending take. */
+void wake_field_set(bool on);
 
 #ifdef __cplusplus
 }

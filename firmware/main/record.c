@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include "assist_gate.h"
 #include "audio.h"
 #include "storage.h"
 #include "task.h"
@@ -42,6 +43,7 @@ static uint32_t s_speaker;
 static int s_paused = 1;
 static int16_t *s_take;                       /* PSRAM, 6 s + pre-roll */
 #define TAKE_MAX (KWS_SAMPLE_RATE * 6 + PREROLL_SAMPLES)
+static field_take_t s_field_pending;          /* payload for REC_CMD_FIELD_TAKE */
 
 static void status_set(record_phase_t ph)
 {
@@ -125,6 +127,74 @@ static int save_take(uint32_t n_samples, float peak_dbfs)
     append_session_csv(path, n_samples * 1000 / KWS_SAMPLE_RATE, peak_dbfs);
     ESP_LOGI(TAG, "saved %s (%lu samples)", path, (unsigned long)n_samples);
     return 0;
+}
+
+void record_post_field_take(const field_take_t *t)
+{
+    /* ponytail: one pending slot. The next fire cannot arrive before the wake
+       refractory (1.5 s) plus the 2.5 s window, and a save costs ~300 ms, so
+       the slot is always free by then; if it ever is not, the newer take wins.
+       Give it a queue if the window ever gets shorter than a save. */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_field_pending = *t;
+    xSemaphoreGive(s_lock);
+    record_cmd_t cmd = REC_CMD_FIELD_TAKE;
+    xQueueSend(s_cmds, &cmd, 0);
+}
+
+/* storage_root()/field/spkNN/<boot-ms>.wav plus one field.csv row. Runs on the
+   record task AFTER the assist window has closed: the recogniser is already
+   off, so the 100-300 ms FAT write cannot lengthen a recognise step. The
+   speaker id is the current NVS id and is never bumped here — one boot of one
+   user is one field directory. */
+static void save_field_take(void)
+{
+    field_take_t t;
+    char speaker[8];
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    t = s_field_pending;
+    strlcpy(speaker, s_st.speaker, sizeof speaker);
+    xSemaphoreGive(s_lock);
+
+    if (storage_free_bytes() < STORAGE_MIN_FREE_BYTES) {
+        ESP_LOGW(TAG, "field: dropped, storage low");
+        xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_dropped++; xSemaphoreGive(s_lock);
+        return;
+    }
+    if (t.len > TAKE_MAX) t.len = TAKE_MAX;
+    audio_read(t.start + t.len, s_take, t.len);
+    int peak = 0;
+    for (uint32_t i = 0; i < t.len; i++) {
+        int a = s_take[i] < 0 ? -s_take[i] : s_take[i];
+        if (a > peak) peak = a;
+    }
+    float peak_dbfs = 20.f * log10f((peak > 0 ? peak : 1) / 32768.f);
+
+    char dir[96], path[160], csv[128], name[24];
+    snprintf(dir, sizeof dir, "%s/field", storage_root());              mkdir(dir, 0777);
+    snprintf(dir, sizeof dir, "%s/field/%s", storage_root(), speaker);  mkdir(dir, 0777);
+    snprintf(name, sizeof name, "%lu.wav", (unsigned long)t.fire_ms);
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "wb");
+    if (!f) { ESP_LOGE(TAG, "field: open %s failed", path); return; }
+    uint8_t hdr[WAV_HEADER_BYTES];
+    wav_write_header(hdr, t.len, KWS_SAMPLE_RATE);
+    fwrite(hdr, 1, sizeof hdr, f);
+    fwrite(s_take, sizeof(int16_t), t.len, f);
+    fclose(f);
+
+    snprintf(csv, sizeof csv, "%s/field.csv", dir);
+    struct stat st; int fresh = stat(csv, &st) != 0;
+    FILE *c = fopen(csv, "a");
+    if (!c) { ESP_LOGE(TAG, "field: csv open failed"); return; }
+    if (fresh) fputs("file,fire_ms,wake_prob,device_intent,device_words,window_ms,ms,peak_dbfs\n", c);
+    fprintf(c, "%s,%lu,%.3f,%s,%s,%d,%lu,%.1f\n", name, (unsigned long)t.fire_ms,
+            (double)t.wake_prob, t.intent, t.words, ASSIST_WINDOW_MS,
+            (unsigned long)(t.len * 1000 / KWS_SAMPLE_RATE), peak_dbfs);
+    fclose(c);
+    xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_takes++; xSemaphoreGive(s_lock);
+    ESP_LOGI(TAG, "field: saved %s (%lu samples, intent \"%s\")", path,
+             (unsigned long)t.len, t.intent);
 }
 
 /* Returns: 0 saved, 1 redo (clipped/timeout/full), -1 command interrupted (cmd in *cmd) */
@@ -217,6 +287,12 @@ static void record_task(void *arg)
         }
         switch (cmd) {                                    /* r == -1 or woken while paused */
         case REC_CMD_PAUSE: s_paused = 1; status_set(REC_IDLE); break;
+        case REC_CMD_FIELD_TAKE:
+            /* Assist mode only, where the guided recorder is paused. If a
+               guided session is running, ignore it rather than corrupt the
+               take in progress. */
+            if (s_paused) save_field_take();
+            break;
         case REC_CMD_START_SESSION:
             s_take_idx = 0; s_saved_takes = 0;
             nvs_bump_speaker();
