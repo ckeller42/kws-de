@@ -5,9 +5,9 @@
 
 #define WAKE_INFER_INPUT_LEN 120
 #define WAKE_INFER_OUTPUT_LEN 1
-/* Transient arena: activations + esp-nn scratch, live only for the duration of one call. It is one static array, so where it lands is a link-time choice: define WAKE_INFER_ARENA_ATTR when compiling wake_infer.c to a section attribute (ESP-IDF's EXT_RAM_BSS_ATTR puts it in PSRAM) to keep it out of internal .bss. The array stays 16-byte aligned and every offset handed to esp-nn is unchanged either way; only the speed of the memory behind it differs. */
-#define WAKE_INFER_ARENA_BYTES 15680
-/* Bytes at the end of the arena reserved for esp-nn's scratch buffer, sized from the widest op by this module's port of esp_nn_get_*_scratch_size_esp32s3. The firmware asks the real esp-nn for the same number on the chip and refuses to run the generated path if it answers more than this. */
+/* Transient arena: the activations, live only for the duration of one call (esp-nn's scratch is not in here -- see SCRATCH_BYTES below). It is one static array, so where it lands is a link-time choice: define WAKE_INFER_ARENA_ATTR when compiling wake_infer.c to a section attribute (ESP-IDF's EXT_RAM_BSS_ATTR puts it in PSRAM) to keep it out of internal .bss. The array stays 16-byte aligned and every offset handed to esp-nn is unchanged either way; only the speed of the memory behind it differs. */
+#define WAKE_INFER_ARENA_BYTES 128
+/* Bytes of esp-nn scratch this model's widest op needs, sized by this module's port of esp_nn_get_*_scratch_size_esp32s3. It is NOT part of the arena: esp-nn's kernels reach their scratch through file-static globals, so every generated model in an image shares one region (kws_infer_scratch), which must be the largest of their *_INFER_SCRATCH_BYTES, and no two of them may run at once. The firmware asks the real esp-nn for this model's number on the chip (wake_infer_scratch_query below) and refuses to run the generated path if it answers more than this. */
 #define WAKE_INFER_SCRATCH_BYTES 15552
 /* Persistent state: ring-buffer history that must survive between calls (0 if wake is stateless). Separate from the arena above -- add both for the model's total static footprint. */
 #define WAKE_INFER_STATE_BYTES 4200
@@ -21,6 +21,8 @@ void wake_infer_reset(void);
 void wake_infer_step(const int8_t in[3 * 40], uint8_t *prob_q);
 size_t wake_infer_arena_bytes(void);
 size_t wake_infer_state_bytes(void);
+/* What the real esp-nn on the real chip wants for this model's widest op, asked with the very dims the kernels above are called with. Compare it against WAKE_INFER_SCRATCH_BYTES at boot: if the chip wants more, this module's port under-reserved and the kernels would write past the shared scratch region. */
+int wake_infer_scratch_query(void);
 
 #ifdef __cplusplus
 }

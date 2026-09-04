@@ -5,9 +5,9 @@
 
 #define COMMAND_INFER_INPUT_LEN 490
 #define COMMAND_INFER_OUTPUT_LEN 23
-/* Transient arena: activations + esp-nn scratch, live only for the duration of one call. It is one static array, so where it lands is a link-time choice: define COMMAND_INFER_ARENA_ATTR when compiling command_infer.c to a section attribute (ESP-IDF's EXT_RAM_BSS_ATTR puts it in PSRAM) to keep it out of internal .bss. The array stays 16-byte aligned and every offset handed to esp-nn is unchanged either way; only the speed of the memory behind it differs. */
-#define COMMAND_INFER_ARENA_BYTES 51248
-/* Bytes at the end of the arena reserved for esp-nn's scratch buffer, sized from the widest op by this module's port of esp_nn_get_*_scratch_size_esp32s3. The firmware asks the real esp-nn for the same number on the chip and refuses to run the generated path if it answers more than this. */
+/* Transient arena: the activations, live only for the duration of one call (esp-nn's scratch is not in here -- see SCRATCH_BYTES below). It is one static array, so where it lands is a link-time choice: define COMMAND_INFER_ARENA_ATTR when compiling command_infer.c to a section attribute (ESP-IDF's EXT_RAM_BSS_ATTR puts it in PSRAM) to keep it out of internal .bss. The array stays 16-byte aligned and every offset handed to esp-nn is unchanged either way; only the speed of the memory behind it differs. */
+#define COMMAND_INFER_ARENA_BYTES 31360
+/* Bytes of esp-nn scratch this model's widest op needs, sized by this module's port of esp_nn_get_*_scratch_size_esp32s3. It is NOT part of the arena: esp-nn's kernels reach their scratch through file-static globals, so every generated model in an image shares one region (kws_infer_scratch), which must be the largest of their *_INFER_SCRATCH_BYTES, and no two of them may run at once. The firmware asks the real esp-nn for this model's number on the chip (command_infer_scratch_query below) and refuses to run the generated path if it answers more than this. */
 #define COMMAND_INFER_SCRATCH_BYTES 19888
 /* Persistent state: ring-buffer history that must survive between calls (0 if command is stateless). Separate from the arena above -- add both for the model's total static footprint. */
 #define COMMAND_INFER_STATE_BYTES 0
@@ -22,6 +22,8 @@ void command_infer_reset(void);
 void command_infer(const int8_t in[490], int8_t out[23]);
 size_t command_infer_arena_bytes(void);
 size_t command_infer_state_bytes(void);
+/* What the real esp-nn on the real chip wants for this model's widest op, asked with the very dims the kernels above are called with. Compare it against COMMAND_INFER_SCRATCH_BYTES at boot: if the chip wants more, this module's port under-reserved and the kernels would write past the shared scratch region. */
+int command_infer_scratch_query(void);
 
 #ifdef __cplusplus
 }

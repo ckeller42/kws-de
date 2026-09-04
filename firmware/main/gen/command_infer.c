@@ -12,8 +12,22 @@
 #ifndef COMMAND_INFER_ARENA_ATTR
 #define COMMAND_INFER_ARENA_ATTR
 #endif
-COMMAND_INFER_ARENA_ATTR static int8_t arena[51248] __attribute__((aligned(16)));
-static int8_t *const scratch = arena + 31360;
+COMMAND_INFER_ARENA_ATTR static int8_t arena[31360] __attribute__((aligned(16)));
+/* esp-nn reaches its scratch through file-static globals shared by
+   every model in the image, and scratch is a *write* target: a
+   per-model region would be handed to the other model's kernels,
+   which then write past the smaller of the two. So there is one
+   region for all of them, and the caller must not run two generated
+   inferences at once (the firmware serialises them on one mutex).
+   Link several models together and the region has to fit the largest
+   *_INFER_SCRATCH_BYTES of them: define KWS_INFER_SHARED_SCRATCH and
+   provide kws_infer_scratch[] (firmware/main/infer_lock.c). A build
+   that links this model alone gets the definition below. */
+#ifdef KWS_INFER_SHARED_SCRATCH
+extern int8_t kws_infer_scratch[];
+#else
+static int8_t kws_infer_scratch[19888] __attribute__((aligned(16)));
+#endif
 
 static const int8_t op0_w[288] = {38, -21, -56, 8, 4, -127, 110, 12, -34, 51, 10, -38, 47, -12, -7, 69, -103, 127, 13, -127, 72, -18, 1, 24, -51, -32, -8, -127, -29, 71, -23, -4, 111, -50, 27, 80, 25, 75, 104, 64, 22, 127, 57, 17, -35, -123, 48, 127, -12, -13, 28, 20, -23, -52, -24, -49, -127, -67, -23, -93, 3, 26, 5, 127, 20, -31, 72, 49, 3, -73, 10, 51, 75, 19, -28, 112, -21, -23, 127, 35, -115, -31, -78, -9, -32, -18, -80, 15, -127, -97, 102, 89, 119, 5, -34, 61, -127, 25, -104, -39, 23, -127, -14, 89, -83, -71, 39, -62, 21, 45, 7, -29, 105, -46, -3, 127, -18, 79, -59, -127, -43, -66, 24, -12, -99, -105, -57, 127, -13, -35, -28, 17, 44, -96, -45, 42, -9, -127, 25, -34, -44, -22, -43, 12, -56, -127, -77, -5, -84, -58, -29, 46, -38, 127, 49, 55, -4, -29, -18, -112, -57, -31, -65, 57, -57, 30, 9, 12, 39, 31, 127, 18, 2, -127, 88, 38, -50, 50, 64, 55, 127, -29, -74, 10, 9, -44, 8, -64, 29, 119, 77, 15, -127, 72, -93, -47, -111, -96, 60, -103, -27, -24, 56, -25, 0, -127, -22, 80, 104, -127, 91, 66, 81, 38, 89, 89, -5, 46, 127, -59, 112, -63, 1, -114, 108, 18, -127, 31, 7, 44, 26, -3, 15, 43, 52, -52, -127, 39, -72, -86, 23, -30, -90, 30, -26, -25, -121, -58, -49, -127, -56, -25, 125, -86, 127, -73, -21, -65, -126, 34, -115, 14, 97, -114, 13, -5, 49, -16, -127, 78, 127, -7, 15, 88, 0, -13, 83, -24, -10, -4, -108, 112, -25, -43, 127, 44, -15, -11};
 static const int32_t op0_b[32] = {2123, -522, -615, -2359, 1600, -311, 228, 1021, 2087, -1883, 467, 1518, 3938, -1500, 29, 568, -437, 59, 462, 3113, 1514, 94, -584, 2248, -58, -734, 252, -3405, -306, -346, 1841, -182};
@@ -46,12 +60,26 @@ static const int32_t op6_shift[32] = {-6, -7, -6, -6, -6, -7, -6, -6, -6, -6, -6
 static const int8_t op8_w[736] = {-93, -3, 25, 5, -63, -8, -74, -10, 39, -48, -29, -63, 22, 18, -10, -28, -18, 5, 38, 2, 56, 7, -48, 30, 34, -56, -50, -3, -12, -52, -7, 83, -19, 37, 22, -69, -69, -12, -44, -49, 12, 3, 5, 29, -2, -5, -27, -12, 5, -41, -31, 27, 48, -21, -9, 65, -38, -54, -5, -4, -24, -19, 54, 3, 42, -36, -4, -1, -52, -35, 47, 49, -6, 0, 2, 48, -24, 14, -32, -29, -68, 5, 31, -28, -29, 23, -23, -42, 13, 10, 4, 22, 8, -12, 18, 18, -38, -86, 23, -24, 38, -33, 41, -50, 19, 67, -3, 56, -72, -28, -44, -20, 2, 1, -10, 54, -50, -27, 25, 45, 19, -6, 46, -10, 23, -89, 9, -20, -58, 0, 3, -22, -46, 4, 54, -33, 18, 12, -30, 50, 10, -51, -42, -66, -42, 49, 17, 50, 29, -30, -41, -15, 82, -73, 44, -57, -23, -33, -18, 47, -52, -9, 54, -20, -60, 30, 25, -48, 3, -50, -72, 22, -7, -35, -83, 72, -59, -3, -62, 61, -20, 36, 0, -40, -11, 69, 59, -58, 54, -83, 17, -83, 37, -19, -39, 19, 43, 9, -56, 34, -28, 45, 68, 22, -13, 22, 30, -47, -52, -21, 0, -43, -15, -37, -59, 37, -21, 13, -72, 33, -21, 13, 6, -30, 17, -3, -65, 17, -58, 18, -55, 66, -31, -47, 34, -60, -8, 0, 67, -11, 16, -19, 62, -83, 16, -25, -52, -40, -9, 42, -64, -19, 14, 40, -33, 29, 45, 24, -22, 5, -91, 41, -38, 2, -95, -126, 29, -12, 7, -22, -11, 21, -14, -16, -25, -16, 21, 37, -47, -59, -58, 42, -63, 8, 12, 81, 39, -48, -60, 6, -6, 44, 61, -1, -62, -55, -20, 27, -8, -90, 18, 44, 41, -13, -55, -11, -8, -4, 14, -6, -49, 24, -25, -7, -34, 40, 4, -95, 8, -48, -36, -16, -27, 17, -3, 16, -25, -58, -38, 27, -50, -24, 16, 55, -69, -5, -30, -9, -87, -48, 9, 31, -17, 63, 5, -23, -31, 57, 9, -45, 40, -60, 35, -14, 18, -15, -38, -17, -55, 17, 59, 49, 49, 71, 10, -18, -71, 43, -57, 18, -77, -61, 25, -29, -60, -10, -2, 56, -81, -14, 26, 22, -75, 6, 27, 7, -37, -33, -36, -15, 36, -64, -14, -68, -78, 43, 5, -29, -49, 87, 34, 41, -47, -91, -7, -10, 31, -60, 51, 43, 18, -40, 37, 15, -34, -65, 48, 25, -53, -70, -1, -22, 54, -4, -48, 8, 17, 32, -13, -48, 12, 22, 40, 14, -15, -4, -26, -14, 31, -30, 30, -58, 18, -28, -28, 35, -46, -40, 6, 12, -89, 44, 2, -14, 63, -76, -39, 15, -87, 7, 0, -23, -27, -8, 36, 0, -58, -75, -29, 20, 79, -21, 44, -37, 17, 54, 35, -41, -43, -29, 43, -48, -57, 23, 51, 1, 3, -16, -29, 34, 20, 22, -35, -13, 4, 66, -8, -1, -40, -14, -60, -15, 9, 7, -21, 38, -6, 35, 1, 12, -50, -77, -57, -29, 39, 43, -37, -7, -43, 38, 36, -50, -27, -68, -11, -31, 18, -29, -18, -5, 45, 27, -66, -1, 10, -55, -51, 40, 4, -26, 56, -40, 28, 55, 34, -44, -32, -43, 38, -98, 1, 33, -44, 38, 26, 24, -98, -37, 44, -26, 55, -37, 36, 19, -33, -44, 46, -9, 6, -43, 36, -28, -71, 25, 9, 12, 25, -34, 44, -40, 12, 0, -65, 7, 27, 12, 41, -53, -17, -58, 20, -34, 23, 6, -6, 48, 40, -5, -3, -31, -29, 9, -41, -81, -33, 44, -51, 31, 7, -53, 44, -7, 29, -66, -28, 47, 30, 2, 27, -39, -79, -34, 47, -45, 43, -86, 32, 39, -25, -72, 36, -2, -38, -23, -19, -36, -13, 37, -10, 35, -44, -4, -18, -28, 47, 11, 11, -26, -79, -9, -60, -56, 22, -9, 32, -16, 69, -20, 17, 61, -35, -18, 54, -46, -42, -40, 62, -5, -18, -39, 23, -55, 15, -13, 32, -18, 13, -24, -16, -22, 20, -48, -16, -8, -29, 55, -39, -9, -15, -52, -25, -26, 21, 53, 20, 31, -23, -21, -36, 42, -28, 9, 10, 11, -58, 43, -22, 14, -76, 56, -57, -89, 16, -127, -78, -57, 39, 26, -41, -8, -51, 45, -73, -61, 25, 32, -54, -35, -17, -7, -24, -22, 24, -65, 3, -31};
 static const int32_t op8_b[23] = {54, 33, -475, -139, -34, 223, -409, 28, 211, 312, 97, -214, 421, -318, 128, -8, -48, -471, 194, -422, 63, -26, 381};
 
+/* Point esp-nn's file-static scratch pointers at the shared region.
+   Done at init *and* on entry to every inference: a TFLite Micro
+   interpreter in the same image (the fallback build, and the on-device
+   parity log) moves the very same globals when it runs, so re-pointing
+   them is what makes this model's next call independent of whatever ran
+   in between. Both stores are inside the caller's inference lock. */
+static void set_scratch(void)
+{
+    esp_nn_set_conv_scratch_buf(kws_infer_scratch);
+    esp_nn_set_depthwise_conv_scratch_buf(kws_infer_scratch);
+    esp_nn_set_softmax_scratch_buf(kws_infer_scratch);
+}
+
 void command_infer_reset(void)
 {
 }
 
 void command_infer_init(void)
 {
+    set_scratch();
     command_infer_reset();
 }
 
@@ -69,13 +97,13 @@ void command_infer(const int8_t in[490], int8_t out[23])
 #ifndef NDEBUG
     assert(((uintptr_t) in & 15) == 0);
 #endif
+    set_scratch();
     {
       const data_dims_t op0_in = { .width = 10, .height = 49, .channels = 1, .extra = 1 };
       const data_dims_t op0_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
       const data_dims_t op0_flt = { .width = 3, .height = 3, .channels = 1, .extra = 0 };
       const conv_params_t op0_p = { .in_offset = -71, .out_offset = -120, .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 }, .activation = { -120, 127 } };
       const quant_data_t op0_q = { .shift = (int32_t *)op0_shift, .mult = (int32_t *)op0_mult };
-      esp_nn_set_conv_scratch_buf(scratch);
       esp_nn_conv_s8(&op0_in, in, &op0_flt, op0_w, op0_b, &op0_out, (arena + 0), &op0_p, &op0_q);
     }
     {
@@ -84,7 +112,6 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const data_dims_t op1_flt = { .width = 3, .height = 3, .channels = 32, .extra = 0 };
       const dw_conv_params_t op1_p = { .in_offset = 120, .out_offset = -123, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 }, .activation = { -123, 127 } };
       const quant_data_t op1_q = { .shift = (int32_t *)op1_shift, .mult = (int32_t *)op1_mult };
-      esp_nn_set_depthwise_conv_scratch_buf(scratch);
       esp_nn_depthwise_conv_s8(&op1_in, (arena + 0), &op1_flt, op1_w, op1_b, &op1_out, (arena + 15680), &op1_p, &op1_q);
     }
     {
@@ -93,7 +120,6 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const data_dims_t op2_flt = { .width = 1, .height = 1, .channels = 32, .extra = 0 };
       const conv_params_t op2_p = { .in_offset = 123, .out_offset = -118, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -118, 127 } };
       const quant_data_t op2_q = { .shift = (int32_t *)op2_shift, .mult = (int32_t *)op2_mult };
-      esp_nn_set_conv_scratch_buf(scratch);
       esp_nn_conv_s8(&op2_in, (arena + 15680), &op2_flt, op2_w, op2_b, &op2_out, (arena + 0), &op2_p, &op2_q);
     }
     {
@@ -102,7 +128,6 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const data_dims_t op3_flt = { .width = 3, .height = 3, .channels = 32, .extra = 0 };
       const dw_conv_params_t op3_p = { .in_offset = 118, .out_offset = -120, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 }, .activation = { -120, 127 } };
       const quant_data_t op3_q = { .shift = (int32_t *)op3_shift, .mult = (int32_t *)op3_mult };
-      esp_nn_set_depthwise_conv_scratch_buf(scratch);
       esp_nn_depthwise_conv_s8(&op3_in, (arena + 0), &op3_flt, op3_w, op3_b, &op3_out, (arena + 15680), &op3_p, &op3_q);
     }
     {
@@ -111,7 +136,6 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const data_dims_t op4_flt = { .width = 1, .height = 1, .channels = 32, .extra = 0 };
       const conv_params_t op4_p = { .in_offset = 120, .out_offset = -114, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -114, 127 } };
       const quant_data_t op4_q = { .shift = (int32_t *)op4_shift, .mult = (int32_t *)op4_mult };
-      esp_nn_set_conv_scratch_buf(scratch);
       esp_nn_conv_s8(&op4_in, (arena + 15680), &op4_flt, op4_w, op4_b, &op4_out, (arena + 0), &op4_p, &op4_q);
     }
     {
@@ -120,7 +144,6 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const data_dims_t op5_flt = { .width = 3, .height = 3, .channels = 32, .extra = 0 };
       const dw_conv_params_t op5_p = { .in_offset = 114, .out_offset = -122, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 }, .activation = { -122, 127 } };
       const quant_data_t op5_q = { .shift = (int32_t *)op5_shift, .mult = (int32_t *)op5_mult };
-      esp_nn_set_depthwise_conv_scratch_buf(scratch);
       esp_nn_depthwise_conv_s8(&op5_in, (arena + 0), &op5_flt, op5_w, op5_b, &op5_out, (arena + 15680), &op5_p, &op5_q);
     }
     {
@@ -129,11 +152,73 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const data_dims_t op6_flt = { .width = 1, .height = 1, .channels = 32, .extra = 0 };
       const conv_params_t op6_p = { .in_offset = 122, .out_offset = -126, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -126, 127 } };
       const quant_data_t op6_q = { .shift = (int32_t *)op6_shift, .mult = (int32_t *)op6_mult };
-      esp_nn_set_conv_scratch_buf(scratch);
       esp_nn_conv_s8(&op6_in, (arena + 15680), &op6_flt, op6_w, op6_b, &op6_out, (arena + 0), &op6_p, &op6_q);
     }
     esp_nn_mean_nhwc_s8((arena + 0), (arena + 15680), 49, 10, 32, -126, -110, 817049451, -4);
     esp_nn_fully_connected_s8((arena + 15680), 110, 32, op8_w, 0, op8_b, (arena + 0), 23, 82, -9, 1832112558, -128, 127);
-    esp_nn_set_softmax_scratch_buf(scratch);
     esp_nn_softmax_s8((arena + 0), 1, 23, 1412530688, 25, -62, out);
+}
+int command_infer_scratch_query(void)
+{
+    int most = 0;
+    int want;
+    {
+        const data_dims_t q0_in = { .width = 10, .height = 49, .channels = 1, .extra = 1 };
+        const data_dims_t q0_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q0_flt = { .width = 3, .height = 3, .channels = 1, .extra = 0 };
+        const conv_params_t q0_p = { .in_offset = -71, .out_offset = -120, .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 }, .activation = { -120, 127 } };
+        want = esp_nn_get_conv_scratch_size(&q0_in, &q0_flt, &q0_out, &q0_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q1_in = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q1_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q1_flt = { .width = 3, .height = 3, .channels = 32, .extra = 0 };
+        const dw_conv_params_t q1_p = { .in_offset = 120, .out_offset = -123, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 }, .activation = { -123, 127 } };
+        want = esp_nn_get_depthwise_conv_scratch_size(&q1_in, &q1_flt, &q1_out, &q1_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q2_in = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q2_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q2_flt = { .width = 1, .height = 1, .channels = 32, .extra = 0 };
+        const conv_params_t q2_p = { .in_offset = 123, .out_offset = -118, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -118, 127 } };
+        want = esp_nn_get_conv_scratch_size(&q2_in, &q2_flt, &q2_out, &q2_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q3_in = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q3_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q3_flt = { .width = 3, .height = 3, .channels = 32, .extra = 0 };
+        const dw_conv_params_t q3_p = { .in_offset = 118, .out_offset = -120, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 }, .activation = { -120, 127 } };
+        want = esp_nn_get_depthwise_conv_scratch_size(&q3_in, &q3_flt, &q3_out, &q3_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q4_in = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q4_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q4_flt = { .width = 1, .height = 1, .channels = 32, .extra = 0 };
+        const conv_params_t q4_p = { .in_offset = 120, .out_offset = -114, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -114, 127 } };
+        want = esp_nn_get_conv_scratch_size(&q4_in, &q4_flt, &q4_out, &q4_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q5_in = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q5_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q5_flt = { .width = 3, .height = 3, .channels = 32, .extra = 0 };
+        const dw_conv_params_t q5_p = { .in_offset = 114, .out_offset = -122, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 1, 1 }, .dilation = { 0, 0 }, .activation = { -122, 127 } };
+        want = esp_nn_get_depthwise_conv_scratch_size(&q5_in, &q5_flt, &q5_out, &q5_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q6_in = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q6_out = { .width = 10, .height = 49, .channels = 32, .extra = 1 };
+        const data_dims_t q6_flt = { .width = 1, .height = 1, .channels = 32, .extra = 0 };
+        const conv_params_t q6_p = { .in_offset = 122, .out_offset = -126, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -126, 127 } };
+        want = esp_nn_get_conv_scratch_size(&q6_in, &q6_flt, &q6_out, &q6_p);
+        if (want > most) most = want;
+    }
+    want = esp_nn_get_softmax_scratch_size(23, 1);
+    if (want > most) most = want;
+    return most;
 }

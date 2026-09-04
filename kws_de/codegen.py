@@ -237,7 +237,6 @@ _ALIGN = 16  # esp-nn's S3 kernels want 16-byte-aligned operands
 class Arena:
     offsets: dict[int, int]  # tensor index -> byte offset in the arena
     size: int  # total arena bytes (16-byte aligned)
-    scratch_offset: int = 0  # where esp-nn's scratch block starts
 
 
 def tensor_bytes(graph: tflite_graph.Graph, index: int) -> int:
@@ -249,7 +248,7 @@ def _round_up(value: int, align: int = _ALIGN) -> int:
     return -(-value // align) * align
 
 
-def plan_arena(plan: Plan, scratch_bytes: int = 0) -> Arena:
+def plan_arena(plan: Plan) -> Arena:
     """Greedy first-fit over tensor lifetimes.
 
     A tensor is live from the op that writes it to the last op that reads it
@@ -258,9 +257,12 @@ def plan_arena(plan: Plan, scratch_bytes: int = 0) -> Arena:
     are their own static storage, and the graph input is a caller-supplied
     buffer outside the arena -- so the arena holds exactly the intermediate
     activations, including the graph's output (the caller reads it before the
-    next call can reuse the slot). Scratch (esp-nn's conv workspace) is a
-    single block at the end, live for the whole call, because two kernels
-    never run at once.
+    next call can reuse the slot).
+
+    esp-nn's scratch is deliberately *not* in here: its kernels reach it
+    through file-static globals shared by every model in the image, so it is
+    one region shared by all of them (kws_infer_scratch, see _render) rather
+    than a block of each model's own arena.
     """
     graph = plan.graph
     fixed = {r.buffer_tensor for r in plan.rings} | set(graph.inputs)
@@ -307,7 +309,7 @@ def plan_arena(plan: Plan, scratch_bytes: int = 0) -> Arena:
         placed.append((offset, offset + size, lo, hi))
 
     used = _round_up(max((end for _, end, _, _ in placed), default=0))
-    return Arena(offsets=offsets, size=used + _round_up(scratch_bytes), scratch_offset=used)
+    return Arena(offsets=offsets, size=used)
 
 
 _MACRO_RE = re.compile(r"^#define\s+(\w+)\s+(\d+)\s*$", re.MULTILINE)
@@ -568,6 +570,9 @@ class Emitter:
     consts: list[str] = dataclasses.field(default_factory=list)
     body: list[str] = dataclasses.field(default_factory=list)
     scratch_bytes: int = 0
+    # esp-nn kernel families this model actually calls, so init sets exactly
+    # the scratch pointers it uses ("conv", "depthwise", "softmax").
+    families: set[str] = dataclasses.field(default_factory=set)
 
     def const_i8(self, name: str, values) -> str:
         flat = ", ".join(str(int(v)) for v in np.ravel(values))
@@ -632,6 +637,44 @@ def _conv_geometry(g, op):
     return (in_h, in_w, in_c), (out_h, out_w, out_c), (k_h, k_w, w_c), (s_h, s_w), (pad_h, pad_w)
 
 
+def _conv_dims_lines(g, op, tag: str) -> list[str]:
+    """`op`'s three data_dims_t and its params struct, as C declarations.
+
+    Emitted from one place into two: the kernel call below, and
+    <name>_infer_scratch_query(). The boot guard calls that query, so it can
+    only ever ask esp-nn about the geometry this file really runs -- the hand
+    copy it replaces went stale the moment a model was regenerated
+    (final-review S-3).
+    """
+    (in_h, in_w, in_c), (out_h, out_w, out_c), (k_h, k_w, w_c), (s_h, s_w), (pad_h, pad_w) = (
+        _conv_geometry(g, op)
+    )
+    act_min, act_max = activation_range(g, op)
+    in_zp = int(g.tensors[op.inputs[0]].zero_points[0])
+    out_zp = int(g.tensors[op.outputs[0]].zero_points[0])
+    lines = [
+        _dims(f"{tag}_in", in_w, in_h, in_c, 1),
+        _dims(f"{tag}_out", out_w, out_h, out_c, 1),
+        _dims(f"{tag}_flt", k_w, k_h, w_c, 0),
+    ]
+    if op.name == "CONV_2D":
+        lines.append(
+            f"const conv_params_t {tag}_p = {{ .in_offset = {-in_zp}, "
+            f".out_offset = {out_zp}, .stride = {{ {s_w}, {s_h} }}, "
+            f".padding = {{ {pad_w}, {pad_h} }}, .dilation = {{ 0, 0 }}, "
+            f".activation = {{ {act_min}, {act_max} }} }};"
+        )
+    else:
+        ch_mult = int(op.options.get("depth_multiplier", 1))
+        lines.append(
+            f"const dw_conv_params_t {tag}_p = {{ .in_offset = {-in_zp}, "
+            f".out_offset = {out_zp}, .ch_mult = {ch_mult}, "
+            f".stride = {{ {s_w}, {s_h} }}, .padding = {{ {pad_w}, {pad_h} }}, "
+            f".dilation = {{ 0, 0 }}, .activation = {{ {act_min}, {act_max} }} }};"
+        )
+    return lines
+
+
 def _conv_constants(ctx: Emitter, op) -> tuple[str, str, str, str, str]:
     """weights, bias, multiplier and shift tables in flash, plus the op's tag."""
     g = ctx.plan.graph
@@ -650,29 +693,17 @@ def _conv_constants(ctx: Emitter, op) -> tuple[str, str, str, str, str]:
 
 def emit_conv(ctx: Emitter, op) -> None:
     g = ctx.plan.graph
-    (in_h, in_w, in_c), (out_h, out_w, out_c), (k_h, k_w, w_c), (s_h, s_w), (pad_h, pad_w) = (
-        _conv_geometry(g, op)
-    )
+    (in_h, in_w, in_c), (out_h, out_w, out_c), *_ = _conv_geometry(g, op)
     tag, weights, bias, mult, shift = _conv_constants(ctx, op)
-    act_min, act_max = activation_range(g, op)
     _check_u16(op, in_h=in_h, in_w=in_w, in_c=in_c, out_h=out_h, out_w=out_w, out_c=out_c)
-    in_zp = int(g.tensors[op.inputs[0]].zero_points[0])
-    out_zp = int(g.tensors[op.outputs[0]].zero_points[0])
+    ctx.families.add("conv")
     ctx.emit("{")
-    ctx.emit("  " + _dims(f"{tag}_in", in_w, in_h, in_c, 1))
-    ctx.emit("  " + _dims(f"{tag}_out", out_w, out_h, out_c, 1))
-    ctx.emit("  " + _dims(f"{tag}_flt", k_w, k_h, w_c, 0))
-    ctx.emit(
-        f"  const conv_params_t {tag}_p = {{ .in_offset = {-in_zp}, "
-        f".out_offset = {out_zp}, .stride = {{ {s_w}, {s_h} }}, "
-        f".padding = {{ {pad_w}, {pad_h} }}, .dilation = {{ 0, 0 }}, "
-        f".activation = {{ {act_min}, {act_max} }} }};"
-    )
+    for line in _conv_dims_lines(g, op, tag):
+        ctx.emit("  " + line)
     ctx.emit(
         f"  const quant_data_t {tag}_q = {{ .shift = (int32_t *){shift}, "
         f".mult = (int32_t *){mult} }};"
     )
-    ctx.emit("  esp_nn_set_conv_scratch_buf(scratch);")
     ctx.emit(
         f"  esp_nn_conv_s8(&{tag}_in, {ctx.ref(op.inputs[0])}, &{tag}_flt, {weights}, "
         f"{bias}, &{tag}_out, {ctx.ref(op.outputs[0])}, &{tag}_p, &{tag}_q);"
@@ -682,34 +713,22 @@ def emit_conv(ctx: Emitter, op) -> None:
 
 def emit_depthwise(ctx: Emitter, op) -> None:
     g = ctx.plan.graph
-    (in_h, in_w, in_c), (out_h, out_w, out_c), (k_h, k_w, w_c), (s_h, s_w), (pad_h, pad_w) = (
-        _conv_geometry(g, op)
-    )
+    (in_h, in_w, in_c), (out_h, out_w, out_c), *_ = _conv_geometry(g, op)
     ch_mult = int(op.options.get("depth_multiplier", 1))
     if in_c * ch_mult != out_c:
         raise UnsupportedGraph(
             f"op {op.index} DEPTHWISE_CONV_2D: {in_c} x {ch_mult} != {out_c} output channels"
         )
     tag, weights, bias, mult, shift = _conv_constants(ctx, op)
-    act_min, act_max = activation_range(g, op)
     _check_u16(op, in_h=in_h, in_w=in_w, in_c=in_c, out_h=out_h, out_w=out_w, out_c=out_c)
-    in_zp = int(g.tensors[op.inputs[0]].zero_points[0])
-    out_zp = int(g.tensors[op.outputs[0]].zero_points[0])
+    ctx.families.add("depthwise")
     ctx.emit("{")
-    ctx.emit("  " + _dims(f"{tag}_in", in_w, in_h, in_c, 1))
-    ctx.emit("  " + _dims(f"{tag}_out", out_w, out_h, out_c, 1))
-    ctx.emit("  " + _dims(f"{tag}_flt", k_w, k_h, w_c, 0))
-    ctx.emit(
-        f"  const dw_conv_params_t {tag}_p = {{ .in_offset = {-in_zp}, "
-        f".out_offset = {out_zp}, .ch_mult = {ch_mult}, "
-        f".stride = {{ {s_w}, {s_h} }}, .padding = {{ {pad_w}, {pad_h} }}, "
-        f".dilation = {{ 0, 0 }}, .activation = {{ {act_min}, {act_max} }} }};"
-    )
+    for line in _conv_dims_lines(g, op, tag):
+        ctx.emit("  " + line)
     ctx.emit(
         f"  const quant_data_t {tag}_q = {{ .shift = (int32_t *){shift}, "
         f".mult = (int32_t *){mult} }};"
     )
-    ctx.emit("  esp_nn_set_depthwise_conv_scratch_buf(scratch);")
     ctx.emit(
         f"  esp_nn_depthwise_conv_s8(&{tag}_in, {ctx.ref(op.inputs[0])}, &{tag}_flt, "
         f"{weights}, {bias}, &{tag}_out, {ctx.ref(op.outputs[0])}, &{tag}_p, &{tag}_q);"
@@ -864,7 +883,7 @@ def emit_softmax(ctx: Emitter, op) -> None:
     depth = shape[-1]
     outer = math.prod(shape) // depth
     mult, shift, diff_min = softmax_params(g, op)
-    ctx.emit("esp_nn_set_softmax_scratch_buf(scratch);")
+    ctx.families.add("softmax")
     ctx.emit(
         f"esp_nn_softmax_s8({ctx.ref(op.inputs[0])}, {outer}, {depth}, "
         f"{mult}, {shift}, {diff_min}, {ctx.ref(op.outputs[0])});"
@@ -943,6 +962,53 @@ EMITTERS = {
 }
 
 
+_SCRATCH_QUERY = {
+    "CONV_2D": "esp_nn_get_conv_scratch_size",
+    "DEPTHWISE_CONV_2D": "esp_nn_get_depthwise_conv_scratch_size",
+}
+
+
+def scratch_query_lines(ctx: Emitter, name: str) -> list[str]:
+    """<name>_infer_scratch_query(): what the *real* esp-nn on the *real* chip
+    wants for this model's widest op.
+
+    scratch_bytes() above is a Python port of esp-nn's ESP32-S3 formulas, and
+    the reserve it produces is what the shared region is sized from -- so the
+    firmware checks the port against the chip at boot. The dims come from
+    _conv_dims_lines, the same call that emits the kernels, which is the whole
+    point: the guard cannot end up describing an op the model no longer has.
+    """
+    g = ctx.plan.graph
+    body: list[str] = []
+    for op in ctx.plan.ops:
+        if op.name in _SCRATCH_QUERY:
+            tag = f"q{op.index}"
+            body.append("    {")
+            body += ["        " + line for line in _conv_dims_lines(g, op, tag)]
+            body.append(
+                f"        want = {_SCRATCH_QUERY[op.name]}(&{tag}_in, &{tag}_flt, "
+                f"&{tag}_out, &{tag}_p);"
+            )
+            body.append("        if (want > most) most = want;")
+            body.append("    }")
+        elif op.name == "SOFTMAX":
+            shape = g.tensors[op.inputs[0]].shape
+            depth = shape[-1]
+            body.append(
+                f"    want = esp_nn_get_softmax_scratch_size({depth}, {math.prod(shape) // depth});"
+            )
+            body.append("    if (want > most) most = want;")
+    return [
+        f"int {name}_infer_scratch_query(void)",
+        "{",
+        "    int most = 0;",
+        *(["    int want;"] if body else []),
+        *body,
+        "    return most;",
+        "}",
+    ]
+
+
 def initial_states(tflite: bytes, graph: tflite_graph.Graph) -> dict[int, int]:
     """resource tensor -> the byte its CALL_ONCE init subgraph fills it with.
 
@@ -1004,12 +1070,7 @@ def generate(tflite: bytes, name: str) -> dict[str, str]:
     _check_single_io(graph)
     plan = rewrite_streaming(graph)
     scratch = max((scratch_bytes(graph, op) for op in plan.ops), default=0)
-    ctx = Emitter(
-        prefix=name,
-        plan=plan,
-        arena=plan_arena(plan, scratch_bytes=scratch),
-        scratch_bytes=scratch,
-    )
+    ctx = Emitter(prefix=name, plan=plan, arena=plan_arena(plan), scratch_bytes=scratch)
 
     # The CONCATENATION that built each ring is gone, so the rows it appended
     # are copied into the ring's tail right where the op producing them ran.
@@ -1076,7 +1137,23 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
         "__attribute__((aligned(16)));",
     ]
     if ctx.scratch_bytes:
-        statics.append(f"static int8_t *const scratch = arena + {ctx.arena.scratch_offset};")
+        statics += [
+            "/* esp-nn reaches its scratch through file-static globals shared by",
+            "   every model in the image, and scratch is a *write* target: a",
+            "   per-model region would be handed to the other model's kernels,",
+            "   which then write past the smaller of the two. So there is one",
+            "   region for all of them, and the caller must not run two generated",
+            "   inferences at once (the firmware serialises them on one mutex).",
+            "   Link several models together and the region has to fit the largest",
+            "   *_INFER_SCRATCH_BYTES of them: define KWS_INFER_SHARED_SCRATCH and",
+            "   provide kws_infer_scratch[] (firmware/main/infer_lock.c). A build",
+            "   that links this model alone gets the definition below. */",
+            "#ifdef KWS_INFER_SHARED_SCRATCH",
+            "extern int8_t kws_infer_scratch[];",
+            "#else",
+            f"static int8_t kws_infer_scratch[{ctx.scratch_bytes}] __attribute__((aligned(16)));",
+            "#endif",
+        ]
     statics += [
         f"static int8_t {r.name}[{r.bytes + r.new_rows * r.channels}] __attribute__((aligned(16)));"
         for r in rings
@@ -1088,19 +1165,42 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
     lines += ["\n".join(statics), "", "\n".join(ctx.consts), ""]
 
     # One name, one number: ARENA_BYTES/arena_bytes() is the transient planner
-    # arena (activations + esp-nn scratch), reused every call; STATE_BYTES/
-    # state_bytes() is the ring storage that persists *between* calls (0 for a
-    # stateless model like command). Task 6 compares the arena number, not the
-    # sum of both, against TFLM's arena ceiling.
+    # arena (the activations), reused every call; SCRATCH_BYTES is this model's
+    # share of the buffer esp-nn's kernels work in; STATE_BYTES/state_bytes() is
+    # the ring storage that persists *between* calls (0 for a stateless model
+    # like command). Task 6 compares the arena number, not the sum, against
+    # TFLM's arena ceiling.
     state_bytes = " + ".join(f"sizeof {r.name}" for r in rings) or "0"
 
-    reset = [f"void {name}_infer_reset(void)", "{"]
+    families = (("conv", "conv"), ("depthwise", "depthwise_conv"), ("softmax", "softmax"))
+    setters = [
+        f"    esp_nn_set_{setter}_scratch_buf(kws_infer_scratch);"
+        for family, setter in families
+        if family in ctx.families
+    ]
+    scratch_fn = [
+        "/* Point esp-nn's file-static scratch pointers at the shared region.",
+        "   Done at init *and* on entry to every inference: a TFLite Micro",
+        "   interpreter in the same image (the fallback build, and the on-device",
+        "   parity log) moves the very same globals when it runs, so re-pointing",
+        "   them is what makes this model's next call independent of whatever ran",
+        "   in between. Both stores are inside the caller's inference lock. */",
+        "static void set_scratch(void)",
+        "{",
+        *setters,
+        "}",
+        "",
+    ]
+
+    reset = scratch_fn if setters else []
+    reset += [f"void {name}_infer_reset(void)", "{"]
     reset += [f"    memset({r.name}, {fill[r.var_tensor]}, sizeof {r.name});" for r in rings]
     reset += [
         "}",
         "",
         f"void {name}_infer_init(void)",
         "{",
+        *(["    set_scratch();"] if setters else []),
         f"    {name}_infer_reset();",
         "}",
         "",
@@ -1126,7 +1226,8 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
             f"void {name}_infer_step(const int8_t in[{in_t.shape[-2]} * {in_t.shape[-1]}], "
             f"{out_ctype} *prob_q);\n"
         )
-        body = [signature, "{", *ctx.body, *shifts, "}"]
+        enter = ["    set_scratch();"] if setters else []
+        body = [signature, "{", *enter, *ctx.body, *shifts, "}"]
     else:
         signature = f"void {name}_infer(const int8_t in[{in_len}], {out_ctype} out[{out_len}])"
         decl = (
@@ -1145,30 +1246,36 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
             "#ifndef NDEBUG",
             "    assert(((uintptr_t) in & 15) == 0);",
             "#endif",
+            *(["    set_scratch();"] if setters else []),
             *ctx.body,
             "}",
         ]
     lines.append("\n".join(body))
+    lines.append("\n".join(scratch_query_lines(ctx, name)))
 
     header = (
         f"/* generated by kws-codegen from {name} -- do not edit */\n"
         "#pragma once\n#include <stddef.h>\n#include <stdint.h>\n\n"
         f"#define {name.upper()}_INFER_INPUT_LEN {in_len}\n"
         f"#define {name.upper()}_INFER_OUTPUT_LEN {out_len}\n"
-        "/* Transient arena: activations + esp-nn scratch, live only for the "
-        "duration of one call. It is one static array, so where it lands is a "
-        "link-time choice: define "
+        "/* Transient arena: the activations, live only for the duration of one "
+        "call (esp-nn's scratch is not in here -- see SCRATCH_BYTES below). It "
+        "is one static array, so where it lands is a link-time choice: define "
         f"{name.upper()}_INFER_ARENA_ATTR when compiling {name}_infer.c to a "
         "section attribute (ESP-IDF's EXT_RAM_BSS_ATTR puts it in PSRAM) to "
         "keep it out of internal .bss. The array stays 16-byte aligned and "
         "every offset handed to esp-nn is unchanged either way; only the speed "
         "of the memory behind it differs. */\n"
         f"#define {name.upper()}_INFER_ARENA_BYTES {ctx.arena.size}\n"
-        "/* Bytes at the end of the arena reserved for esp-nn's scratch buffer, "
-        "sized from the widest op by this module's port of "
-        "esp_nn_get_*_scratch_size_esp32s3. The firmware asks the real esp-nn "
-        "for the same number on the chip and refuses to run the generated path "
-        "if it answers more than this. */\n"
+        "/* Bytes of esp-nn scratch this model's widest op needs, sized by this "
+        "module's port of esp_nn_get_*_scratch_size_esp32s3. It is NOT part of "
+        "the arena: esp-nn's kernels reach their scratch through file-static "
+        "globals, so every generated model in an image shares one region "
+        "(kws_infer_scratch), which must be the largest of their "
+        "*_INFER_SCRATCH_BYTES, and no two of them may run at once. The "
+        "firmware asks the real esp-nn for this model's number on the chip "
+        f"({name}_infer_scratch_query below) and refuses to run the generated "
+        "path if it answers more than this. */\n"
         f"#define {name.upper()}_INFER_SCRATCH_BYTES {ctx.scratch_bytes}\n"
         "/* Persistent state: ring-buffer history that must survive between "
         f"calls (0 if {name} is stateless). Separate from the arena above -- "
@@ -1179,6 +1286,12 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
         f"void {name}_infer_init(void);\n"
         f"void {name}_infer_reset(void);\n" + decl + f"size_t {name}_infer_arena_bytes(void);\n"
         f"size_t {name}_infer_state_bytes(void);\n"
+        "/* What the real esp-nn on the real chip wants for this model's widest "
+        "op, asked with the very dims the kernels above are called with. Compare "
+        f"it against {name.upper()}_INFER_SCRATCH_BYTES at boot: if the chip "
+        "wants more, this module's port under-reserved and the kernels would "
+        "write past the shared scratch region. */\n"
+        f"int {name}_infer_scratch_query(void);\n"
         "\n#ifdef __cplusplus\n}\n#endif\n"
     )
     return {f"{name}_infer.c": "\n".join(lines) + "\n", f"{name}_infer.h": header}
@@ -1205,8 +1318,14 @@ def write_probe_vectors(tflite: bytes, op, inputs, expect, gen_dir) -> None:
         + "\n"
         + "\n".join(ctx.consts)
         + "\n\nvoid conv_probe(const int8_t *in, int8_t *out, void *scratch)\n{\n"
-        # FULLY_CONNECTED takes no scratch buffer; the harness passes one anyway.
-        + "    (void) scratch;\n"
+        # The whole-model files point esp-nn at the shared kws_infer_scratch in
+        # their init; the probe is one bare op with no init, so it points esp-nn
+        # at the buffer the harness passes instead. All three families are set
+        # because the probe wraps whichever op the parity test picked, and
+        # setting one esp-nn does not use is a no-op.
+        + "    esp_nn_set_conv_scratch_buf(scratch);\n"
+        + "    esp_nn_set_depthwise_conv_scratch_buf(scratch);\n"
+        + "    esp_nn_set_softmax_scratch_buf(scratch);\n"
         + "\n".join(ctx.body)
         + "\n}\n"
     )
@@ -1377,10 +1496,12 @@ def write(model_path, name: str, out_dir) -> dict[str, int]:
     (out_dir / f"{name}_smoke_vectors.h").write_text(smoke_vectors_text(blob, name))
     graph = tflite_graph.read_graph(blob)
     plan = rewrite_streaming(graph)
-    scratch = max((scratch_bytes(graph, op) for op in plan.ops), default=0)
-    arena = plan_arena(plan, scratch_bytes=scratch)
+    arena = plan_arena(plan)
     return {
         "arena_bytes": arena.size,
+        # This model's share of the region every generated model shares; not
+        # part of arena_bytes, and the region is sized by the largest of them.
+        "scratch_bytes": max((scratch_bytes(graph, op) for op in plan.ops), default=0),
         # Persistent-history bytes only (r.bytes), not the full C array size
         # (r.bytes + r.new_rows*r.channels) that WAKE_INFER_STATE_BYTES /
         # state_bytes() report -- see kws_de/codegen.py's _render for that
@@ -1448,5 +1569,5 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     info = write(model, args.name, args.out)
     print(
         f"{args.name}: {info['ops']} ops, arena {info['arena_bytes']} B, "
-        f"rings {info['ring_bytes']} B"
+        f"shared esp-nn scratch {info['scratch_bytes']} B, rings {info['ring_bytes']} B"
     )

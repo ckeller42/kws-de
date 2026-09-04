@@ -12,8 +12,22 @@
 #ifndef WAKE_INFER_ARENA_ATTR
 #define WAKE_INFER_ARENA_ATTR
 #endif
-WAKE_INFER_ARENA_ATTR static int8_t arena[15680] __attribute__((aligned(16)));
-static int8_t *const scratch = arena + 128;
+WAKE_INFER_ARENA_ATTR static int8_t arena[128] __attribute__((aligned(16)));
+/* esp-nn reaches its scratch through file-static globals shared by
+   every model in the image, and scratch is a *write* target: a
+   per-model region would be handed to the other model's kernels,
+   which then write past the smaller of the two. So there is one
+   region for all of them, and the caller must not run two generated
+   inferences at once (the firmware serialises them on one mutex).
+   Link several models together and the region has to fit the largest
+   *_INFER_SCRATCH_BYTES of them: define KWS_INFER_SHARED_SCRATCH and
+   provide kws_infer_scratch[] (firmware/main/infer_lock.c). A build
+   that links this model alone gets the definition below. */
+#ifdef KWS_INFER_SHARED_SCRATCH
+extern int8_t kws_infer_scratch[];
+#else
+static int8_t kws_infer_scratch[15552] __attribute__((aligned(16)));
+#endif
 static int8_t ring0[832] __attribute__((aligned(16)));
 static int8_t ring1[576] __attribute__((aligned(16)));
 static int8_t ring2[160] __attribute__((aligned(16)));
@@ -61,6 +75,18 @@ static const int8_t op36_w[1088] = {-2, 39, -46, 3, -10, 37, -16, 22, -47, -11, 
 static const int32_t op36_b[1] = {-485};
 static const int8_t op37_lut[256] = {-128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -127, -127, -127, -127, -127, -127, -126, -126, -125, -125, -124, -123, -122, -121, -120, -118, -116, -114, -111, -108, -104, -100, -95, -89, -82, -75, -66, -57, -47, -36, -24, -12, 0, 12, 24, 36, 47, 57, 66, 75, 82, 89, 95, 100, 104, 108, 111, 114, 116, 118, 120, 121, 122, 123, 124, 125, 125, 126, 126, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127};
 
+/* Point esp-nn's file-static scratch pointers at the shared region.
+   Done at init *and* on entry to every inference: a TFLite Micro
+   interpreter in the same image (the fallback build, and the on-device
+   parity log) moves the very same globals when it runs, so re-pointing
+   them is what makes this model's next call independent of whatever ran
+   in between. Both stores are inside the caller's inference lock. */
+static void set_scratch(void)
+{
+    esp_nn_set_conv_scratch_buf(kws_infer_scratch);
+    esp_nn_set_depthwise_conv_scratch_buf(kws_infer_scratch);
+}
+
 void wake_infer_reset(void)
 {
     memset(ring0, 128, sizeof ring0);
@@ -73,6 +99,7 @@ void wake_infer_reset(void)
 
 void wake_infer_init(void)
 {
+    set_scratch();
     wake_infer_reset();
 }
 
@@ -87,6 +114,7 @@ size_t wake_infer_state_bytes(void)
 }
 void wake_infer_step(const int8_t in[120], uint8_t *out)
 {
+    set_scratch();
     memcpy(ring3 + 80, in, 120);
     {
       const data_dims_t op14_in = { .width = 1, .height = 5, .channels = 40, .extra = 1 };
@@ -94,7 +122,6 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const data_dims_t op14_flt = { .width = 1, .height = 5, .channels = 40, .extra = 0 };
       const conv_params_t op14_p = { .in_offset = 128, .out_offset = -128, .stride = { 1, 3 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
       const quant_data_t op14_q = { .shift = (int32_t *)op14_shift, .mult = (int32_t *)op14_mult };
-      esp_nn_set_conv_scratch_buf(scratch);
       esp_nn_conv_s8(&op14_in, ring3, &op14_flt, op14_w, op14_b, &op14_out, (arena + 0), &op14_p, &op14_q);
     }
     memcpy(ring2 + 128, (arena + 0), 32);
@@ -104,7 +131,6 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const data_dims_t op17_flt = { .width = 1, .height = 5, .channels = 32, .extra = 0 };
       const dw_conv_params_t op17_p = { .in_offset = 128, .out_offset = -41, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
       const quant_data_t op17_q = { .shift = (int32_t *)op17_shift, .mult = (int32_t *)op17_mult };
-      esp_nn_set_depthwise_conv_scratch_buf(scratch);
       esp_nn_depthwise_conv_s8(&op17_in, ring2, &op17_flt, op17_w, op17_b, &op17_out, (arena + 64), &op17_p, &op17_q);
     }
     {
@@ -113,7 +139,6 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const data_dims_t op18_flt = { .width = 1, .height = 1, .channels = 32, .extra = 0 };
       const conv_params_t op18_p = { .in_offset = 41, .out_offset = -128, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
       const quant_data_t op18_q = { .shift = (int32_t *)op18_shift, .mult = (int32_t *)op18_mult };
-      esp_nn_set_conv_scratch_buf(scratch);
       esp_nn_conv_s8(&op18_in, (arena + 64), &op18_flt, op18_w, op18_b, &op18_out, (arena + 0), &op18_p, &op18_q);
     }
     memcpy(ring1 + 512, (arena + 0), 64);
@@ -123,7 +148,6 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const data_dims_t op23_flt = { .width = 1, .height = 9, .channels = 64, .extra = 0 };
       const dw_conv_params_t op23_p = { .in_offset = 128, .out_offset = -16, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
       const quant_data_t op23_q = { .shift = (int32_t *)op23_shift, .mult = (int32_t *)op23_mult };
-      esp_nn_set_depthwise_conv_scratch_buf(scratch);
       esp_nn_depthwise_conv_s8(&op23_in, ring1, &op23_flt, op23_w, op23_b, &op23_out, (arena + 0), &op23_p, &op23_q);
     }
     {
@@ -132,7 +156,6 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const data_dims_t op24_flt = { .width = 1, .height = 1, .channels = 64, .extra = 0 };
       const conv_params_t op24_p = { .in_offset = 16, .out_offset = -128, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
       const quant_data_t op24_q = { .shift = (int32_t *)op24_shift, .mult = (int32_t *)op24_mult };
-      esp_nn_set_conv_scratch_buf(scratch);
       esp_nn_conv_s8(&op24_in, (arena + 0), &op24_flt, op24_w, op24_b, &op24_out, (arena + 64), &op24_p, &op24_q);
     }
     memcpy(ring0 + 768, (arena + 64), 64);
@@ -142,7 +165,6 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const data_dims_t op29_flt = { .width = 1, .height = 13, .channels = 64, .extra = 0 };
       const dw_conv_params_t op29_p = { .in_offset = 128, .out_offset = -4, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
       const quant_data_t op29_q = { .shift = (int32_t *)op29_shift, .mult = (int32_t *)op29_mult };
-      esp_nn_set_depthwise_conv_scratch_buf(scratch);
       esp_nn_depthwise_conv_s8(&op29_in, ring0, &op29_flt, op29_w, op29_b, &op29_out, (arena + 0), &op29_p, &op29_q);
     }
     {
@@ -151,7 +173,6 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const data_dims_t op30_flt = { .width = 1, .height = 1, .channels = 64, .extra = 0 };
       const conv_params_t op30_p = { .in_offset = 4, .out_offset = -128, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
       const quant_data_t op30_q = { .shift = (int32_t *)op30_shift, .mult = (int32_t *)op30_mult };
-      esp_nn_set_conv_scratch_buf(scratch);
       esp_nn_conv_s8(&op30_in, (arena + 0), &op30_flt, op30_w, op30_b, &op30_out, (arena + 64), &op30_p, &op30_q);
     }
     memcpy(ring5 + 1280, (arena + 64), 64);
@@ -161,7 +182,6 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const data_dims_t op32_flt = { .width = 1, .height = 21, .channels = 64, .extra = 0 };
       const dw_conv_params_t op32_p = { .in_offset = 128, .out_offset = -14, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
       const quant_data_t op32_q = { .shift = (int32_t *)op32_shift, .mult = (int32_t *)op32_mult };
-      esp_nn_set_depthwise_conv_scratch_buf(scratch);
       esp_nn_depthwise_conv_s8(&op32_in, ring5, &op32_flt, op32_w, op32_b, &op32_out, (arena + 0), &op32_p, &op32_q);
     }
     {
@@ -170,7 +190,6 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const data_dims_t op33_flt = { .width = 1, .height = 1, .channels = 64, .extra = 0 };
       const conv_params_t op33_p = { .in_offset = 14, .out_offset = -128, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
       const quant_data_t op33_q = { .shift = (int32_t *)op33_shift, .mult = (int32_t *)op33_mult };
-      esp_nn_set_conv_scratch_buf(scratch);
       esp_nn_conv_s8(&op33_in, (arena + 0), &op33_flt, op33_w, op33_b, &op33_out, (arena + 64), &op33_p, &op33_q);
     }
     memcpy(ring4 + 1024, (arena + 64), 64);
@@ -185,4 +204,82 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
     memmove(ring3, ring3 + 120, 80);
     memmove(ring4, ring4 + 64, 1024);
     memmove(ring5, ring5 + 64, 1280);
+}
+int wake_infer_scratch_query(void)
+{
+    int most = 0;
+    int want;
+    {
+        const data_dims_t q14_in = { .width = 1, .height = 5, .channels = 40, .extra = 1 };
+        const data_dims_t q14_out = { .width = 1, .height = 1, .channels = 32, .extra = 1 };
+        const data_dims_t q14_flt = { .width = 1, .height = 5, .channels = 40, .extra = 0 };
+        const conv_params_t q14_p = { .in_offset = 128, .out_offset = -128, .stride = { 1, 3 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
+        want = esp_nn_get_conv_scratch_size(&q14_in, &q14_flt, &q14_out, &q14_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q17_in = { .width = 1, .height = 5, .channels = 32, .extra = 1 };
+        const data_dims_t q17_out = { .width = 1, .height = 1, .channels = 32, .extra = 1 };
+        const data_dims_t q17_flt = { .width = 1, .height = 5, .channels = 32, .extra = 0 };
+        const dw_conv_params_t q17_p = { .in_offset = 128, .out_offset = -41, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
+        want = esp_nn_get_depthwise_conv_scratch_size(&q17_in, &q17_flt, &q17_out, &q17_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q18_in = { .width = 1, .height = 1, .channels = 32, .extra = 1 };
+        const data_dims_t q18_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q18_flt = { .width = 1, .height = 1, .channels = 32, .extra = 0 };
+        const conv_params_t q18_p = { .in_offset = 41, .out_offset = -128, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
+        want = esp_nn_get_conv_scratch_size(&q18_in, &q18_flt, &q18_out, &q18_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q23_in = { .width = 1, .height = 9, .channels = 64, .extra = 1 };
+        const data_dims_t q23_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q23_flt = { .width = 1, .height = 9, .channels = 64, .extra = 0 };
+        const dw_conv_params_t q23_p = { .in_offset = 128, .out_offset = -16, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
+        want = esp_nn_get_depthwise_conv_scratch_size(&q23_in, &q23_flt, &q23_out, &q23_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q24_in = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q24_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q24_flt = { .width = 1, .height = 1, .channels = 64, .extra = 0 };
+        const conv_params_t q24_p = { .in_offset = 16, .out_offset = -128, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
+        want = esp_nn_get_conv_scratch_size(&q24_in, &q24_flt, &q24_out, &q24_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q29_in = { .width = 1, .height = 13, .channels = 64, .extra = 1 };
+        const data_dims_t q29_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q29_flt = { .width = 1, .height = 13, .channels = 64, .extra = 0 };
+        const dw_conv_params_t q29_p = { .in_offset = 128, .out_offset = -4, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
+        want = esp_nn_get_depthwise_conv_scratch_size(&q29_in, &q29_flt, &q29_out, &q29_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q30_in = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q30_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q30_flt = { .width = 1, .height = 1, .channels = 64, .extra = 0 };
+        const conv_params_t q30_p = { .in_offset = 4, .out_offset = -128, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
+        want = esp_nn_get_conv_scratch_size(&q30_in, &q30_flt, &q30_out, &q30_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q32_in = { .width = 1, .height = 21, .channels = 64, .extra = 1 };
+        const data_dims_t q32_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q32_flt = { .width = 1, .height = 21, .channels = 64, .extra = 0 };
+        const dw_conv_params_t q32_p = { .in_offset = 128, .out_offset = -14, .ch_mult = 1, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
+        want = esp_nn_get_depthwise_conv_scratch_size(&q32_in, &q32_flt, &q32_out, &q32_p);
+        if (want > most) most = want;
+    }
+    {
+        const data_dims_t q33_in = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q33_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
+        const data_dims_t q33_flt = { .width = 1, .height = 1, .channels = 64, .extra = 0 };
+        const conv_params_t q33_p = { .in_offset = 14, .out_offset = -128, .stride = { 1, 1 }, .padding = { 0, 0 }, .dilation = { 0, 0 }, .activation = { -128, 127 } };
+        want = esp_nn_get_conv_scratch_size(&q33_in, &q33_flt, &q33_out, &q33_p);
+        if (want > most) most = want;
+    }
+    return most;
 }

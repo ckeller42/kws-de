@@ -1,5 +1,6 @@
 import dataclasses
 import pathlib
+import re
 
 import pytest
 
@@ -181,36 +182,43 @@ def test_arena_reuses_the_slot_of_a_dead_tensor():
     assert arena.offsets[5] == 0
 
 
-def test_arena_accounts_for_scratch():
+def test_the_arena_holds_no_scratch():
+    """esp-nn's scratch pointers are file-static globals, so the scratch is one
+    region shared by every model in the image and cannot be a slice of any one
+    model's arena (final-review S-1). The planner must therefore size the arena
+    from the activations alone."""
     plan = codegen.rewrite_streaming(_streaming_graph())
-    plain = codegen.plan_arena(plan)
-    with_scratch = codegen.plan_arena(plan, scratch_bytes=1024)
-    assert with_scratch.size == plain.size + 1024
+    arena = codegen.plan_arena(plan)
+    live = max(arena.offsets[t] + codegen.tensor_bytes(plan.graph, t) for t in arena.offsets)
+    assert arena.size == -(-live // 16) * 16
 
 
 def _footprint(g):
-    """(arena bytes, ring/state bytes) exactly as codegen.generate sizes them:
-    the same plan_arena(scratch_bytes=...) call it makes, without generating
-    and re-parsing the C. arena is the transient planner arena (activations +
-    esp-nn scratch); state is ring storage that persists between calls."""
+    """(arena bytes, esp-nn scratch bytes, ring/state bytes) exactly as
+    codegen.generate sizes them, without generating and re-parsing the C. The
+    arena is the transient activations; scratch is this model's share of the
+    one region every generated model shares; state is ring storage that
+    persists between calls."""
     plan = codegen.rewrite_streaming(g)
     scratch = max((codegen.scratch_bytes(g, op) for op in plan.ops), default=0)
-    arena = codegen.plan_arena(plan, scratch_bytes=scratch)
+    arena = codegen.plan_arena(plan)
     state = sum(r.bytes + r.new_rows * r.channels for r in plan.rings)
-    return arena.size, state
+    return arena.size, scratch, state
 
 
 @needs_wake
 def test_wake_arena_is_at_most_the_tflm_arena():
     """A regression guard on the *real* generated numbers (S-3): the old form
     of this test called plan_arena() with no scratch, so it asserted
-    128 <= 40960 and could never fail."""
+    128 <= 40960 and could never fail. Scratch is counted here even though it
+    is no longer inside the arena -- it is still RAM this model needs."""
     g = tflite_graph.read_graph(WAKE.read_bytes())
-    arena, state = _footprint(g)
-    assert (arena, state) == (15680, 4200)
+    arena, scratch, state = _footprint(g)
+    assert (arena, scratch, state) == (128, 15552, 4200)
     tflm = codegen.tflm_arena_bytes(GEN / "wake_model_config.h", "KWS_WAKE_ARENA_BYTES")
     assert tflm == 40960
-    assert arena + state <= tflm, f"generated {arena + state} B exceeds TFLM's {tflm} B"
+    total = arena + scratch + state
+    assert total <= tflm, f"generated {total} B exceeds TFLM's {tflm} B"
 
 
 @needs_command
@@ -218,11 +226,12 @@ def test_command_arena_is_at_most_the_tflm_arena():
     """The command model's arena has much less headroom than wake's and had no
     ceiling test at all before this fix (S-3)."""
     g = tflite_graph.read_graph(COMMAND.read_bytes())
-    arena, state = _footprint(g)
+    arena, scratch, state = _footprint(g)
     assert state == 0  # stateless: no rings
     tflm = codegen.tflm_arena_bytes(GEN / "model_config.h", "KWS_MODEL_ARENA_BYTES")
     assert tflm == 65536
-    assert arena + state <= tflm, f"generated {arena + state} B exceeds TFLM's {tflm} B"
+    total = arena + scratch + state
+    assert total <= tflm, f"generated {total} B exceeds TFLM's {tflm} B"
 
 
 @needs_wake
@@ -543,7 +552,8 @@ def test_wake_arena_and_state_bytes_are_distinct_numbers():
     both the macro and the function conflated the two under one name."""
     files = codegen.generate(WAKE.read_bytes(), "wake")
     header, source = files["wake_infer.h"], files["wake_infer.c"]
-    assert "#define WAKE_INFER_ARENA_BYTES 15680" in header
+    assert "#define WAKE_INFER_ARENA_BYTES 128" in header
+    assert "#define WAKE_INFER_SCRATCH_BYTES 15552" in header
     assert "#define WAKE_INFER_STATE_BYTES 4200" in header
     assert "size_t wake_infer_state_bytes(void);" in header
     assert "return sizeof arena;" in source
@@ -591,10 +601,9 @@ def test_write_then_check_roundtrips(tmp_path):
     assert info["state_bytes"] == 4200
     # The firmware compares the on-chip esp-nn scratch query against this macro
     # and refuses to run if the chip wants more, so it must be the planner's
-    # real reserve (test_scratch_sizes_come_from_the_esp32s3_formulas) and fit
-    # inside the arena.
+    # real reserve (test_scratch_sizes_come_from_the_esp32s3_formulas).
     assert "#define WAKE_INFER_SCRATCH_BYTES 15552" in header
-    assert 15552 <= info["arena_bytes"]
+    assert info["scratch_bytes"] == 15552
     assert codegen.check(WAKE, "wake", tmp_path) == []
 
 
@@ -686,16 +695,57 @@ def test_command_check_is_clean_against_the_committed_headers():
 
 def test_command_write_then_check_roundtrips(tmp_path):
     info = codegen.write(EMBEDDED_COMMAND, "command", tmp_path)
-    assert info == {"arena_bytes": 51248, "ring_bytes": 0, "state_bytes": 0, "ops": 10}
+    assert info == {
+        "arena_bytes": 31360,
+        "scratch_bytes": 19888,
+        "ring_bytes": 0,
+        "state_bytes": 0,
+        "ops": 10,
+    }
     header = (tmp_path / "command_infer.h").read_text()
-    assert "#define COMMAND_INFER_ARENA_BYTES 51248" in header
+    assert "#define COMMAND_INFER_ARENA_BYTES 31360" in header
     assert "#define COMMAND_INFER_STATE_BYTES 0" in header
     # The firmware compares the on-chip esp-nn depthwise scratch query against
     # this macro and refuses to run the generated path if the chip wants more.
     assert "#define COMMAND_INFER_SCRATCH_BYTES 19888" in header
-    assert 19888 <= info["arena_bytes"]
     assert (tmp_path / "command_smoke_vectors.h").exists()
     assert codegen.check(EMBEDDED_COMMAND, "command", tmp_path) == []
+
+
+def _dims_lines(text):
+    """The data_dims_t/params declarations in `text`, with the op tag
+    normalised away so a kernel's and the query's can be compared."""
+    return {
+        re.sub(r"\b(?:op|q)(\d+)_", r"t\1_", line.strip())
+        for line in text.splitlines()
+        if "data_dims_t" in line or "params_t " in line
+    }
+
+
+def test_models_share_one_scratch_region_and_export_a_query_for_it():
+    """final-review S-1 and S-3, on the generated C itself.
+
+    S-1: esp-nn's scratch pointers are file-static globals, so the scratch is
+    one region for every model in the image, pointed at once per call rather
+    than per kernel -- not a slice of this model's arena, which the other
+    model's kernels would then write past.
+
+    S-3: the boot guard's dims come from the generator, so a regenerated model
+    cannot leave it querying an op that is no longer there. The query has to
+    describe exactly the ops the kernels run, which is what the last assertion
+    checks -- character for character, tag aside.
+    """
+    c = codegen.generate(codegen.model_bytes(EMBEDDED_COMMAND), "command")["command_infer.c"]
+    assert "extern int8_t kws_infer_scratch[];" in c  # linked with other models
+    assert "static int8_t kws_infer_scratch[19888]" in c  # linked alone
+    assert "*const scratch = arena" not in c
+    assert "esp_nn_set_conv_scratch_buf(kws_infer_scratch);" in c
+    assert c.count("    set_scratch();") == 2  # init, and every inference entry
+
+    kernels, _, query = c.partition("int command_infer_scratch_query(void)")
+    assert "esp_nn_get_conv_scratch_size(" in query
+    assert "esp_nn_get_depthwise_conv_scratch_size(" in query
+    assert _dims_lines(query) == _dims_lines(kernels)
 
 
 def test_padding_same_and_valid():

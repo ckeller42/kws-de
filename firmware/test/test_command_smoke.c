@@ -27,11 +27,14 @@ int main(void)
     int bad = 0;
     /* The firmware refuses to run the generated path when the chip's own
        esp_nn_get_depthwise_conv_scratch_size_esp32s3 answers more than this
-       reserve, so the reserve has to exist and to fit inside the arena it is
-       carved from. Its actual size can only be checked against esp-nn on the
-       device: the ANSI kernels this test links against ask for no scratch. */
-    assert(COMMAND_INFER_SCRATCH_BYTES > 0
-           && COMMAND_INFER_SCRATCH_BYTES <= COMMAND_INFER_ARENA_BYTES);
+       reserve, so the reserve has to exist. It is not carved out of the arena:
+       every generated model in an image shares one scratch region, because
+       esp-nn reaches it through file-static globals. The reserve's actual size
+       can only be checked against esp-nn on the device -- the ANSI kernels this
+       test links against ask for no scratch, so the generated query answers 0
+       here and only its linkage is exercised. */
+    assert(COMMAND_INFER_SCRATCH_BYTES > 0);
+    assert(command_infer_scratch_query() <= COMMAND_INFER_SCRATCH_BYTES);
     assert(COMMAND_INFER_STATE_BYTES == 0);          /* stateless: nothing to reset between calls */
     command_infer_init();
     for (int step = 0; step < COMMAND_SMOKE_STEPS; step++) {
