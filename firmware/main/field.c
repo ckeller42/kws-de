@@ -50,6 +50,16 @@ bool field_take_span(const field_state_t *f, uint32_t window_ms,
     return true;
 }
 
+uint32_t field_clamp_len(uint32_t start, uint32_t len, uint32_t head)
+{
+    /* Signed difference, so this stays right across the uint32 wrap. */
+    if ((int32_t)(start + len - head) <= 0) return len;
+    uint32_t fit = head - start;
+    /* fit > len can only mean head is BEHIND start (the same wrap, read the
+       other way), i.e. the take's audio is no longer in the ring at all. */
+    return fit < len ? fit : 0;
+}
+
 void field_disarm(field_state_t *f)
 {
     f->armed = false;

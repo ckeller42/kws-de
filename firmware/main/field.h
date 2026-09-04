@@ -19,8 +19,6 @@
 
 /** Audio kept in front of the wake fire, so the take contains the wake phrase. */
 #define FIELD_PREROLL_MS 1000
-/** One take: the pre-roll plus the assist window the recogniser listened in. */
-#define FIELD_TAKE_MS (FIELD_PREROLL_MS + ASSIST_WINDOW_MS)
 #define FIELD_PREROLL_SAMPLES (KWS_SAMPLE_RATE * FIELD_PREROLL_MS / 1000)
 #define FIELD_WINDOW_SAMPLES (KWS_SAMPLE_RATE * ASSIST_WINDOW_MS / 1000)
 #define FIELD_TAKE_SAMPLES (FIELD_PREROLL_SAMPLES + FIELD_WINDOW_SAMPLES)
@@ -49,8 +47,6 @@ typedef struct {
     bool enabled;       /**< The user's toggle, restored from NVS at boot. */
     bool armed;         /**< A wake fire is waiting for its window to close. */
     uint32_t fire_pos;  /**< audio_write_pos() at the fire that armed us. */
-    uint32_t taken;     /**< Field takes saved since boot. */
-    uint32_t dropped;   /**< Field takes dropped because storage was low. */
 } field_state_t;
 
 /** @brief One take handed from the wake task to the record task. The device's
@@ -68,17 +64,36 @@ typedef struct {
     char words[96];     /**< The same fires as "<word>:<conf>", joined by '|'. */
 } field_take_t;
 
-/** @brief Reset to disabled with zeroed accounting. */
+/**
+ * @brief Reset to disabled and unarmed.
+ * @param f Capture state.
+ */
 void field_reset(field_state_t *f);
-/** @brief Turn capture on/off. Turning it off also drops a pending take. */
+/**
+ * @brief Turn capture on/off.
+ * @param f  Capture state.
+ * @param on The user's toggle.
+ *
+ * Turning it off drops an *armed* take — one whose window has not closed yet.
+ * A take already handed to the recorder (window closed, write outstanding) is
+ * still written; the toggle stops new capture, it does not reach into the
+ * record queue.
+ */
 void field_set_enabled(field_state_t *f, bool on);
-/** @brief A wake fire arrived at ring position @p fire_pos. No-op while disabled. */
+/**
+ * @brief A wake fire arrived at ring position @p fire_pos. No-op while disabled.
+ * @param f        Capture state.
+ * @param fire_pos audio_write_pos() at the fire.
+ */
 void field_on_wake(field_state_t *f, uint32_t fire_pos);
 /**
  * @brief The span to copy for the armed take.
+ * @param f         Capture state.
  * @param window_ms How long the window was open (its close time minus the arming
  *        fire), so an extended window is captured whole instead of being cut to
  *        ASSIST_WINDOW_MS.
+ * @param start Out: absolute position of the take's first sample.
+ * @param len   Out: samples to copy out of the ring.
  * @param truncated Set true when the span did not fit FIELD_MAX_TAKE_SAMPLES and
  *        was cut at the end. The caller must then drop the take's device
  *        prediction: it cannot say which fires are still inside the audio.
@@ -88,7 +103,25 @@ void field_on_wake(field_state_t *f, uint32_t fire_pos);
  */
 bool field_take_span(const field_state_t *f, uint32_t window_ms,
                      uint32_t *start, uint32_t *len, bool *truncated);
-/** @brief Forget the armed take (it has been handed to the recorder). */
+/**
+ * @brief Shorten a span so it cannot read past the ring's write head.
+ * @param start Absolute position of the span's first sample.
+ * @param len   Samples the span wants.
+ * @param head  audio_write_pos() as read at copy time.
+ * @return @p len when the span ends at or before @p head; otherwise what is
+ *         actually written (0 if @p head is behind @p start).
+ *
+ * field_take_span() derives the end from the arming fire's ring position and
+ * the window's ms length, but the two were sampled one inference apart, so the
+ * computed end can sit a few dozen samples in FRONT of the head — which would
+ * copy stale audio from the ring's previous lap into the take's tail. Comparing
+ * as a signed difference keeps this correct across the uint32 wrap.
+ */
+uint32_t field_clamp_len(uint32_t start, uint32_t len, uint32_t head);
+/**
+ * @brief Forget the armed take (it has been handed to the recorder).
+ * @param f Capture state.
+ */
 void field_disarm(field_state_t *f);
 
 #ifdef __cplusplus

@@ -68,6 +68,19 @@ int main(void)
     field_set_enabled(&f, false);
     assert(!field_take_span(&f, ASSIST_WINDOW_MS, &start, &len, &cut));
 
+    /* The span's end is derived from the arming fire's ring position and the
+       window's ms length, and those two were sampled one inference apart, so it
+       can sit a few dozen samples IN FRONT of the write head. Copying that would
+       read the ring's previous lap into the take's tail; the clamp cuts it back
+       to what has actually been written. */
+    assert(field_clamp_len(1000, 500, 2000) == 500);   /* ends behind the head: untouched */
+    assert(field_clamp_len(1000, 500, 1500) == 500);   /* ends exactly at the head */
+    assert(field_clamp_len(1000, 500, 1468) == 468);   /* 32 samples past: cut back */
+    assert(field_clamp_len(1000, 500, 900) == 0);      /* head behind start: nothing to copy */
+    /* ...and it holds across the uint32 sample-counter wrap (every ~74 h). */
+    assert(field_clamp_len(0xFFFFFF00u, 500, 0xFFFFFF00u + 400u) == 400);
+    assert(field_clamp_len(0xFFFFFF00u, 500, 0xFFFFFF00u + 500u) == 500);
+
     printf("test_field OK\n");
     return 0;
 }

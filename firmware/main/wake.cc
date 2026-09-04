@@ -86,6 +86,16 @@ static volatile bool s_inject;       /* console-injected fire, see wake_inject_f
 static field_state_t s_field;        /* assist mode only: opt-in capture of real interactions */
 static uint32_t s_fire_ms;           /* ms-since-boot of the fire that armed s_field */
 static float s_fire_prob;            /* wake probability at that fire */
+static volatile bool s_field_persist; /* toggle changed mid-window: NVS write still owed */
+
+static void field_persist(bool on)
+{
+    nvs_handle_t h;
+    if (nvs_open("kws", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "field", on ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+}
 
 static void log_fire(uint32_t ms, float prob)
 {
@@ -359,6 +369,9 @@ static void wake_task(void *)
                     } else {
                         recognise_set_active(false);
                         post_field_take(now_ms);
+                        /* The window is shut: an NVS write owed by a mid-window
+                           toggle (wake_field_set) can be paid now. */
+                        if (s_field_persist) { s_field_persist = false; field_persist(s_field.enabled); }
                     }
                     ESP_LOGI(TAG, "assist: recogniser %s (window %lu)", listen ? "on" : "off",
                              (unsigned long)s_gate.windows);
@@ -418,6 +431,9 @@ extern "C" void wake_set_active(bool on)
        gate whose task has stopped ticking (see wake_window_open()). */
     if (!on) s_listening = false;
     if (!on && s_log) { fclose(s_log); s_log = nullptr; }
+    /* Leaving the mode is the other place an owed toggle write must be paid:
+       the wake task's closing edge will not run again in this mode. */
+    if (!on && s_field_persist) { s_field_persist = false; field_persist(s_field.enabled); }
 }
 
 extern "C" bool wake_window_open(void) { return s_listening; }
@@ -435,10 +451,16 @@ extern "C" bool wake_field_get(void) { return s_field.enabled; }
 
 extern "C" void wake_field_set(bool on)
 {
+    /* The in-RAM flag is the privacy control, so it takes effect NOW, on the
+       caller's task (LVGL or console). The NVS write behind it is flash I/O —
+       it suspends the cache for both cores, the very cost the take's own write
+       is deferred to avoid — and the "Aufnahme" switch lives on the one screen
+       where windows open. So while a window is open the write is owed, not
+       done, and the wake task pays it at the window's closing edge (or
+       wake_set_active() does, if the mode is left first). Racing the close by a
+       few ms only delays the write to the next close or mode exit; the value
+       persisted is always the current one. */
     field_set_enabled(&s_field, on);
-    nvs_handle_t h;
-    if (nvs_open("kws", NVS_READWRITE, &h) != ESP_OK) return;
-    nvs_set_u8(h, "field", on ? 1 : 0);
-    nvs_commit(h);
-    nvs_close(h);
+    if (wake_window_open()) { s_field_persist = true; return; }
+    field_persist(on);
 }

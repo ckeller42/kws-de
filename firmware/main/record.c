@@ -8,6 +8,7 @@
 #include "storage.h"
 #include "task.h"
 #include "vad.h"
+#include "wake.h"
 #include "wav.h"
 #include "prompts.h"
 #include "esp_heap_caps.h"
@@ -39,6 +40,7 @@ static SemaphoreHandle_t s_lock;
 static record_status_t s_st;
 static prompt_session_t s_prompts;
 static uint32_t s_speaker;
+static uint32_t s_boot;                       /* boot counter, bumped once in nvs_load() */
 static int s_paused = 1;
 static int16_t *s_take;                       /* PSRAM; see TAKE_BUF_SAMPLES */
 #define TAKE_MAX (KWS_SAMPLE_RATE * 6 + PREROLL_SAMPLES)
@@ -69,6 +71,14 @@ static void nvs_load(void)
     nvs_handle_t h;
     ESP_ERROR_CHECK(nvs_open("kws", NVS_READWRITE, &h));
     if (nvs_get_u32(h, "speaker", &s_speaker) != ESP_OK) { s_speaker = 1; nvs_set_u32(h, "speaker", 1); }
+    /* Field takes are named after ms-since-boot, which restarts at 0 every boot;
+       without this counter two boots of one speaker could collide on a file name
+       and the second would truncate the first. One NVS write per boot, at start-up
+       and never inside a window. */
+    if (nvs_get_u32(h, "boot", &s_boot) != ESP_OK) s_boot = 0;
+    s_boot++;
+    nvs_set_u32(h, "boot", s_boot);
+    nvs_commit(h);
     nvs_close(h);
 }
 
@@ -150,9 +160,10 @@ void record_post_field_take(const field_take_t *t)
     }
 }
 
-/* storage_root()/field/spkNN/<boot-ms>.wav plus one field.csv row. The speaker
+/* storage_root()/field/spkNN/<boot>-<ms>.wav plus one field.csv row. The speaker
    id is the current NVS id and is never bumped here — one boot of one user is
-   one field directory. */
+   one field directory; the boot counter in the name keeps two boots of the same
+   speaker from colliding on the same ms-since-boot. */
 static void save_field_take(void)
 {
     field_take_t t;
@@ -162,13 +173,18 @@ static void save_field_take(void)
     strlcpy(speaker, s_st.speaker, sizeof speaker);
     xSemaphoreGive(s_lock);
 
-    if (storage_free_bytes() < STORAGE_MIN_FREE_BYTES) {
-        ESP_LOGW(TAG, "field: dropped, storage low");
+    /* Copy FIRST — before any I/O at all, including the storage-floor check
+       below: a PSRAM memcpy takes the samples out of the ring before they can
+       age out, and FIELD_COPY_LATENCY_SAMPLES only reserves 0.2 s for it. The
+       span's end was derived from the arming fire's position and the window's
+       ms length, sampled one inference apart, so clamp it to the write head
+       rather than read the ring's previous lap into the take's tail. */
+    t.len = field_clamp_len(t.start, t.len, audio_write_pos());
+    if (t.len == 0) {
+        ESP_LOGW(TAG, "field: dropped, audio aged out of the ring");
         xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_dropped++; xSemaphoreGive(s_lock);
         return;
     }
-    /* Copy first: a PSRAM memcpy, no I/O, and it takes the samples out of the
-       ring before they can age out while we wait below. */
     audio_read(t.start + t.len, s_take, t.len);
     int peak = 0;
     for (uint32_t i = 0; i < t.len; i++) {
@@ -185,12 +201,24 @@ static void save_field_take(void)
        recorder for ever; the ring copy above is already safe in hand. */
     int waited = 0;
     for (; waited < 250 && wake_window_open(); waited++) vTaskDelay(pdMS_TO_TICKS(20));
-    if (waited == 250) ESP_LOGW(TAG, "field: window still open after 5 s, writing anyway");
+    /* Re-test: the loop also exits at 250 when the window closed during the last
+       delay, and that is a success, not a timeout. */
+    if (wake_window_open()) ESP_LOGW(TAG, "field: window still open after 5 s, writing anyway");
 
-    char dir[96], path[160], csv[128], name[24];
+    /* Only now any I/O: the storage floor is an esp_vfs_fat_info() -> f_getfree(),
+       which can scan the FAT and suspends the cache for both cores. Above the wait
+       it would land inside a window; the ring copy is already safe in hand, so
+       discarding it here costs nothing. */
+    if (storage_free_bytes() < STORAGE_MIN_FREE_BYTES) {
+        ESP_LOGW(TAG, "field: dropped, storage low");
+        xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_dropped++; xSemaphoreGive(s_lock);
+        return;
+    }
+
+    char dir[96], path[160], csv[128], name[32];
     snprintf(dir, sizeof dir, "%s/field", storage_root());              mkdir(dir, 0777);
     snprintf(dir, sizeof dir, "%s/field/%s", storage_root(), speaker);  mkdir(dir, 0777);
-    snprintf(name, sizeof name, "%lu.wav", (unsigned long)t.fire_ms);
+    snprintf(name, sizeof name, "%lu-%lu.wav", (unsigned long)s_boot, (unsigned long)t.fire_ms);
     snprintf(path, sizeof path, "%s/%s", dir, name);
     FILE *f = fopen(path, "wb");
     if (!f) {
@@ -217,8 +245,13 @@ static void save_field_take(void)
     if (fresh) fputs("file,fire_ms,wake_prob,device_intent,device_words,window_ms,ms,peak_dbfs\n", c);
     /* window_ms is how long the gate was really open; ms is the audio actually
        written. ms < FIELD_PREROLL_MS + window_ms means the take was cut to fit
-       the ring — those rows carry no device prediction (see field_take_span()).
-       fclose() flushes through FatFs, so only an in-flight row can be lost. */
+       the ring — those rows carry no device prediction (see field_take_span()),
+       and pull-recordings.sh carries window_ms through so QC can mark them.
+       fclose() flushes through FatFs, so only an in-flight row can be lost.
+       Nothing here quotes or escapes: the whole chain (this fprintf, the awk
+       -F, in pull-recordings.sh, Python's csv.DictReader) is safe only because
+       no config.DEVICES/ZONES/ACTIONS entry contains a comma or a quote. Adding
+       one to the vocabulary would silently shift every column after it. */
     fprintf(c, "%s,%lu,%.3f,%s,%s,%lu,%lu,%.1f\n", name, (unsigned long)t.fire_ms,
             (double)t.wake_prob, t.intent, t.words, (unsigned long)t.window_ms,
             (unsigned long)(t.len * 1000 / KWS_SAMPLE_RATE), peak_dbfs);
@@ -319,10 +352,19 @@ static void record_task(void *arg)
         switch (cmd) {                                    /* r == -1 or woken while paused */
         case REC_CMD_PAUSE: s_paused = 1; status_set(REC_IDLE); break;
         case REC_CMD_FIELD_TAKE:
-            /* Assist mode only, where the guided recorder is paused. If a
-               guided session is running, ignore it rather than corrupt the
-               take in progress. */
-            if (s_paused) save_field_take();
+            /* Assist mode only, where the guided recorder is paused. A guided
+               session owns s_take, so a field take arriving mid-session is
+               dropped rather than overwriting it — and counted, like every
+               other drop. Note capture_one()'s own xQueueReceive has already
+               abandoned the guided take by the time we get here; this case
+               cannot save that. Unreachable today: main.c makes assist and
+               record exclusive modes. */
+            if (s_paused) {
+                save_field_take();
+            } else {
+                ESP_LOGW(TAG, "field: dropped, a guided session owns the take buffer");
+                xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_dropped++; xSemaphoreGive(s_lock);
+            }
             break;
         case REC_CMD_START_SESSION:
             s_take_idx = 0; s_saved_takes = 0;
