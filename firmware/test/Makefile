@@ -1,13 +1,14 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -I../main
-TESTS := test_mfcc test_stream test_wav test_prompts test_vad test_wakefront test_assist_gate test_wake_smoke
+TESTS := test_mfcc test_stream test_wav test_prompts test_vad test_wakefront test_assist_gate \
+         test_wake_smoke test_command_smoke
 
 # Where the generated inference C and its vector headers live. Defaults to
 # the committed firmware/main/gen; tests/test_codegen_parity.py's whole-model
 # tests override this on the `make` command line to a scratch tmp_path
 # instead, so regenerating for a real-clip parity run never mutates the
-# tracked gen/ files. test_wake_smoke below always builds against the
-# default -- its vectors are committed, not regenerated per test run.
+# tracked gen/ files. The two *_smoke targets below always build against the
+# default -- their vectors are committed, not regenerated per test run.
 GEN_DIR ?= ../main/gen
 
 # The wake front-end is upstream TFLite-Micro/kissfft C++ (.cc), vendored
@@ -54,10 +55,10 @@ test_wakefront: test_wakefront.c ../main/wakefront.c $(MF_SRCS)
 # test_infer_parity/test_wake_parity/test_command_parity stay out of $(TESTS):
 # each needs sources only tests/test_codegen_parity.py produces (conv_probe.c,
 # a KWS_DATA_ROOT model's *_infer.c, real-clip vectors), so `make -C
-# firmware/test` must stay green without any of that. test_wake_smoke is
-# different -- its inputs (the committed wake_infer.c and wake_smoke_vectors.h)
-# need no model or data, only esp-nn itself, so it *is* in $(TESTS) and pulls
-# the $(ESP_NN) network clone into the default target.
+# firmware/test` must stay green without any of that. The *_smoke targets are
+# different -- their inputs (the committed *_infer.c and *_smoke_vectors.h)
+# need no model or data, only esp-nn itself, so they *are* in $(TESTS) and
+# pull the $(ESP_NN) network clone into the default target.
 ESP_NN_REF ?= v1.3.0
 ESP_NN ?= .esp-nn
 ESP_NN_SRCS := $(ESP_NN)/src/convolution/esp_nn_conv_ansi.c \
@@ -105,6 +106,11 @@ test_wake_smoke: test_wake_smoke.c $(GEN_DIR)/wake_infer.c $(GEN_DIR)/wake_smoke
 	$(CC) $(CFLAGS) -I$(GEN_DIR) -I$(ESP_NN)/include -c test_wake_smoke.c -o test_wake_smoke.o
 	$(CC) $(CFLAGS) -I$(ESP_NN)/include -c $(GEN_DIR)/wake_infer.c -o wake_infer_smoke.o
 	$(CC) $(ESP_NN_CFLAGS) -o $@ test_wake_smoke.o wake_infer_smoke.o $(ESP_NN_SRCS) -lm
+
+test_command_smoke: test_command_smoke.c $(GEN_DIR)/command_infer.c $(GEN_DIR)/command_smoke_vectors.h | $(ESP_NN)
+	$(CC) $(CFLAGS) -I$(GEN_DIR) -I$(ESP_NN)/include -c test_command_smoke.c -o test_command_smoke.o
+	$(CC) $(CFLAGS) -I$(ESP_NN)/include -c $(GEN_DIR)/command_infer.c -o command_infer_smoke.o
+	$(CC) $(ESP_NN_CFLAGS) -o $@ test_command_smoke.o command_infer_smoke.o $(ESP_NN_SRCS) -lm
 
 clean:
 	rm -f $(TESTS) test_infer_parity test_wake_parity test_command_parity *.o

@@ -21,7 +21,11 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 TEST_DIR = REPO / "firmware" / "test"
 GEN_DIR = REPO / "firmware" / "main" / "gen"
 WAKE = config.MODELS_DIR / "hey_bus.tflite"
-COMMAND = config.MODELS_DIR / "command.tflite"
+# The command model the FIRMWARE embeds, as the C array in the repo -- not
+# models/command*.tflite, which a training run rewrites without touching the
+# device headers, and which is therefore a different model. Parity only means
+# something against the bytes gen/command_infer.c was generated from.
+COMMAND = GEN_DIR / "model_data.h"
 
 # The layers the spec names: the command model's first 3x3 conv over a single
 # input channel, its 3x3 depthwise, its 1x1 conv and its (per-channel) FC; the
@@ -83,7 +87,7 @@ def test_layer_is_byte_identical(model, path, op_index, what):
     demand every output byte match the interpreter's."""
     if not path.exists():
         pytest.skip(f"{path} absent (KWS_DATA_ROOT)")
-    blob = path.read_bytes()
+    blob = codegen.model_bytes(path)
     graph = tflite_graph.read_graph(blob)
     op = graph.ops[op_index]
     assert op.name in codegen.EMITTERS, f"op {op_index} is {op.name}, not {what}"
@@ -103,7 +107,11 @@ def test_layer_is_byte_identical(model, path, op_index, what):
 
 WAKE_TAKES = config.DATA_DIR / "recordings" / "approved" / "wake"
 needs_wake = pytest.mark.skipif(not WAKE.exists(), reason=f"{WAKE} absent (KWS_DATA_ROOT)")
-needs_command = pytest.mark.skipif(not COMMAND.exists(), reason=f"{COMMAND} absent")
+# COMMAND itself is always present (it is in the repo); what these tests still
+# need is the feature split they draw real clips from.
+needs_command = pytest.mark.skipif(
+    not config.MODELS_DIR.exists(), reason="KWS_DATA_ROOT feature splits absent"
+)
 
 
 def _interpreter(blob: bytes):
@@ -200,7 +208,7 @@ def test_whole_command_model_matches_the_interpreter(tmp_path):
     """
     from kws_de import dataset
 
-    blob = COMMAND.read_bytes()
+    blob = codegen.model_bytes(COMMAND)
     itp, detail_in, detail_out = _interpreter(blob)
     in_scale, in_zp = detail_in["quantization"]
     rng = np.random.default_rng(7)

@@ -48,10 +48,14 @@ jobs:
           # config/generator change. See kws_de.firmware_gen.check.
           uv run kws-fwgen --check firmware/main/gen
           # The generated inference C is pure integer arithmetic over the model's
-          # own bytes, so its check is byte-exact — but the models are not in the
-          # repo, so this only bites where a model is present (a dev machine or
-          # the data host). Absent model: kws-codegen warns and exits 0.
+          # own bytes, so its check is byte-exact — but models/ is not in the
+          # repo, so the wake check only bites where a model is present (a dev
+          # machine or the data host). Absent model: kws-codegen warns, exits 0.
           uv run kws-codegen models/hey_bus.tflite --name wake --check firmware/main/gen
+          # The command model IS in the repo — gen/model_data.h is the C array
+          # the firmware embeds — so this one runs for real on every CI job and
+          # catches a generator change nobody regenerated and committed.
+          uv run kws-codegen firmware/main/gen/model_data.h --name command --check firmware/main/gen
   host-test:
     runs-on: ubuntu-latest
     steps:

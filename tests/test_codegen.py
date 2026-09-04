@@ -11,6 +11,11 @@ needs_wake = pytest.mark.skipif(not WAKE.exists(), reason=f"{WAKE} absent (KWS_D
 needs_command = pytest.mark.skipif(not COMMAND.exists(), reason=f"{COMMAND} absent")
 
 GEN = pathlib.Path(__file__).resolve().parents[1] / "firmware" / "main" / "gen"
+# The command model the firmware actually embeds, as a C array in the repo --
+# needs no KWS_DATA_ROOT, and is not the same bytes as models/command*.tflite
+# (a training run rewrites those; this one changes only when the device's model
+# does). See codegen.model_bytes.
+EMBEDDED_COMMAND = GEN / "model_data.h"
 
 
 def _tensor(index, shape, dtype="int8", scale=0.5, zp=-128, data=None):
@@ -618,11 +623,48 @@ def test_smoke_vectors_text_is_deterministic():
     assert "WAKE_SMOKE_EXPECT[64][1]" in a
 
 
-@needs_command
-def test_smoke_vectors_text_is_none_for_a_stateless_model():
-    """The command model has no rings -- nothing streaming to smoke-test, and
-    `write()`/`check()` skip the file entirely (see their `is not None` guard)."""
-    assert codegen.smoke_vectors_text(COMMAND.read_bytes(), "command") is None
+def test_smoke_vectors_text_for_a_stateless_model_is_independent_draws():
+    """The command model has no rings, so its fixture is `steps` independent
+    whole-input windows rather than one continuous clip -- and fewer of them,
+    because each window is the full 490 bytes."""
+    blob = codegen.model_bytes(EMBEDDED_COMMAND)
+    a = codegen.smoke_vectors_text(blob, "command")
+    assert a == codegen.smoke_vectors_text(blob, "command")
+    assert "#define COMMAND_SMOKE_STEPS 16" in a
+    assert "COMMAND_SMOKE_IN[16][490]" in a
+    assert "COMMAND_SMOKE_EXPECT[16][23]" in a
+
+
+def test_model_bytes_reads_the_firmware_c_array():
+    """gen/model_data.h is the model the device runs; the generated inference
+    has to be built from those exact bytes, not from whatever .tflite the
+    models directory holds today."""
+    blob = codegen.model_bytes(EMBEDDED_COMMAND)
+    config_h = (GEN / "model_config.h").read_text()
+    assert f"#define KWS_MODEL_BYTES {len(blob)}" in config_h
+    assert blob[4:8] == b"TFL3"
+
+
+def test_command_check_is_clean_against_the_committed_headers():
+    """Runs in CI too (no KWS_DATA_ROOT needed), unlike the wake equivalent:
+    a codegen.py edit that changes what the command emitters produce, without
+    a regenerate-and-commit, fails here."""
+    stale = codegen.check(EMBEDDED_COMMAND, "command", GEN)
+    assert stale == [], f"stale generated files: {stale}"
+
+
+def test_command_write_then_check_roundtrips(tmp_path):
+    info = codegen.write(EMBEDDED_COMMAND, "command", tmp_path)
+    assert info == {"arena_bytes": 51248, "ring_bytes": 0, "state_bytes": 0, "ops": 10}
+    header = (tmp_path / "command_infer.h").read_text()
+    assert "#define COMMAND_INFER_ARENA_BYTES 51248" in header
+    assert "#define COMMAND_INFER_STATE_BYTES 0" in header
+    # The firmware compares the on-chip esp-nn depthwise scratch query against
+    # this macro and refuses to run the generated path if the chip wants more.
+    assert "#define COMMAND_INFER_SCRATCH_BYTES 19888" in header
+    assert 19888 <= info["arena_bytes"]
+    assert (tmp_path / "command_smoke_vectors.h").exists()
+    assert codegen.check(EMBEDDED_COMMAND, "command", tmp_path) == []
 
 
 def test_padding_same_and_valid():

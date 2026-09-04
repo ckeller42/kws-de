@@ -1237,10 +1237,9 @@ def write_infer_vectors(name: str, clips, gen_dir) -> None:
     )
 
 
-def smoke_vectors_text(tflite: bytes, name: str, steps: int = 64, seed: int = 0) -> str | None:
-    """<name>_smoke_vectors.h: a small, deterministic, synthetic streaming
-    fixture for the committed <name>_infer.c -- `None` for a stateless model
-    (nothing streaming to smoke-test).
+def smoke_vectors_text(tflite: bytes, name: str, steps: int | None = None, seed: int = 0) -> str:
+    """<name>_smoke_vectors.h: a small, deterministic, synthetic fixture for
+    the committed <name>_infer.c.
 
     `steps` fixed-seed PRNG int8 feature windows, run once through the
     model's own BUILTIN_REF reference interpreter (the same dependency
@@ -1248,20 +1247,24 @@ def smoke_vectors_text(tflite: bytes, name: str, steps: int = 64, seed: int = 0)
     and frozen here as C arrays. No user recordings, no real model behaviour
     beyond "the reference kernels' own answer to synthetic noise" -- this is
     not a substitute for the real-clip parity in tests/test_codegen_parity.py
-    (KWS_DATA_ROOT), it exists so the *committed* wake_infer.c can be proven
+    (KWS_DATA_ROOT), it exists so the *committed* <name>_infer.c can be proven
     to still match some known-good answer with no model or data present at
-    all, which is what `firmware/test/test_wake_smoke` builds against in
-    `$(TESTS)` (see firmware/test/Makefile).
+    all, which is what `firmware/test/test_wake_smoke` and
+    `firmware/test/test_command_smoke` build against in `$(TESTS)` (see
+    firmware/test/Makefile).
+
+    A streaming model gets one continuous clip of `steps` windows, so the
+    fixture also exercises the ring state carried between calls. A stateless
+    one gets `steps` independent draws of its whole input instead: there is no
+    state to carry, and each draw is the command model's full 490-byte window
+    against the wake model's 120, so the default is smaller (16 vs 64) to keep
+    the committed file the same order of size.
     """
     graph = tflite_graph.read_graph(tflite)
     plan = rewrite_streaming(graph)
-    if not plan.rings:
-        return None
+    if steps is None:
+        steps = 64 if plan.rings else 16
     import tensorflow as tf
-
-    in_t = graph.tensors[graph.inputs[0]]
-    win, feat = in_t.shape[-2], in_t.shape[-1]
-    rows = np.random.default_rng(seed).integers(-128, 128, size=(steps * win, feat), dtype=np.int8)
 
     itp = tf.lite.Interpreter(
         model_content=tflite,
@@ -1270,14 +1273,26 @@ def smoke_vectors_text(tflite: bytes, name: str, steps: int = 64, seed: int = 0)
     itp.allocate_tensors()
     detail_in = itp.get_input_details()[0]
     detail_out = itp.get_output_details()[0]
-    itp.reset_all_variables()
     inputs, probs = [], []
-    for start in range(0, len(rows) - win + 1, win):
-        window = rows[start : start + win]
-        itp.set_tensor(detail_in["index"], window[None, ...].astype(np.int8))
-        itp.invoke()
-        inputs.append(window.ravel())
-        probs.append(itp.get_tensor(detail_out["index"]).ravel())
+    rng = np.random.default_rng(seed)
+    if plan.rings:
+        in_t = graph.tensors[graph.inputs[0]]
+        win, feat = in_t.shape[-2], in_t.shape[-1]
+        rows = rng.integers(-128, 128, size=(steps * win, feat), dtype=np.int8)
+        itp.reset_all_variables()
+        for start in range(0, len(rows) - win + 1, win):
+            window = rows[start : start + win]
+            itp.set_tensor(detail_in["index"], window[None, ...].astype(np.int8))
+            itp.invoke()
+            inputs.append(window.ravel())
+            probs.append(itp.get_tensor(detail_out["index"]).ravel())
+    else:
+        in_len = int(np.prod(detail_in["shape"]))
+        for window in rng.integers(-128, 128, size=(steps, in_len), dtype=np.int8):
+            itp.set_tensor(detail_in["index"], window.reshape(detail_in["shape"]))
+            itp.invoke()
+            inputs.append(window)
+            probs.append(itp.get_tensor(detail_out["index"]).ravel())
     inputs = np.array(inputs, np.int8)
     out_dtype = np.uint8 if detail_out["dtype"] == np.uint8 else np.int8
     expect = np.array(probs, out_dtype)
@@ -1291,9 +1306,28 @@ def smoke_vectors_text(tflite: bytes, name: str, steps: int = 64, seed: int = 0)
     )
 
 
-def write(tflite_path, name: str, out_dir) -> dict[str, int]:
-    """Generate <name>_infer.{c,h} (and, for a streaming model,
-    <name>_smoke_vectors.h) into out_dir. Returns a small report.
+def model_bytes(path) -> bytes:
+    """The model flatbuffer, from a .tflite file or from the C array header
+    the firmware actually embeds (gen/model_data.h, gen/wake_model_data.h).
+
+    The device runs the bytes in that header, not whatever .tflite currently
+    sits in the gitignored, regenerable models directory -- and the two do
+    drift, because re-exporting a model rewrites models/<name>.tflite without
+    touching the firmware header. Generating the inference from the header
+    keeps "the model the interpreter runs" and "the model the generated code
+    runs" the same object by construction, and it is also the only source CI
+    can see at all (models/ is not in the repository).
+    """
+    path = pathlib.Path(path)
+    if path.suffix != ".h":
+        return path.read_bytes()
+    body = path.read_text().split("{", 1)[1].rsplit("}", 1)[0]
+    return bytes(int(v, 0) for v in re.findall(r"0[xX][0-9a-fA-F]+|\d+", body))
+
+
+def write(model_path, name: str, out_dir) -> dict[str, int]:
+    """Generate <name>_infer.{c,h} and <name>_smoke_vectors.h into out_dir.
+    Returns a small report.
 
     Deliberately does not stamp the model id into the header comment: the
     existing whole-model parity tests (tests/test_codegen_parity.py) also
@@ -1304,15 +1338,13 @@ def write(tflite_path, name: str, out_dir) -> dict[str, int]:
     non-determinism `check()` exists to catch -- so both paths emit the same
     bytes. A stale header is already visible the strong way: `check()` fails.
     """
-    blob = pathlib.Path(tflite_path).read_bytes()
+    blob = model_bytes(model_path)
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     files = generate(blob, name)
     for filename, text in files.items():
         (out_dir / filename).write_text(text)
-    smoke = smoke_vectors_text(blob, name)
-    if smoke is not None:
-        (out_dir / f"{name}_smoke_vectors.h").write_text(smoke)
+    (out_dir / f"{name}_smoke_vectors.h").write_text(smoke_vectors_text(blob, name))
     graph = tflite_graph.read_graph(blob)
     plan = rewrite_streaming(graph)
     scratch = max((scratch_bytes(graph, op) for op in plan.ops), default=0)
@@ -1331,19 +1363,17 @@ def write(tflite_path, name: str, out_dir) -> dict[str, int]:
     }
 
 
-def check(tflite_path, name: str, committed_dir) -> list[str]:
+def check(model_path, name: str, committed_dir) -> list[str]:
     """Names of committed generated files that differ from a fresh generation.
 
     Byte-exact, unlike kws-fwgen's tolerance-based check: everything here is
     integer arithmetic on the model's own bytes, so any difference is a real
     difference -- a changed model, a changed generator, or a stale commit.
     """
-    blob = pathlib.Path(tflite_path).read_bytes()
+    blob = model_bytes(model_path)
     committed_dir = pathlib.Path(committed_dir)
     files = dict(generate(blob, name))
-    smoke = smoke_vectors_text(blob, name)
-    if smoke is not None:
-        files[f"{name}_smoke_vectors.h"] = smoke
+    files[f"{name}_smoke_vectors.h"] = smoke_vectors_text(blob, name)
     stale = []
     for filename, text in files.items():
         path = committed_dir / filename
@@ -1356,7 +1386,12 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     ap = argparse.ArgumentParser(
         description="Generate C inference (esp-nn calls) from a .tflite model."
     )
-    ap.add_argument("model", help="path to a .tflite file")
+    ap.add_argument(
+        "model",
+        help="path to a .tflite file, or to the C array header the firmware "
+        "embeds (firmware/main/gen/model_data.h) -- the header is the model "
+        "the device actually runs",
+    )
     ap.add_argument(
         "--name",
         required=True,
