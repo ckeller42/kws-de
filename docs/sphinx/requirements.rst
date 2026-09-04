@@ -369,13 +369,14 @@ Recogniser
    inside an assist window, and the wait is bounded by one command inference.
    The generated arena is one static array, so its placement is a
    link-time choice (Kconfig ``KWS_INFER_COMMAND_ARENA``) rather than an
-   allocation: PSRAM by default, internal SRAM as a measurement opt-in. The
-   scratch region stays internal either way, which is where nearly all of that
-   choice's ~1.7 ms lived: the default now measures ~27.3 ms for 4,336 B more
-   internal RAM instead of 51,248 B. PSRAM is the default for the arena because
-   51,248 B of internal SRAM is more than the board has spare — claiming it
-   leaves 8,431 B free and the record task's stack, which must be internal, is
-   then never created (:need:`REQ_FW_ARENA_PLACEMENT`).
+   allocation: PSRAM by default, internal SRAM as an opt-in. The scratch region
+   stays internal either way, which is where nearly all of that choice's
+   ~1.7 ms lived — the choice now covers 31,360 B of activations and is worth
+   27.3 -> 27.0 ms, measured, with 55,239 B free at recogniser start against
+   23,879 B. PSRAM stays the default because 31 KB of the scarcest memory on
+   the board is a poor trade for 0.3 ms; when that same choice still moved all
+   51,248 B it left 8,431 B free and the record task's stack, which must be
+   internal, was then never created (:need:`REQ_FW_ARENA_PLACEMENT`).
    Neither reserve is taken on trust: at boot the firmware calls
    ``<model>_infer_scratch_query()``, generated beside the kernels from the
    same dimensions, which asks the chip's own

@@ -62,25 +62,28 @@ not a code-generation one.
 
 Where the arena lives is a Kconfig choice (``KWS_INFER_COMMAND_ARENA``), and
 the default is PSRAM. The generated arena is one static array, so unlike the
-interpreter's heap allocation its placement is settled at link time; putting
-all 51,248 B of it in internal ``.bss`` was measurably faster than putting all
-of it in PSRAM — **28.7 -> 27.0 ms** — but that is more internal SRAM than
-this device has to give. What sits in internal RAM now is only the 19,888 B
-esp-nn scratch region both models share, and that alone accounts for nearly
-all of the difference: the PSRAM default measures **27.3 ms** for 4,336 B more
-internal RAM instead of 51,248 B. The kernels hit scratch on every row and the
-activations far less often, so it is the half worth the fast memory. Moving
-the whole arena internal leaves 8,431 B free at recogniser start, and the
-record task's 8 KB stack (task stacks must be internal and cannot move to
-PSRAM) then fails to be created:
+interpreter's heap allocation its placement is settled at link time — and the
+memory that placement decides has shrunk. The 19,888 B esp-nn scratch region
+is always in internal ``.bss`` now (it is shared with the wake model, see
+below), so the choice covers only the 31,360 B of activations, and it is worth
+**27.3 -> 27.0 ms**: the kernels hit scratch on every output row and the
+activations far less often, so the part that was worth the fast memory is
+already there. The device measures 55,239 B free at recogniser start with the
+arena in PSRAM and 23,879 B with it internal, and every ``app_main`` task
+starts either way.
+
+Earlier — when the arena still carried the scratch and the choice moved all
+51,248 B — internal placement was worth 28.7 -> 27.0 ms and left only 8,431 B,
+and the record task's 8 KB stack (task stacks must be internal and cannot move
+to PSRAM) then failed to be created:
 
 .. code-block:: text
 
    E (27435) record: record task (8192 B stack) not created: free internal 8035, largest block 7680
 
-With the arena in PSRAM the same figure is **55,239 B** and every task starts.
-So a fifth of a millisecond buys back 51 KB of the scarcest memory on the
-board; internal is kept as the opt-in for measurement builds. The
+That is what set the default, and PSRAM stays the default: 31 KB of the
+scarcest memory on the board is a poor trade for 0.3 ms, and leaving the
+headroom is what keeps a future task from hitting the line above. The
 interpreter's own arena never fit internal either (``command arena 65536 B
 does not fit internal RAM (free 47019, largest block 31744) — using PSRAM``),
 so the comparison above is PSRAM against PSRAM.

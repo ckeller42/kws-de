@@ -21,27 +21,29 @@ choice KWS_INFER_COMMAND_ARENA
     depends on KWS_INFER_GENERATED
     default KWS_INFER_COMMAND_ARENA_PSRAM
     help
-      gen/command_infer.c's arena is 51,248 B — one static array, so this is a
-      link-time choice, not an allocation. The wake model's 15,680 B arena is
-      always internal: it is small, and it runs every 30 ms.
+      gen/command_infer.c's arena is 31,360 B of activations — one static
+      array, so this is a link-time choice, not an allocation. It does not
+      cover the 19,888 B esp-nn scratch region, which both models share and
+      which is always internal (see main/infer_lock.h), nor the wake model's
+      128 B arena and 4,200 B of ring state.
 
 config KWS_INFER_COMMAND_ARENA_PSRAM
     bool "PSRAM (.ext_ram.bss)"
     help
-      The default. 51 KB of internal SRAM is more than this device has to
-      spare: claiming it unconditionally starved the recognise, record and
-      console task stacks, which must be internal and cannot be moved. Costs
-      ~1.4 ms of the ~28 ms evaluation (the interpreter ran its arena from
-      PSRAM too, so this is still ~1.5x faster than the interpreter path).
+      The default, and it costs only ~0.3 ms of the ~27 ms evaluation: the
+      kernels hit scratch on every output row and the activations far less
+      often, and the scratch is internal either way. 31 KB of internal SRAM is
+      a poor trade for that — leaving it free is what keeps the record and
+      console task stacks, which must be internal and cannot be moved, from
+      failing to be created.
 
 config KWS_INFER_COMMAND_ARENA_INTERNAL
     bool "Internal SRAM (.bss)"
     help
-      ~1.4 ms faster, and 51,248 B of internal SRAM gone. Only viable in a
-      build that is not also creating the record/console tasks — it is the
-      measurement configuration, not a shipping one. If tasks stop being
-      created, this is why: look for "not created: free internal ..." in the
-      boot log.
+      ~0.3 ms faster, and 31,360 B of internal SRAM gone: measured 23,879 B
+      free at recogniser start against 55,239 B, with every app_main task
+      still created. If tasks ever do stop being created, this is the first
+      thing to look at: "not created: free internal ..." in the boot log.
 
 endchoice
 

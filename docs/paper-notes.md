@@ -1004,6 +1004,8 @@ Re-measured, same session, same method as E12/E13:
 | wake within-window spread | ±151 µs | **±97 µs** |
 | recognise step (arena in PSRAM) | 33.0 ms | **31 ms** |
 | command evaluation (arena in PSRAM) | 28,726 µs | **27,283 µs** |
+| command evaluation (arena internal) | 26,983 µs | 26,981 µs |
+| free internal, recogniser start, arena internal | 8,431 B (record task lost) | **23,879 B** (every task created) |
 | free internal, wake up | 81,371 B | 77,291 B (−4,080) |
 | free internal, recogniser start | 59,679 B | 55,239 B (−4,440) |
 | app image | 1,001,616 B | 1,002,560 B (+944: the scratch-query functions) |
@@ -1011,11 +1013,17 @@ Re-measured, same session, same method as E12/E13:
 
 **The interesting row is the command model's.** Its scratch used to live in the PSRAM arena;
 sharing put it in internal RAM, and that alone recovers nearly all of E13's arena-placement
-gap — 28.7 → 27.3 ms, against 27.0 ms for moving the whole 51 KB arena internal — for 4,336 B
-of internal RAM instead of 51,248 B. The kernels hit scratch on every output row and the
-activations far less often, so scratch is the half worth the fast memory. E13's conclusion
-stands but sharpens: the placement question is not "arena in PSRAM or not", it is "which part
-of the working set is worth internal SRAM".
+gap for 4,336 B of internal RAM instead of 51,248 B. The Kconfig choice that was worth
+1.7 ms is now worth **0.3 ms** (27,283 → 26,981 µs, both re-measured), because the part of the
+working set that wanted the fast memory is already in it: the kernels hit scratch on every
+output row and the activations far less often. The choice also stopped being a starvation
+risk — with only 31,360 B of activations to place, the internal build leaves 23,879 B free at
+recogniser start and every `app_main` task is created, where E13's 51,248 B left 8,431 B and
+lost the record task. PSRAM stays the default anyway: 31 KB of the scarcest memory for 0.3 ms
+is still a poor trade, and the headroom is what keeps the next task from hitting that line.
+E13's conclusion stands but sharpens: the placement question is not "arena in PSRAM or not",
+it is "which part of the working set is worth internal SRAM" — and answering it per-part
+bought both the speed and the memory.
 
 The wake numbers moved within the noise of the trace (the step is a mean per 2 s window, the
 evaluation figure a single sample from it); the fix adds one mutex pair and three pointer
