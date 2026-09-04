@@ -4,6 +4,26 @@
 void field_reset(field_state_t *f)
 {
     memset(f, 0, sizeof *f);
+    f->thresh = FIELD_THRESH_DEFAULT;
+}
+
+bool field_set_thresh(field_state_t *f, float v)
+{
+    /* Written as a positive test, so a NaN out of strtof() is rejected too. */
+    if (!(v >= FIELD_THRESH_MIN && v <= FIELD_THRESH_MAX)) return false;
+    f->thresh = v;
+    return true;
+}
+
+float field_gate_thresh(const field_state_t *f, bool assist, float prod)
+{
+    /* The loose gate exists to put near-misses and false alarms on the card, so
+       it applies exactly where takes are written and nowhere else: wake mode,
+       Assistent mode with capture off, and every other mode keep the production
+       gate untouched. The comparison against `prod` is the "never tighter"
+       guarantee in code rather than in prose. */
+    if (!assist || !f->enabled || f->thresh > prod) return prod;
+    return f->thresh;
 }
 
 void field_set_enabled(field_state_t *f, bool on)

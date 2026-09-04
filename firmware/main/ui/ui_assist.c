@@ -19,6 +19,19 @@ static uint32_t s_last_fire;
 static uint32_t s_flash_until;
 static bool s_listening;
 static bool s_field_on;              /* last toggle state painted, see ui_assist_refresh() */
+static float s_field_thresh;         /* last capture threshold painted on the badge */
+
+/* "REC", or "REC 0.60" when capture is running a LOOSER gate than production.
+   The takes on the card came from whichever detector was live, so the screen has
+   to say which one — a plain "REC" means what was recorded is exactly what the
+   shipped gate would have fired on. */
+static void rec_badge(lv_obj_t *l, float thresh)
+{
+    char buf[16];
+    if (thresh < WAKE_THRESHOLD) snprintf(buf, sizeof buf, "REC %.2f", (double)thresh);
+    else snprintf(buf, sizeof buf, "REC");
+    lv_label_set_text(l, buf);
+}
 
 static void on_back(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_MENU); }
 
@@ -62,7 +75,8 @@ void ui_show_assist(void)
     /* Opt-in field capture: a switch the user must turn on once, and a "REC"
        badge that is the only visible difference while it is on. */
     l_rec = lv_label_create(scr);
-    lv_label_set_text(l_rec, "REC");
+    s_field_thresh = wake_field_thresh_get();
+    rec_badge(l_rec, s_field_thresh);
     lv_obj_set_style_text_color(l_rec, lv_palette_main(LV_PALETTE_RED), 0);
     lv_obj_align(l_rec, LV_ALIGN_TOP_RIGHT, -12, 12);
 
@@ -114,6 +128,11 @@ void ui_assist_refresh(const wake_status_t *wst, const recognise_status_t *rst, 
        on` over the console must never leave the device recording with nothing
        on screen to say so. Edge-triggered, so the common frame does no work. */
     bool fon = wake_field_get();
+    float fth = wake_field_thresh_get();
+    if (fth != s_field_thresh) {
+        s_field_thresh = fth;
+        rec_badge(l_rec, fth);
+    }
     if (fon != s_field_on) {
         s_field_on = fon;
         if (fon) {

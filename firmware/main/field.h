@@ -54,6 +54,22 @@
  *  (field_take_span()'s `truncated`). */
 #define FIELD_MAX_TAKE_SAMPLES (AUDIO_RING_SAMPLES - FIELD_COPY_LATENCY_SAMPLES)
 
+/** @name Capture gate
+ * While capture is armed in Assistent mode the wake gate compares against this
+ * threshold instead of the production one (``WAKE_THRESHOLD``). A take exists
+ * only because the wake word fired, so a set gathered at the shipped threshold
+ * contains no near-misses and no false alarms — the two kinds of clip the wake
+ * model is most short of. Lowering the gate *while recording* is what puts them
+ * on the card; Whisper labels them afterwards and `kws-qc` reports what the
+ * production gate would have done with each one (its `would_fire` column).
+ * Nothing outside "capture on AND Assistent mode" is affected, and
+ * field_gate_thresh() can only loosen the gate it is handed, never tighten it.
+ * @{ */
+#define FIELD_THRESH_MIN 0.30f      /**< Below this the gate fires on room noise. */
+#define FIELD_THRESH_MAX 0.85f      /**< WAKE_THRESHOLD: the tightest setting is "no change". */
+#define FIELD_THRESH_DEFAULT 0.60f  /**< Real voice peaks 0.83-0.99, noise <= 0.44 (v4 model). */
+/** @} */
+
 /* The ring must still hold an un-extended take when the copy starts. It is 10 s
    today, so this is a guard against a future shrink, not a constraint. */
 _Static_assert(FIELD_TAKE_SAMPLES <= FIELD_MAX_TAKE_SAMPLES,
@@ -69,6 +85,7 @@ typedef struct {
     bool enabled;       /**< The user's toggle, restored from NVS at boot. */
     bool armed;         /**< A wake fire is waiting for its window to close. */
     uint32_t fire_pos;  /**< audio_write_pos() at the fire that armed us. */
+    float thresh;       /**< Capture gate, FIELD_THRESH_MIN..MAX; see field_gate_thresh(). */
 } field_state_t;
 
 /** @brief One take handed from the wake task to the record task. The device's
@@ -87,10 +104,30 @@ typedef struct {
 } field_take_t;
 
 /**
- * @brief Reset to disabled and unarmed.
+ * @brief Reset to disabled, unarmed and the default capture threshold.
  * @param f Capture state.
  */
 void field_reset(field_state_t *f);
+/**
+ * @brief Set the capture threshold, rejecting anything outside the range.
+ * @param f Capture state.
+ * @param v Probability in FIELD_THRESH_MIN..FIELD_THRESH_MAX.
+ * @return false and leaves the previous value standing when @p v is out of
+ *         range — this is the validation for both the console command and the
+ *         value restored from NVS, so neither can install a gate that fires on
+ *         silence.
+ */
+bool field_set_thresh(field_state_t *f, float v);
+/**
+ * @brief The probability a wake step must reach to count, right now.
+ * @param f      Capture state.
+ * @param assist Is the app in Assistent mode?
+ * @param prod   The production threshold (`WAKE_THRESHOLD`).
+ * @return @p prod everywhere except while capture is on AND @p assist, where it
+ *         is the capture threshold — and even there never above @p prod, so
+ *         this can only ever loosen the shipped detector, never tighten it.
+ */
+float field_gate_thresh(const field_state_t *f, bool assist, float prod);
 /**
  * @brief Turn capture on/off.
  * @param f  Capture state.

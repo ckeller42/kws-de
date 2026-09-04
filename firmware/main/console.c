@@ -1,10 +1,12 @@
 #include "console.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "beep.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_log.h"
+#include "field.h"
 #include "tusb_cdc_acm.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -68,9 +70,20 @@ static void handle_line(char *line)
         printf("ok\n");
     } else if (strcmp(cmd, "field") == 0) {
         char *arg = strtok(NULL, " ");
-        if (!arg) { printf("err missing on|off\n"); return; }
+        if (!arg) { printf("err missing on|off|thresh\n"); return; }
         if (strcmp(arg, "on") == 0) wake_field_set(true);
         else if (strcmp(arg, "off") == 0) wake_field_set(false);
+        else if (strcmp(arg, "thresh") == 0) {
+            /* The whole argument must be the number: strtof() alone would read
+               "0.6x" as 0.6 and silently install a threshold nobody typed. */
+            char *v = strtok(NULL, " "), *end = NULL;
+            float f = v ? strtof(v, &end) : 0.f;
+            if (!v || end == v || *end || !wake_field_thresh_set(f)) {
+                printf("err thresh must be %.2f..%.2f\n",
+                       (double)FIELD_THRESH_MIN, (double)FIELD_THRESH_MAX);
+                return;
+            }
+        }
         else { printf("err unknown field arg %s\n", arg); return; }
         printf("ok\n");
     } else if (strcmp(cmd, "status") == 0) {
@@ -86,7 +99,11 @@ static void handle_line(char *line)
                storage_is_sdcard() ? "MB" : "KB");
         record_status_t st;
         record_get_status(&st);
-        printf("field %s takes %lu dropped %lu\n", wake_field_get() ? "on" : "off",
+        /* thresh is printed whether capture is on or not: it is the setting that
+           will apply the next time it is switched on, and a capture session is
+           only interpretable if the gate it ran at is on the record. */
+        printf("field %s thresh %.2f takes %lu dropped %lu\n", wake_field_get() ? "on" : "off",
+               (double)wake_field_thresh_get(),
                (unsigned long)st.field_takes, (unsigned long)st.field_dropped);
         if (m == UI_MODE_RECORD || m == UI_MODE_RECORD_WAKE)
             printf("phase %s index %d count %d speaker %s\n",

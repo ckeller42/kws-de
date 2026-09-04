@@ -79,6 +79,17 @@ bool wake_window_open(void);
 bool wake_field_get(void);
 /** @brief Turn field capture on/off and persist it. Off drops any pending take. */
 void wake_field_set(bool on);
+/**
+ * @brief The capture threshold the gate uses while capture is on in Assistent
+ *        mode. Restored from NVS ("kws"/"fieldth"), FIELD_THRESH_DEFAULT
+ *        otherwise. @see field_gate_thresh() for where it does and does not apply.
+ */
+float wake_field_thresh_get(void);
+/**
+ * @brief Set and persist the capture threshold (serial console: `field thresh`).
+ * @return false, unchanged, when the value is outside FIELD_THRESH_MIN..MAX.
+ */
+bool wake_field_thresh_set(float v);
 
 #ifdef __cplusplus
 }

@@ -108,6 +108,30 @@ int main(void)
     assert(field_clamp_len(0xFFFFFF00u, 500, 0xFFFFFF00u + 400u) == 400);
     assert(field_clamp_len(0xFFFFFF00u, 500, 0xFFFFFF00u + 500u) == 500);
 
+    /* The capture gate. It is the ONE place the shipped detector's threshold is
+       allowed to move, and only while capture is on AND the app is in Assistent
+       mode — the two conditions under which a take is actually written. */
+    field_reset(&f);
+    assert(f.thresh == FIELD_THRESH_DEFAULT);
+    assert(field_gate_thresh(&f, true, 0.85f) == 0.85f);    /* capture off: production */
+    field_set_enabled(&f, true);
+    assert(field_gate_thresh(&f, false, 0.85f) == 0.85f);   /* not Assistent: production */
+    assert(field_gate_thresh(&f, true, 0.85f) == FIELD_THRESH_DEFAULT);
+
+    /* The range is validated at the setter, so neither the console command nor a
+       stale NVS byte can install a gate that fires on room noise; a rejected
+       value leaves the previous one standing. */
+    assert(field_set_thresh(&f, FIELD_THRESH_MIN));
+    assert(f.thresh == FIELD_THRESH_MIN);
+    assert(!field_set_thresh(&f, FIELD_THRESH_MIN - 0.01f) && f.thresh == FIELD_THRESH_MIN);
+    assert(!field_set_thresh(&f, FIELD_THRESH_MAX + 0.01f) && f.thresh == FIELD_THRESH_MIN);
+    assert(field_set_thresh(&f, FIELD_THRESH_MAX) && f.thresh == FIELD_THRESH_MAX);
+
+    /* ...and it can only ever LOOSEN the gate it is handed: a capture threshold
+       above production would tighten the detector while recording, hiding the
+       very misses the loose gate exists to catch. */
+    assert(field_gate_thresh(&f, true, 0.60f) == 0.60f);
+
     printf("test_field OK\n");
     return 0;
 }
