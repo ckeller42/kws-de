@@ -97,14 +97,15 @@ not a code-generation one.
 Where the arena lives is a Kconfig choice (``KWS_INFER_COMMAND_ARENA``), and
 the default is PSRAM. The generated arena is one static array, so unlike the
 interpreter's heap allocation its placement is settled at link time — and the
-memory that placement decides has shrunk. The 19,888 B esp-nn scratch region
+memory that placement decides has shrunk. The 29,824 B esp-nn scratch region
 is always in internal ``.bss`` now (it is shared with the wake model, see
-below), so the choice covers only the 31,360 B of activations, and it is worth
+below), so the choice covers only the activations — 47,040 B at the deployed
+width 48. Measured at width 32 (31,360 B of activations) it was worth
 **27.3 -> 27.0 ms**: the kernels hit scratch on every output row and the
 activations far less often, so the part that was worth the fast memory is
-already there. The device measures 55,239 B free at recogniser start with the
+already there. The device measured 55,239 B free at recogniser start with the
 arena in PSRAM and 23,879 B with it internal, and every ``app_main`` task
-starts either way.
+started either way.
 
 Earlier — when the arena still carried the scratch and the choice moved all
 51,248 B — internal placement was worth 28.7 -> 27.0 ms and left only 8,431 B,
@@ -115,16 +116,16 @@ to PSRAM) then failed to be created:
 
    E (27435) record: record task (8192 B stack) not created: free internal 8035, largest block 7680
 
-That is what set the default, and PSRAM stays the default: 31 KB of the
+That is what set the default, and PSRAM stays the default: 46 KB of the
 scarcest memory on the board is a poor trade for 0.3 ms, and leaving the
 headroom is what keeps a future task from hitting the line above. The
 interpreter's own arena never fit internal either (``command arena 65536 B
 does not fit internal RAM (free 47019, largest block 31744) — using PSRAM``),
 so the comparison above is PSRAM against PSRAM.
 
-The boot line reads ``inference: generated (esp-nn), 31360 B arena (static,
-PSRAM) + 0 B state + 19888 B shared scratch, esp-nn scratch 19888 B queried /
-19888 B reserved; TFLM not built in; free internal <n>`` — it names the
+The boot line reads ``inference: generated (esp-nn), 47040 B arena (static,
+PSRAM) + 0 B state + 29824 B shared scratch, esp-nn scratch 29824 B queried /
+29824 B reserved; TFLM not built in; free internal <n>`` — it names the
 placement that was actually linked, and the queried figure is what the chip's
 own ``esp_nn_get_*_scratch_size_esp32s3`` answer for **every** op of this model
 that takes scratch, asked by a query function the generator emits next to the
@@ -164,9 +165,9 @@ minutes of the peak trace per path: **wake step 1.89 -> 1.25 ms** (median of
 the per-window means the 2 s trace prints), within-window spread ±502 ->
 ±97 µs, and **free internal RAM after the wake model is set up 58,511 ->
 77,291 B** — the generated path's 128 B arena, 4,200 B of ring state and its
-share of the 19,888 B shared esp-nn scratch are ``.bss``, and the
+share of the shared esp-nn scratch are ``.bss``, and the
 interpreter's 40,960 B tensor arena is never allocated. The boot line
-reads ``inference: generated (esp-nn), 128 B arena + 4200 B state + 19888 B
+reads ``inference: generated (esp-nn), 128 B arena + 4200 B state + 29824 B
 shared scratch, esp-nn scratch 15552 B queried / 15552 B reserved; TFLM not
 built in; free internal <n>``: the queried figure is what the chip's own
 ``esp_nn_get_conv_scratch_size_esp32s3`` answers for this model's widest

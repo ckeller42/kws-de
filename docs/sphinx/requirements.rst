@@ -359,9 +359,9 @@ Recogniser
    kernel itself. The generated footprint replaces, not supplements, the TFLM
    arena in the default build. Wake: a 128 B transient arena plus 4,200 B of
    persistent ring state in ``.bss``, against the 40,960 B arena the
-   interpreter allocates. Command: a 31,360 B transient arena and no state at
+   interpreter allocates. Command: a 47,040 B transient arena and no state at
    all, against the 65,536 B arena the interpreter allocates. Both then work in
-   one shared 19,888 B esp-nn scratch region, sized for the widest op of either
+   one shared 29,824 B esp-nn scratch region, sized for the widest op of either
    — esp-nn's kernels reach their scratch through file-static globals, one per
    kernel family for the whole image, so a region per model would be handed to
    the other model's kernels, which *write* into it. The two evaluations are
@@ -371,12 +371,13 @@ Recogniser
    link-time choice (Kconfig ``KWS_INFER_COMMAND_ARENA``) rather than an
    allocation: PSRAM by default, internal SRAM as an opt-in. The scratch region
    stays internal either way, which is where nearly all of that choice's
-   ~1.7 ms lived — the choice now covers 31,360 B of activations and is worth
-   27.3 -> 27.0 ms, measured, with 55,239 B free at recogniser start against
-   23,879 B. PSRAM stays the default because 31 KB of the scarcest memory on
-   the board is a poor trade for 0.3 ms; when that same choice still moved all
-   51,248 B it left 8,431 B free and the record task's stack, which must be
-   internal, was then never created (:need:`REQ_FW_ARENA_PLACEMENT`).
+   ~1.7 ms lived — the choice covers activations only. Measured at width 32
+   (a 31,360 B arena) it was worth 27.3 -> 27.0 ms, with 55,239 B free at
+   recogniser start against 23,879 B. PSRAM stays the default, and more firmly
+   at the deployed width 48, whose arena is 47,040 B: 46 KB of the scarcest
+   memory on the board is a poor trade for 0.3 ms; when that same choice still
+   moved all 51,248 B it left 8,431 B free and the record task's stack, which
+   must be internal, was then never created (:need:`REQ_FW_ARENA_PLACEMENT`).
    Neither reserve is taken on trust: at boot the firmware calls
    ``<model>_infer_scratch_query()``, generated beside the kernels from the
    same dimensions, which asks the chip's own

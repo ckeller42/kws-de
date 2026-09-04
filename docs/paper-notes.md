@@ -1399,6 +1399,169 @@ field take is self-selected: it exists only because the wake word fired, so it m
 command accuracy *given* a successful wake, and says nothing about missed wakes, for
 which no trigger exists.
 
+### E18 — deploying the width-48 command model (2026-09-04, host-side; device measurement pending)
+
+E16 recommended width 48 and left one thing open: the runtime was a MAC-scaled estimate, not
+a measurement. This entry does the deploy and every host-side check; the device numbers are
+marked **pending** below and filled in from the CoreS3 in the same rig as E12–E15.
+
+The deploy is E15's procedure with the width flag added. `--width` suffixes the *output*
+artefacts only — the QAT SavedModel to load still has to be named in full, so `--model` and
+`--width` are both required and neither implies the other:
+
+```text
+kws-export --firmware --qat --prefix features_v3 --model command_v3_w48.keras --width 48
+kws-codegen firmware/main/gen/model_data.h --name command --out firmware/main/gen
+```
+
+| | old (E15, was on the device) | new (deployed) |
+|---|---|---|
+| `KWS_MODEL_ID` | `command_v3_qat.tflite@f985f282 2026-09-04` | `command_v3_w48_qat.tflite@8fa81d08 2026-09-04` |
+| size | 17,912 B | 25,832 B |
+| width / params / MACs | 32 / 5,879 / 2,070,496 | **48 / 11,111 / 4,234,704** |
+| INT8 held-out test accuracy | 90.7 % | **93.6 %** |
+| input scale / zero point | 3.18189716 / 71 | 3.18189716 / 71 (unchanged) |
+| output scale / zero point | 3.90625e-03 / -128 | unchanged |
+| classes / labels | 23 | 23, identical list |
+
+Input and output quantisation are *bit-identical* across the two models, which is a small
+piece of luck worth naming: the MFCC front-end feeds the same `(feature / 3.18189716) + 71`
+and the recogniser's threshold arithmetic reads the same output scale, so nothing outside the
+model had to move. The 23-class `static_assert`s in `recognise.cc`
+(`COMMAND_INFER_INPUT_LEN == KWS_N_FRAMES * KWS_N_MFCC`, `COMMAND_INFER_OUTPUT_LEN ==
+KWS_NUM_LABELS`, `COMMAND_INFER_STATE_BYTES == 0`) hold unchanged at 490 / 23 / 0.
+
+As in E15 the re-export reproduced the on-disk flatbuffer byte for byte (`8fa81d08`), so the
+bytes about to be flashed are exactly the bytes E16 evaluated. The wake pair was not touched
+and is byte-identical by sha256 — worth checking rather than assuming, because
+`kws-export --firmware` unconditionally rewrites `wake_model_data.h` / `wake_model_config.h`
+from `models/hey_bus.tflite`, so a wake model with a newer mtime would silently restamp
+`KWS_WAKE_MODEL_ID` inside a command-only deploy.
+
+**The real-voice case, carried over from E16.** Both models over the same QC-approved set
+(197 word clips, 101 phrases, 29 negatives, three speakers):
+
+| | w32 (was deployed) | w48 (deployed) |
+|---|---|---|
+| spk01 words (n=13) | 0.538 | **0.923** |
+| spk02 words (n=38) | 0.605 | **0.895** |
+| spk10 words (n=146) | 0.678 | **0.856** |
+| **all words (n=197)** | **0.655** | **0.868** |
+| phrase intent (n=101) | 8/101 | 8/101 |
+| false accepts (n=29) | 1/29 | **0/29** |
+
+Both speakers E15 regressed are recovered and overshoot their *pre*-session-2 numbers
+(0.615 / 0.737), and spk10 rises with them instead of trading against them. Phrase intent
+does not move — it has been the open problem since v3 and is a decoding problem, not a
+capacity one. All three speakers are in training for both models, so these are
+personalisation numbers, not generalisation; the comparison across widths is fair (identical
+manifest, identical clips) but the absolute values are not a held-out estimate.
+
+**The declared MAC budget had to move.** `kws_de.config.MAX_MACS` was 3,000,000 — a spec
+figure from the original plan, written into every export's `budgets.macs` sidecar and
+asserted by `kws_de.budgets.check_budgets`. The deployed model spends 4,234,704. It is raised
+to 5,000,000 in `kws_de/config.py` with the reason on the line above it: the binding
+constraint on this model is the 100 ms recognise step it has to fit inside, and a MAC count
+is only a proxy for that. Two other budgets were checked and left alone — 25,832 B against
+`MAX_MODEL_BYTES` 500,000 and a 47,040 B arena against `MAX_ARENA_BYTES` 300,000, both an
+order of magnitude clear. (`MAX_LATENCY_MS = 30` is dead: nothing reads it, and the real
+step budget is the 100 ms one the recogniser loop enforces. Worth deleting or wiring up, not
+done here.)
+
+**Memory: the arena doubles in PSRAM, and 9,936 B of internal RAM goes.** `kws-codegen`
+reports `command: 10 ops, arena 47040 B, shared esp-nn scratch 29824 B, rings 0 B`. Ten ops,
+unchanged — same architecture, wider. The arena is `.ext_ram.bss` and irrelevant at this
+size. The scratch is the one that costs: it is internal `.bss`, shared with the wake model
+and sized to whichever asks for more, and the wake model asks for 15,552 B, so the whole
+region moves with the command model:
+
+| | E15 (w32) | E18 (w48) | delta |
+|---|---|---|---|
+| command arena (PSRAM `.bss`) | 31,360 B | 47,040 B | +15,680 B |
+| `COMMAND_INFER_SCRATCH_BYTES` | 19,888 B | 29,824 B | +9,936 B |
+| `WAKE_INFER_SCRATCH_BYTES` | 15,552 B | 15,552 B | — |
+| shared `KWS_INFER_SCRATCH_BYTES` | 19,888 B | **29,824 B** | +9,936 B |
+| DIRAM `.bss`, whole image | 124,296 B | 134,232 B | **+9,936 B** |
+| DIRAM free, whole image | 134,525 B | 124,589 B | -9,936 B |
+| app image (default config) | 1,002,560 B | 1,008,688 B | +6,128 B |
+| app image (`CONFIG_KWS_INFER_GENERATED=n`) | — | 1,174,096 B | — |
+
+The DIRAM row is the one that makes the argument, and it is a link-map measurement rather
+than an estimate: internal `.bss` grows by *exactly* the 9,936 B the shared scratch grew, and
+not one byte more. The 15,680 B the arena gained landed in PSRAM, where `idf.py size` reports
+it under "Flash Data `.bss`" at 47,040 B — which is also the cheapest possible confirmation
+that `KWS_INFER_COMMAND_ARENA_PSRAM` is still in force and the arena did not quietly fall
+back to internal SRAM. Free internal at recogniser start should therefore land near
+55,103 - 9,936 = **~45,167 B** (E15 measured 55,103 B), comfortably above E14's 23,879 B
+"every task created" mark and far from E13's 8,431 B, where the record task's 8 KB stack
+failed to spawn. **Device: pending** — the boot line reports the real figure.
+
+The boot guard is unchanged in shape and now carries the new number: `command_infer.c`
+emits `command_infer_scratch_query()` from the same dimensions it emits the kernels from,
+and `recognise.cc` refuses the generated path if the chip's own
+`esp_nn_get_*_scratch_size_esp32s3` answers more than `COMMAND_INFER_SCRATCH_BYTES`. Width 48
+keeps the fast `channels % 16 == 0` depthwise path (E16), so the expected answer is
+29,824 B queried against 29,824 B reserved.
+
+**Expected runtime, and what will settle it.** MAC-scaling E15's measured 27.3 ms command
+evaluation by 2.05x gives ~55.8 ms, and the recognise step ~59 ms against a 100 ms budget.
+Real-time holds with room, but CPU load roughly doubles, and in assist mode the recogniser
+shares a core with the wake task whose mutex wait is bounded by one command inference. That
+is the number this entry exists to replace:
+
+| | E15 (w32, measured) | E18 (w48) |
+|---|---|---|
+| recognise step, arena in PSRAM | 31 ms | ~59 ms est. — **device: pending** |
+| command evaluation | 27,108–27,451 µs | ~55,800 µs est. — **device: pending** |
+| wake step | 1,245–1,287 µs | unchanged expected — **device: pending** |
+| free internal, recogniser start | 55,103 B | ~45,167 B est. — **device: pending** |
+| `selftest int8 out:` | `-124,-128,-112,…` | **device: pending** (must differ) |
+
+If it measures badly the fallback is staying at w32 — **not** stepping down to w40, which
+E16 showed asks for 59,632 B of shared internal scratch, thirty kilobytes more than the
+larger model, because 40 channels miss esp-nn's 16-alignment fast path.
+
+**Host checks, all clean.** `kws-fwgen --check firmware/main/gen` and both `kws-codegen
+--check` runs (command and wake) exit 0 with no drift warning. `make -C firmware/test`:
+`command smoke: 0/368 bytes differ`, `wake smoke: 0/64 steps differ`, `host tests OK` — the
+368 is unchanged because it is a shape (16 synthetic windows x 23 classes), not a weight
+count, while the expected values inside `command_smoke_vectors.h` all changed. The real-clip
+harness reads the embedded bytes, so it picked the new model up with no argument:
+`command parity: 0/1564 bytes differ (68 clips, arena 47040 B)` — 4 synthetic vectors plus 64
+real `features_v3` test-split windows, zero LSB difference against the TFLite interpreter.
+Both ESP-IDF v5.5.5 Docker builds pass, default and `CONFIG_KWS_INFER_GENERATED=n`.
+
+Two host tests had the width-32 figures written into them as literals and were updated:
+`test_command_write_then_check_roundtrips` (arena and scratch in the returned info dict and
+in the emitted `#define`s) and
+`test_models_share_one_scratch_region_and_export_a_query_for_it` (the
+`static int8_t kws_infer_scratch[19888]` fallback declaration). Both are pinning real,
+deliberate constants, so hard-coding them is right and updating them by hand is the intended
+cost of a deploy — but it does mean a model swap cannot be a `gen/`-only diff, which is worth
+knowing before the next one.
+
+One failure in `pytest -q` is **not** from this change:
+`test_whole_wake_model_matches_the_interpreter_on_every_step` asserts `len(takes) == 10`
+against `data/recordings/approved/wake`, which now holds 13 approved takes. It fails
+identically on `main` with the same data root, and the fix (replay the first ten rather than
+require exactly ten) is already on `feat/field-capture`. Everything else: 266 passed,
+1 skipped, 1 xfailed.
+
+**Documentation caught up in the same commit, deliberately.** E15's lesson was that stale
+generated captions survive because nothing checks them, and a width change invalidates more
+prose than a retrain does. `docs/sphinx/_generated/command.dot` is regenerated (its caption
+now reads "10 ops, 28 tensors, 9,744 weights, 4,234,704 MACs, 0 B state, 25,832 B file"), the
+per-op MAC table in `models.rst` is rewritten at width 48 and sums to 4,234,704 against
+`kws_de.budgets.estimate_macs`, the upward half of the width sweep is recorded as its own
+table — with the warning that it is scored against the session-2 baseline, so its width-32
+row reads 0.538 / 0.605 and not the 0.615 / 0.737 of the table above it — and the four places
+that quote the arena and scratch sizes as current fact (`models.rst`, `firmware.rst`,
+`requirements.rst`, `tests.rst`, plus the `KWS_INFER_COMMAND_ARENA` Kconfig help) now carry
+47,040 / 29,824. Where a number was a *device measurement* at width 32 — the 27.3 -> 27.0 ms
+placement delta, 55,239 B versus 23,879 B free — it is left alone and labelled as measured at
+width 32, because restamping a measurement with an estimate is exactly the mistake E15
+recorded.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

@@ -134,7 +134,7 @@ binary is a small ``assert``-based program built by
    ``tests/test_codegen_parity.py`` extends the byte-for-byte comparison to
    the command model over 4 synthetic vectors plus 64 real test-split feature
    windows (``command parity: 0/1564 bytes differ (68 clips, arena
-   31360 B)``). Both generate
+   47040 B)``). Both generate
    their vectors into a scratch directory, never into the committed
    ``firmware/main/gen``. Zero LSB difference is the pass condition
    throughout; one differing byte fails.
@@ -159,7 +159,7 @@ binary is a small ``assert``-based program built by
    the committed ``firmware/main/gen/`` headers, and the per-op esp-nn scratch
    sizes are pinned to hand-derived
    ``esp_nn_get_*_scratch_size_esp32s3`` values (15,552 B for the wake model's
-   widest convolution, 19,888 B for the command model's 3x3 depthwise). The
+   widest convolution, 29,824 B for the command model's 3x3 depthwise). The
    device confirms those figures at boot by asking the real esp-nn on the real
    chip — through ``<model>_infer_scratch_query()``, which the generator emits
    from the same dimensions it emits the kernels from — and refuses the

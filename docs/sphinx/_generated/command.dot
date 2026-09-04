@@ -6,27 +6,27 @@ digraph model {
   OUT [label="output", shape=oval, style=filled, fillcolor="#F6D3CB", color="#C94B32"];
   subgraph cluster_0 {
     label="Stem"; style=dashed; color="#C98A1E"; fontsize=11;
-    op0 [label="conv 3x3, 1->32\n141,120 MAC"];
+    op0 [label="conv 3x3, 1->48\n211,680 MAC"];
   }
   subgraph cluster_1 {
     label="Block 1 -- depthwise 3x3"; style=dashed; color="#C98A1E"; fontsize=11;
-    op1 [label="depthwise 3x3 x32\n141,120 MAC"];
-    op2 [label="conv 1x1, 32->32\n501,760 MAC"];
+    op1 [label="depthwise 3x3 x48\n211,680 MAC"];
+    op2 [label="conv 1x1, 48->48\n1,128,960 MAC"];
   }
   subgraph cluster_2 {
     label="Block 2 -- depthwise 3x3"; style=dashed; color="#C98A1E"; fontsize=11;
-    op3 [label="depthwise 3x3 x32\n141,120 MAC"];
-    op4 [label="conv 1x1, 32->32\n501,760 MAC"];
+    op3 [label="depthwise 3x3 x48\n211,680 MAC"];
+    op4 [label="conv 1x1, 48->48\n1,128,960 MAC"];
   }
   subgraph cluster_3 {
     label="Block 3 -- depthwise 3x3"; style=dashed; color="#C98A1E"; fontsize=11;
-    op5 [label="depthwise 3x3 x32\n141,120 MAC"];
-    op6 [label="conv 1x1, 32->32\n501,760 MAC"];
+    op5 [label="depthwise 3x3 x48\n211,680 MAC"];
+    op6 [label="conv 1x1, 48->48\n1,128,960 MAC"];
   }
   subgraph cluster_4 {
     label="Head"; style=dashed; color="#C98A1E"; fontsize=11;
-    op7 [label="mean (global avg pool) -> 32"];
-    op8 [label="dense 32->23\n736 MAC"];
+    op7 [label="mean (global avg pool) -> 48"];
+    op8 [label="dense 48->23\n1,104 MAC"];
     op9 [label="softmax"];
   }
   IN -> op0 [color="#C98A1E"];
@@ -40,5 +40,5 @@ digraph model {
   op7 -> op8 [color="#C98A1E"];
   op8 -> op9 [color="#C98A1E"];
   op9 -> OUT [color="#C94B32", penwidth=2];
-  labelloc="b"; fontsize=11; fontname="Helvetica"; label="Command DS-CNN (v3, QAT)\n\n10 ops, 28 tensors, 4,960 weights, 2,070,496 MACs, 0 B state, 17,912 B file";
+  labelloc="b"; fontsize=11; fontname="Helvetica"; label="Command DS-CNN (v3, QAT, width 48)\n\n10 ops, 28 tensors, 9,744 weights, 4,234,704 MACs, 0 B state, 25,832 B file";
 }
