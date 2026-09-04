@@ -53,26 +53,49 @@ one of exactly two labels, never mixed — ``held-out`` or
      - **0.615** (n=13), *user-customised*
      - **0.737** (n=38), *user-customised*
      - 0/10, *user-customised*
-   * - v3 QAT, session-2 rebuild (3 speakers; **deployed**, 2026-09-04)
+   * - v3 QAT, session-2 rebuild (3 speakers; 2026-09-04)
      - 90.7 %
      - 17,912 B
      - 0.538 (n=13), *user-customised*
      - 0.605 (n=38), *user-customised*
      - 0/10, *user-customised*
+   * - v3 QAT, **width 48** (3 speakers; **deployed**, 2026-09-04)
+     - **93.6 %**
+     - 25,832 B
+     - **0.923** (n=13), *user-customised*
+     - **0.895** (n=38), *user-customised*
+     - 0/10, *user-customised*
 
 The last row is the model on the device — ``KWS_MODEL_ID
-"command_v3_qat.tflite@f985f282 2026-09-04"``, 17,912 B. It is the only
-row that goes *down* on both of this table's real-voice columns, and it
-was still the one deployed, because those two columns are the narrowest
-view of the change: the rebuild folded a third speaker's session into
-train, and this table has no column for that speaker. Measured over the
-whole approved set instead — 197 word clips, 101 phrases, 29 negatives,
-all three speakers, both models on the same clips — word accuracy goes
-0.538 → **0.655**, phrase intent 6/101 → **8/101**, and the false-accept
-rate 3/29 → **1/29**; ``spk10`` alone moves 0.479 → 0.678 on 146 clips.
-A fixed-capacity model split across three voices instead of two is the
-plain reading of why the first two speakers gave ground. Full
-side-by-side table: ``docs/paper-notes.md`` §3, E15.
+"command_v3_w48_qat.tflite@8fa81d08 2026-09-04"``, 25,832 B: the same
+DS-CNN with its channel count raised from 32 to 48, so 11,111 parameters
+and 4,234,704 MACs against 5,879 and 2,070,496. On the CoreS3 that costs a
+**46–47 ms recognise step** against a 100 ms budget (from 31 ms), with the
+command evaluation at 42.2 ms and 45,431 B of internal RAM still free when
+the recogniser starts. Invoke time rose 1.55x on 2.05x the MACs — wider is
+cheaper per MAC here, because 48 channels fill esp-nn's SIMD lanes and the
+fixed per-op costs do not grow with the arithmetic.
+
+The row above it is the model it replaced, and that one is the only row in
+the table that went *down* on both real-voice columns. It shipped anyway,
+because those two columns are the narrowest view of that particular
+change: the session-2 rebuild folded a third speaker into train and this
+table has no column for them. Over the whole approved set — 197 word
+clips, 101 phrases, 29 negatives, three speakers — it moved word accuracy
+0.538 → 0.655 and the false-accept rate 3/29 → 1/29.
+
+The per-speaker losses were real, though, and capacity is what fixed them.
+At 48 channels ``spk01`` and ``spk02`` reach 0.923 / 0.895 — above even
+their pre-session-2 numbers — without ``spk10`` trading against them
+(0.678 → 0.856). Aggregate word accuracy goes 0.655 → **0.868** and false
+accepts to **0/29**. The synthetic split agrees this time (90.7 →
+93.6 %), which is worth flagging because on the row above it disagreed.
+Width 40 was measured as well and rejected: it loses to width 48 on every
+real-voice metric bar phrase intent *and* asks for 59,632 B of shared
+internal scratch against width 48's 29,824 B, because esp-nn's depthwise
+kernel drops to a slower, larger-scratch path for channel counts that are
+not a multiple of 16. Full side-by-side tables: ``docs/paper-notes.md``
+§3 — E15 (the session-2 deploy), E16 (the width sweep), E18 (this deploy).
 
 The v2 row is what the recorder pipeline exists to fix: a model reporting
 ~0.9 on its own synthetic/MSWC split recognised roughly a quarter of what
@@ -140,7 +163,7 @@ as the width-32 QAT baseline above (2026-09-03):
      - —
      - —
 
-**Conclusion: keep width 32.** Width 24 already misses the ≤1.0-point
+Narrowing does not pay. Width 24 already misses the ≤1.0-point
 INT8-test-accuracy bar (a 2.5-point drop), and both narrower widths lose
 isolated-word accuracy on *both* real speakers versus the baseline —
 narrowing the channel count trades away real-voice recognition, not just
@@ -149,6 +172,66 @@ same stopping rule; distillation from the width-32 model was not
 attempted for the narrower widths (``kws_de.distill.distill()`` only
 supports a fixed-width DS-CNN student against a KWT teacher, not a
 same-architecture narrower student).
+
+Widening does. The sweep was reopened upward (2026-09-04) after the
+session-2 rebuild cost both original speakers ground at fixed capacity.
+Same recipe, same unchanged ``features_v3`` cache — but a *different*
+baseline from the table above: these three rows are all scored against the
+session-2 model, so the width-32 row reads 0.538 / 0.605, not the
+0.615 / 0.737 the pre-session-2 model managed. Real-voice figures are over
+the full approved set (197 word clips, 29 negatives, three speakers):
+
+.. list-table::
+   :header-rows: 1
+
+   * - Width
+     - INT8 test acc.
+     - Params
+     - MACs
+     - Size
+     - spk01 (n=13)
+     - spk02 (n=38)
+     - all words (n=197)
+     - False accepts (n=29)
+   * - 32 (session-2 baseline)
+     - 90.7 %
+     - 5,879
+     - 2,070,496
+     - 17,912 B
+     - 0.538
+     - 0.605
+     - 0.655
+     - 1
+   * - 40
+     - 92.8 %
+     - 8,303
+     - 3,058,520
+     - 21,680 B
+     - 0.769
+     - 0.842
+     - 0.777
+     - 0
+   * - 48 (**deployed**)
+     - **93.6 %**
+     - 11,111
+     - 4,234,704
+     - 25,832 B
+     - **0.923**
+     - **0.895**
+     - **0.868**
+     - 0
+
+**Conclusion: width 48.** It recovers both regressed speakers and
+overshoots their pre-session-2 numbers, lifts aggregate real-voice word
+accuracy 0.655 → 0.868, and takes false accepts to zero, for 2.05x the
+MACs and 9,936 B more internal SRAM. **Width 40 must not be deployed at
+any accuracy**: it is beaten by width 48 on every real-voice metric except
+phrase intent, and it costs *more* internal memory than the larger model —
+``kws-codegen`` reports 59,632 B of shared esp-nn scratch for it against
+width 48's 29,824 B, because ``esp_nn_get_depthwise_conv_scratch_size_esp32s3``
+branches on ``channels % 16`` and 40 is 8-aligned but not 16-aligned, so it
+falls into a generic path that pads the channel count to 48 anyway *and*
+allocates an output buffer the aligned path does not need.
 
 Export health gate
 ~~~~~~~~~~~~~~~~~~~~
@@ -164,12 +247,12 @@ above, all 23 classes represented in predictions.
 Command model anatomy
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-DS-CNN at width 32 (:need:`REQ_FW_23_CLASSES`), read straight from
-``command_v3_qat.tflite`` (the QAT variant from the tables above) via
-``kws_de.model_graph`` -- the same module renders the wake model below, so
-neither diagram can drift from the ``.tflite`` that ships. Unlike the wake
-model, this is a *non-streaming* CNN: every Invoke reprocesses the full
-49x10 MFCC window from scratch, so there is no ring state to draw.
+DS-CNN at width 48 (:need:`REQ_FW_23_CLASSES`), read straight from
+``command_v3_w48_qat.tflite`` (the deployed model from the tables above)
+via ``kws_de.model_graph`` -- the same module renders the wake model below,
+so neither diagram can drift from the ``.tflite`` that ships. Unlike the
+wake model, this is a *non-streaming* CNN: every Invoke reprocesses the
+full 49x10 MFCC window from scratch, so there is no ring state to draw.
 
 .. graphviz:: _generated/command.dot
 
@@ -180,8 +263,10 @@ model, this is a *non-streaming* CNN: every Invoke reprocesses the full
    .. code-block:: console
 
       $ export KWS_DATA_ROOT=/path/to/data-root
-      $ uv run --no-sync kws-model-graph "$KWS_DATA_ROOT/models/command_v3_qat.tflite" \
-          --out docs/sphinx/_generated/command.dot --title "Command DS-CNN (v3, QAT)"
+      $ uv run --no-sync kws-model-graph \
+          "$KWS_DATA_ROOT/models/command_v3_w48_qat.tflite" \
+          --out docs/sphinx/_generated/command.dot \
+          --title "Command DS-CNN (v3, QAT, width 48)"
 
 .. list-table::
    :header-rows: 1
@@ -191,51 +276,51 @@ model, this is a *non-streaming* CNN: every Invoke reprocesses the full
      - Weights
      - Output
      - MACs
-   * - CONV_2D 3x3, 1->32 (stem)
+   * - CONV_2D 3x3, 1->48 (stem)
      - 1x49x10x1
-     - 32x3x3x1
-     - 1x49x10x32
-     - 141,120
-   * - DEPTHWISE_CONV_2D 3x3 x32 (block 1)
-     - 1x49x10x32
-     - 1x3x3x32
-     - 1x49x10x32
-     - 141,120
-   * - CONV_2D 1x1, 32->32 (block 1)
-     - 1x49x10x32
-     - 32x1x1x32
-     - 1x49x10x32
-     - 501,760
-   * - DEPTHWISE_CONV_2D 3x3 x32 (block 2)
-     - 1x49x10x32
-     - 1x3x3x32
-     - 1x49x10x32
-     - 141,120
-   * - CONV_2D 1x1, 32->32 (block 2)
-     - 1x49x10x32
-     - 32x1x1x32
-     - 1x49x10x32
-     - 501,760
-   * - DEPTHWISE_CONV_2D 3x3 x32 (block 3)
-     - 1x49x10x32
-     - 1x3x3x32
-     - 1x49x10x32
-     - 141,120
-   * - CONV_2D 1x1, 32->32 (block 3)
-     - 1x49x10x32
-     - 32x1x1x32
-     - 1x49x10x32
-     - 501,760
+     - 48x3x3x1
+     - 1x49x10x48
+     - 211,680
+   * - DEPTHWISE_CONV_2D 3x3 x48 (block 1)
+     - 1x49x10x48
+     - 1x3x3x48
+     - 1x49x10x48
+     - 211,680
+   * - CONV_2D 1x1, 48->48 (block 1)
+     - 1x49x10x48
+     - 48x1x1x48
+     - 1x49x10x48
+     - 1,128,960
+   * - DEPTHWISE_CONV_2D 3x3 x48 (block 2)
+     - 1x49x10x48
+     - 1x3x3x48
+     - 1x49x10x48
+     - 211,680
+   * - CONV_2D 1x1, 48->48 (block 2)
+     - 1x49x10x48
+     - 48x1x1x48
+     - 1x49x10x48
+     - 1,128,960
+   * - DEPTHWISE_CONV_2D 3x3 x48 (block 3)
+     - 1x49x10x48
+     - 1x3x3x48
+     - 1x49x10x48
+     - 211,680
+   * - CONV_2D 1x1, 48->48 (block 3)
+     - 1x49x10x48
+     - 48x1x1x48
+     - 1x49x10x48
+     - 1,128,960
    * - MEAN (global avg pool, head)
-     - 1x49x10x32
+     - 1x49x10x48
      - --
-     - 1x32
+     - 1x48
      - --
-   * - FULLY_CONNECTED 32->23 (head)
-     - 1x32
-     - 23x32
+   * - FULLY_CONNECTED 48->23 (head)
+     - 1x48
+     - 23x48
      - 1x23
-     - 736
+     - 1,104
    * - SOFTMAX (head)
      - 1x23
      - --
@@ -245,10 +330,10 @@ model, this is a *non-streaming* CNN: every Invoke reprocesses the full
      -
      -
      -
-     - **2,070,496**
+     - **4,234,704**
 
 Every conv/depthwise weight is reused at all 490 output positions (49x10,
-the full spectrogram), which is why 4,960 weights cost 2,070,496 MACs --
+the full spectrogram), which is why 9,744 weights cost 4,234,704 MACs --
 the opposite of the wake model below, where every weight fires exactly
 once per Invoke. There is no receptive-field growth to reason about either:
 the model sees the whole ~1 s command window on every call, not a rolling
@@ -515,7 +600,7 @@ figures:
      - ``firmware/main/gen/model_data.h``
      - CONV_2D, then 3x (DEPTHWISE_CONV_2D, CONV_2D 1x1), MEAN,
        FULLY_CONNECTED, SOFTMAX — 10 ops
-     - 31,360 B arena, 0 B state, plus 19,888 B of the shared esp-nn scratch
+     - 47,040 B arena, 0 B state, plus 29,824 B of the shared esp-nn scratch
        region; arena in PSRAM by default (Kconfig
        ``KWS_INFER_COMMAND_ARENA``), scratch always internal
 
@@ -528,7 +613,7 @@ figures:
        408 B of new rows), 15,552 B of the shared scratch region; all internal
        SRAM — small, and it runs every 30 ms
 
-The scratch region is one 19,888 B array for both models, not a block of each
+The scratch region is one 29,824 B array for both models, not a block of each
 model's arena: esp-nn's kernels reach their scratch through file-static
 globals, one per kernel family for the whole image, so separate regions would
 be handed to the wrong model's kernels — and scratch is written, not just
