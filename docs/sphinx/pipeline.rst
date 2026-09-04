@@ -160,10 +160,31 @@ different route through the same rules
 content gate approves anything that transcribed to something, and its
 duration cap is the firmware's ring budget (9800 ms) rather than a
 sentence's 6000 ms — a window extends on every fire inside it, so a
-legitimately long take is not an anomaly. The transcript is then split: a
-"Hey Bus" ending in the first 1.8 s becomes a ``wake`` clip, and the rest is
-run through the *same* ``kws_de.grammar.parse`` the device's vocabulary
-feeds.
+legitimately long take is not an anomaly. The transcript is then split
+around **every** "Hey Bus" in it, and the rest is run through the *same*
+``kws_de.grammar.parse`` the device's vocabulary feeds.
+
+Two separate rules govern that split, and conflating them is what put the
+wake word inside ``phrases/`` and ``negatives/`` (issue #58):
+
+- A ``wake`` clip is cut only from a **whole leading phrase** — one that is
+  the take's first one or two word spans, ends within ``WAKE_MAX_S``
+  (2.5 s), and is at least ``WAKE_MIN_S`` (0.4 s) long once the 0.15 s tail
+  is added. A phrase said later in the take is not that take's wake fire,
+  and a clip shorter than the minimum is a head-cut fragment: a wake clip
+  starts at the take's first sample, so a short one means the capture began
+  after the "Hey" (a session recorded with no pre-roll). A real phrase is
+  0.5-0.7 s; those fragments are 0.2-0.3 s, already at full level in the
+  first frame. Training a wake model on them teaches it to fire on a single
+  syllable, which is the most expensive false-accept mode there is.
+- Everything kept as a phrase or a negative starts after the **last** wake
+  phrase in the take, wherever that sits, plus the same 0.15 s tail. A take
+  that ends with "Hey Bus", or that carries a second fire inside the same
+  window, therefore never yields a clip containing the wake word. If
+  nothing is left after that cut — the take was only "Hey Bus", or the
+  command preceded it — nothing is filed; and if Whisper returned text
+  containing the phrase but no word spans to locate it by, nothing is filed
+  either. An uncuttable take is dropped rather than filed poisoned.
 
 Un-welding is the one rule the field path needs that the guided path does
 not. The guided matcher can glue *known prompt* tokens together to absorb
@@ -216,14 +237,48 @@ false trigger. QC's job is to put the production gate back on paper. Every
 field row carries ``wake_prob`` (the device's peak at the fire),
 ``would_fire`` (that peak against ``qc.PROD_WAKE_THRESHOLD`` = 0.85, the one
 place the shipped threshold lives on the host side) and ``wake_clip`` (did
-Whisper find the phrase at the head of the take). Cross those two booleans and
-the two interesting cases fall out: a **near-miss** is a wake clip with
-``would_fire=0`` — a real "Hey Bus" the deployed detector would have ignored —
-and a **false alarm** is a take with no wake clip and ``would_fire=1``, i.e.
+Whisper find the phrase in the take — which is not the same question as
+whether a usable wake clip could be cut from it: a head-cut fragment is no
+positive, but the speaker did wake the device with it). Cross those two
+booleans and the two interesting cases fall out: a **near-miss** is a heard
+phrase with ``would_fire=0`` — a real "Hey Bus" the deployed detector would
+have ignored — and a **false alarm** is a take with no phrase in it and
+``would_fire=1``, i.e.
 something production would have woken on. Both are counted again against the
 capture threshold itself, so the report says what each gate would have done
 rather than only what happened. Whisper, never the device, decides whether the
 phrase is there — the same rule as for the label.
+
+**Takes from playback tests are never filed.** Playing a TTS clip through a
+speaker at the device is how the wake gate is exercised without a person in
+the room, and the device records those fires like any other. They are not
+recordings of a human speaker: filing them would feed synthesised audio back
+into the training set as if it were real, which is exactly the "TTS-vs-real"
+shortcut the wake rounds were built to break, and it would inflate the real
+share the wake recipe counts on. Pull such a session into a staging
+directory of its own and do not run ``kws-qc`` on it — nothing under
+``approved/`` may come from a loudspeaker.
+
+Auditing the whole tree
+------------------------
+
+``kws-qc`` only ever sees one session. ``scripts/audit-approved.py`` looks at
+``approved/`` as a whole and exits non-zero on any finding:
+
+.. code-block:: console
+
+   $ uv run --no-sync python scripts/audit-approved.py [--no-transcribe]
+
+It checks that every clip is readable 16 kHz mono PCM_16 and inside its
+set's duration band (wake 0.4-2.0 s, words around 1 s, phrases 0.5-9.8 s,
+negatives up to 9.8 s), that each ``index.csv`` and its directory agree in
+both directions, that speaker directories are named ``spkNN``, and — by
+transcribing the field-derived ``phrases``/``negatives`` clips — that none of
+them contains the wake phrase. Guided clips were already matched against
+their prompt at QC time and are not re-transcribed. It reports counts per
+set, per speaker and per source, reading a clip's source off the QC stamps: a
+session whose ``qc.csv`` holds any ``set=field`` row is a field session, and
+every path in that stamp's ``written.txt`` is field-derived.
 
 Synthetic-clip gate
 -------------------

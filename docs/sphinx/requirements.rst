@@ -846,9 +846,23 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    to the guided nine) is transcribed whole by the same Whisper model, prompt and
    padding as every other take. If the first one or two word spans match the
    wake regex ``(hey|hej|he|hei)(bus|buss|bos|boss)`` — one span, because
-   Whisper sometimes writes "HeyBus", or two — and end inside the first 1.8 s,
+   Whisper sometimes writes "HeyBus", or two — end inside ``WAKE_MAX_S``
+   (2.5 s) **and** yield a clip of at least ``WAKE_MIN_S`` (0.4 s),
    ``[0, end of "bus" + 0.15 s]`` is cut as a ``wake`` clip into
-   ``approved/wake/<spkNN>/``. The remaining words are normalised, filtered to
+   ``approved/wake/<spkNN>/``. A shorter clip is not a phrase: the cut starts
+   at the take's first sample, so a short one means the capture began after
+   the "Hey" (a session recorded with no pre-roll), leaving a 0.2-0.3 s
+   fragment that would teach the wake model to fire on a single syllable.
+
+   Separately, and whether or not a wake clip was cut, **every phrase or
+   negative clip written from the take begins after the take's LAST wake
+   phrase** plus the same 0.15 s tail, so nothing outside ``approved/wake/``
+   can contain the wake word. A take with nothing left after that cut (it was
+   only "Hey Bus", or the command preceded the phrase), and a take whose
+   transcript matches the wake regex but carries no word spans to locate it
+   by, are filed nowhere and are counted in the report's Field line.
+
+   The remaining words are normalised, filtered to
    the command vocabulary and run through ``kws_de.grammar.parse`` — the same
    grammar the device's vocabulary feeds. Because a field take has no prompt
    to glue against, a token that is *entirely* a run of vocabulary words
@@ -859,8 +873,9 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
      written into the row's ``prompt`` column, and the take is filed exactly
      like an approved guided *sentence* (``approved/phrases/``, index row,
      word segmentation into ``approved/words/``);
-   - no valid intent -> ``approved/negatives/<spkNN>/`` with the transcript
-     itself as the index row's ``prompt``, so it still feeds ``_unknown_``
+   - no valid intent -> ``approved/negatives/<spkNN>/`` with what was heard
+     after the last wake phrase (the whole transcript when the take has none)
+     as the index row's ``prompt``, so it still feeds ``_unknown_``
      windows — **unless** the transcript the grammar rejected still carries
      command vocabulary, which the existing negatives content gate refuses;
      such a take is left unfiled rather than poisoning either the unknown

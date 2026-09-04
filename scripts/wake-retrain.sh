@@ -22,12 +22,11 @@
 #                 validation (default: the newest session that produced wake clips)
 #   WAKE_SIL_DIR  directory of speech-free field takes to use as room-noise negatives
 #   WAKE_EXCLUDE  space-separated basenames of approved clips to drop from training
-#                 entirely. Needed in both directions: the session cutter writes the
-#                 whole take whenever the wake word is not a leading cut, so clips
-#                 filed as "phrases"/"negatives" can still contain "Hey Bus" (training
-#                 on those teaches the model not to wake), and a session recorded
-#                 without pre-roll yields "wake" clips holding only the tail fragment
-#                 of the phrase. See train/mww/README.md.
+#                 entirely. The two failures it existed for -- phrase/negative clips
+#                 still containing "Hey Bus", and "wake" clips holding only the tail
+#                 fragment of the phrase -- are fixed in kws_de.qc (#58) and checked by
+#                 scripts/audit-approved.py, so a clean tree needs no exclusions. See
+#                 train/mww/README.md.
 #   WAKE_TTS_DIRS space-separated synthetic-clip directories to run kws-tts-check over
 #                 before feature generation (relative to MWW_DIR unless absolute;
 #                 default generated_samples_v3/{positives,negatives}). Each needs the
@@ -81,12 +80,29 @@ for stamp in $holdout; do
 done
 sort -u -o "$held" "$held"
 
+# The in-training hard negatives are the FIELD takes' own non-wake speech — same
+# voice, same microphone, same room as the positives (train/mww/README.md rule 3).
+# The guided phrase/negative takes are real speech too, but they are studio-style
+# prompted reads from other speakers, so mixing them in silently changes what "real
+# hard negative" means between rounds. A session whose qc.csv holds a set=field row
+# is a field session, and every path in its written.txt is field-derived.
+field=$work/field.txt
+: > "$field"
+for stamp in "$rec"/qc/*/; do
+  if ! [ -f "$stamp/qc.csv" ] || ! [ -f "$stamp/written.txt" ]; then continue; fi
+  if awk -F, 'NR > 1 && $2 == "field" { found = 1 } END { exit !found }' "$stamp/qc.csv"; then
+    grep -E '^(phrases|negatives)/' "$stamp/written.txt" >> "$field" || true
+  fi
+done
+sort -u -o "$field" "$field"
+
 for rel in $(cd "$rec/approved" && find wake phrases negatives -name '*.wav' | sort); do
   [ "${rel%%/*}" = wake ] && kind=pos || kind=neg
   if grep -qxF "$rel" "$held"; then
     dest=${kind}_hold
   else
     case " ${WAKE_EXCLUDE:-} " in *" $(basename "$rel") "*) continue ;; esac
+    if [ "$kind" = neg ] && ! grep -qxF "$rel" "$field"; then continue; fi
     dest=${kind}_train
   fi
   ln -sf "$rec/approved/$rel" "$work/$dest/"
