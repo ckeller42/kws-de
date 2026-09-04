@@ -64,8 +64,8 @@ Measured on the CoreS3 over 13 capturing windows, the recognise step time
 *inside* a capturing window was 38-42 ms (5 trace samples; the trace prints
 every 50 recogniser steps and a window is only ~25), against 38-45 ms over
 four samples in the same assist mode with capture switched off. The FAT
-write for each take landed 967-986 ms *after* its window closed, and no
-take was dropped. The 100-300 ms outlier a write inside the window would
+write for each take landed 968-1181 ms *after* its window closed — never
+before it — and no take was dropped. The 100-300 ms outlier a write inside the window would
 have caused does not appear in either run — which is the whole point of
 deferring the write to the record task.
 

@@ -1275,8 +1275,11 @@ The recognise step time inside a capturing window stayed at **38–42 ms** (5 tr
 samples; invoke 33.5–34.9 ms), against **38–45 ms** over 4 samples in the same assist
 mode with capture switched **off** (invoke 33.6–34.4 ms) — the capturing band sits
 inside the non-capturing one, and no sample anywhere near the 100–300 ms a write costs
-appears in either run. Each take's `field: saved` line landed 967–986 ms *after* its
-window's `assist: recogniser off`. The extending-window case checks out end to end: a
+appears in either run. Each take's `field: saved` line landed 968–1181 ms *after* its
+window's `assist: recogniser off` — never before it, and the slowest is the one
+extended-window take, which is 30 % more audio to write. The write is a full second of
+work that a 2.5 s window has no room for; deferring it is not an optimisation, it is
+the only place it fits. The extending-window case checks out end to end: a
 second console fire 1.0 s into an open window produced one file of 73,088 samples
 against 56,272 for a single-window take, named after the first fire.
 
