@@ -5,7 +5,12 @@
  */
 #pragma once
 #include <stdint.h>
+#include "field.h"
 #include "prompts.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /** @brief Commands posted to the record task from UI callbacks, via record_post(). */
 typedef enum {
@@ -13,6 +18,8 @@ typedef enum {
     REC_CMD_START_WAKE_SESSION, /**< Bump the speaker id, start the "Hey Bus"-only wake set (PROMPT_WAKE);
                                       session ends when it's exhausted, no chaining into negatives. */
     REC_CMD_PAUSE,               /**< Pause the recorder (goes idle, waits for a command). */
+    REC_CMD_FIELD_TAKE,          /**< Assist mode: copy one field take out of the audio ring and save it.
+                                      The payload is set by record_post_field_take(). */
 } record_cmd_t;
 /**
  * @brief Recorder phase, as shown by the UI.
@@ -41,11 +48,20 @@ typedef struct {
     char prompt[96]; char speaker[8];      /**< Display text of the current prompt; speaker id, e.g. "spk03". */
     float level_dbfs;                      /**< Input level for the level bar, updated every 100 ms. */
     int saved_takes;                       /**< Takes saved since the last REC_CMD_START_SESSION. */
+    uint32_t field_takes;                  /**< Field takes saved since boot. */
+    uint32_t field_dropped;                /**< Field takes dropped: storage below STORAGE_MIN_FREE_BYTES. */
 } record_status_t;
 
 /** @brief Create the record task. Starts paused (REC_IDLE); call record_post(REC_CMD_START_SESSION) to begin. */
 void record_start(void);
 /** @brief Post a command to the record task from a UI callback. Non-blocking. */
 void record_post(record_cmd_t cmd);
+/** @brief Post one field take (assist mode). Copies @p t into the recorder's
+ *  single pending slot and posts REC_CMD_FIELD_TAKE. Non-blocking. */
+void record_post_field_take(const field_take_t *t);
 /** @brief Copy the current recorder status under mutex. */
 void record_get_status(record_status_t *out);
+
+#ifdef __cplusplus
+}
+#endif

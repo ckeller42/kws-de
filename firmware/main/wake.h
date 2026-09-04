@@ -64,6 +64,21 @@ void wake_set_active(bool on);
 void wake_inject_fire(void);
 /** @brief Copy the current wake status under mutex. */
 void wake_get_status(wake_status_t *out);
+/**
+ * @brief Is an assist window open right now (i.e. is the command recogniser
+ *        running)?
+ *
+ * The recorder waits on this before writing a field take: a FAT write costs
+ * 100-300 ms and suspends the flash cache for both cores, so it must never
+ * overlap a window. Timing alone does not settle it — the record task runs
+ * ABOVE both model tasks on their own core — so the invariant is enforced here
+ * rather than assumed.
+ */
+bool wake_window_open(void);
+/** @brief Is field capture on? Restored from NVS ("kws"/"field") at wake_start(). */
+bool wake_field_get(void);
+/** @brief Turn field capture on/off and persist it. Off drops any pending take. */
+void wake_field_set(bool on);
 
 #ifdef __cplusplus
 }

@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include "arena.h"
 #include "assist_gate.h"
 #include "audio.h"
@@ -9,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "field.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -17,7 +19,9 @@
 #include "gen/wake_model_data.h"
 #include "infer_lock.h"
 #include "nn_timers.h"
+#include "nvs.h"
 #include "recognise.h"
+#include "record.h"
 #include "storage.h"
 #include "task.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -72,8 +76,26 @@ static uint8_t s_var_arena[WAKE_VAR_ARENA_BYTES];
 #endif
 static FILE *s_log;
 static assist_gate_t s_gate;         /* assist mode only: when the recogniser may run */
-static bool s_listening;             /* last state pushed to recognise_set_active() */
+static volatile bool s_listening;    /* last state pushed to recognise_set_active(); read by record.c */
 static volatile bool s_inject;       /* console-injected fire, see wake_inject_fire() */
+/* ponytail: s_field is written by the wake task (arm/disarm) and by
+   wake_field_set() from the UI/console task, without a mutex — the only shared
+   words are two bools that each task writes independently, so the worst race
+   costs one take, never a torn read. Give it s_lock if it ever grows a field
+   the two tasks must agree on. */
+static field_state_t s_field;        /* assist mode only: opt-in capture of real interactions */
+static uint32_t s_fire_ms;           /* ms-since-boot of the fire that armed s_field */
+static float s_fire_prob;            /* wake probability at that fire */
+static volatile bool s_field_persist; /* toggle changed mid-window: NVS write still owed */
+
+static void field_persist(bool on)
+{
+    nvs_handle_t h;
+    if (nvs_open("kws", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "field", on ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+}
 
 static void log_fire(uint32_t ms, float prob)
 {
@@ -86,6 +108,32 @@ static void log_fire(uint32_t ms, float prob)
     if (!s_log) return;
     fprintf(s_log, "[Wake] %lu %.3f\n", (unsigned long)ms, (double)prob);
     fflush(s_log);
+}
+
+/* The window has closed: hand the recorder the span to copy. NOTHING is written
+   here — the copy and the FAT write happen on the record task, with the
+   recogniser already off, so no I/O can lengthen a recognise step. */
+static void post_field_take(uint32_t close_ms)
+{
+    field_take_t t = {};
+    bool truncated = false;
+    /* The gate pushes its deadline out on every fire, so the window is as long
+       as it really stayed open — not ASSIST_WINDOW_MS. */
+    t.window_ms = close_ms - s_fire_ms;
+    if (!field_take_span(&s_field, t.window_ms, &t.start, &t.len, &truncated)) return;
+    field_disarm(&s_field);
+    t.fire_ms = s_fire_ms;
+    t.wake_prob = s_fire_prob;
+    if (!truncated) {
+        /* The prediction may only name fires whose audio is in the WAV. A cut
+           take cannot say which those are, so it carries none and travels as an
+           unknown-prediction take — a case the QC pipeline already handles. */
+        recognise_status_t rst;
+        recognise_get_status(&rst);
+        strlcpy(t.intent, rst.window_intent, sizeof t.intent);
+        strlcpy(t.words, rst.window_words, sizeof t.words);
+    }
+    record_post_field_take(&t);
 }
 
 static void wake_task(void *)
@@ -180,6 +228,7 @@ static void wake_task(void *)
             deaf_until_us = 0;
             assist_gate_reset(&s_gate);
             if (s_listening) { s_listening = false; recognise_set_active(false); }
+            field_disarm(&s_field);     /* a new session never inherits a pending take */
             s_restart = false;
         }
         vTaskDelay(pdMS_TO_TICKS(WAKE_POLL_MS));
@@ -301,14 +350,29 @@ static void wake_task(void *)
                instead of continuously. */
             bool assist = app_get_mode() == UI_MODE_ASSIST;
             if (assist) {
-                if (fired) assist_gate_on_wake(&s_gate, now_ms);
+                if (fired) {
+                    assist_gate_on_wake(&s_gate, now_ms);
+                    /* Latch the ARMING fire only, matching field_on_wake()'s own
+                       "first fire wins": a later fire extends the window, but the
+                       audio — and with it the file name, fire_ms and wake_prob —
+                       stays anchored to the phrase the take begins with. */
+                    if (!s_field.armed) { s_fire_ms = now_ms; s_fire_prob = prob; }
+                    field_on_wake(&s_field, audio_write_pos());
+                }
                 bool listen = assist_gate_tick(&s_gate, now_ms);
                 if (listen != s_listening) {
                     s_listening = listen;
                     /* Opening the window hands the recogniser its own deadline
                        so it stops even if this task stops being scheduled. */
-                    if (listen) recognise_listen_for(ASSIST_WINDOW_MS);
-                    else recognise_set_active(false);
+                    if (listen) {
+                        recognise_listen_for(ASSIST_WINDOW_MS);
+                    } else {
+                        recognise_set_active(false);
+                        post_field_take(now_ms);
+                        /* The window is shut: an NVS write owed by a mid-window
+                           toggle (wake_field_set) can be paid now. */
+                        if (s_field_persist) { s_field_persist = false; field_persist(s_field.enabled); }
+                    }
                     ESP_LOGI(TAG, "assist: recogniser %s (window %lu)", listen ? "on" : "off",
                              (unsigned long)s_gate.windows);
                 }
@@ -325,7 +389,16 @@ static void wake_task(void *)
             } else {
                 ui_wake_refresh(&copy);       /* paint green before the tone blocks */
             }
-            if (fired) beep_play();
+            /* Silent while field capture is on. The speaker sits centimetres
+               from the mic, so the tone comes back into the ring at roughly
+               full scale — and it is played at the fire, i.e. exactly inside
+               the span a take covers, ~14-64 ms past the pre-roll boundary.
+               Left in, it is the peak of every take and kws-qc rejects all of
+               them as clipped. Muting rather than editing it out of the WAV
+               keeps the audio and the take's own device_words prediction
+               describing the same sound. The screen is already green (assist
+               repaints above), so the fire is still acknowledged. */
+            if (fired && !(assist && s_field.enabled)) beep_play();
             /* Yield inside the catch-up loop too: a backlog must never starve
                the LVGL task, or the Record button stops responding. */
             vTaskDelay(1);
@@ -344,6 +417,15 @@ extern "C" void wake_start(void)
     s_arena = arena_alloc(TAG, "wake", KWS_WAKE_ARENA_BYTES);
     assert(s_arena);
 #endif
+    /* Restore the opt-in capture toggle before the task exists, so it never
+       observes an unrestored one. */
+    nvs_handle_t h;
+    if (nvs_open("kws", NVS_READWRITE, &h) == ESP_OK) {
+        uint8_t on = 0;
+        if (nvs_get_u8(h, "field", &on) != ESP_OK) on = 0;   /* off until turned on once */
+        field_set_enabled(&s_field, on != 0);
+        nvs_close(h);
+    }
     /* Core 0, priority 3 — above the recogniser, which shares this core. In
        recognise mode only that one runs and in wake mode only this one, but
        assist mode has both live, which is why the inference lock exists. */
@@ -354,8 +436,16 @@ extern "C" void wake_set_active(bool on)
 {
     if (on) s_restart = true;
     s_active = on;
+    /* Leaving the mode closes the window too, so nothing is left waiting on a
+       gate whose task has stopped ticking (see wake_window_open()). */
+    if (!on) s_listening = false;
     if (!on && s_log) { fclose(s_log); s_log = nullptr; }
+    /* Leaving the mode is the other place an owed toggle write must be paid:
+       the wake task's closing edge will not run again in this mode. */
+    if (!on && s_field_persist) { s_field_persist = false; field_persist(s_field.enabled); }
 }
+
+extern "C" bool wake_window_open(void) { return s_listening; }
 
 extern "C" void wake_inject_fire(void) { s_inject = true; }
 
@@ -364,4 +454,22 @@ extern "C" void wake_get_status(wake_status_t *out)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *out = s_st;
     xSemaphoreGive(s_lock);
+}
+
+extern "C" bool wake_field_get(void) { return s_field.enabled; }
+
+extern "C" void wake_field_set(bool on)
+{
+    /* The in-RAM flag is the privacy control, so it takes effect NOW, on the
+       caller's task (LVGL or console). The NVS write behind it is flash I/O —
+       it suspends the cache for both cores, the very cost the take's own write
+       is deferred to avoid — and the "Aufnahme" switch lives on the one screen
+       where windows open. So while a window is open the write is owed, not
+       done, and the wake task pays it at the window's closing edge (or
+       wake_set_active() does, if the mode is left first). Racing the close by a
+       few ms only delays the write to the next close or mode exit; the value
+       persisted is always the current one. */
+    field_set_enabled(&s_field, on);
+    if (wake_window_open()) { s_field_persist = true; return; }
+    field_persist(on);
 }

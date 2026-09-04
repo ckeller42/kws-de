@@ -624,7 +624,9 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    ``kws_de.qc.audio_gate`` rejects a take unless it is 16000 Hz mono
    16-bit PCM, at least 300 ms long, no longer than its set's cap (4000 ms
    for a ``words`` or ``wake`` take, 6000 ms for a ``sentences`` or
-   ``negatives`` take), peak level below -0.5 dBFS (not clipped), and RMS
+   ``negatives`` take, 9800 ms for a ``field`` take — an extending window
+   makes one legitimately long, so its cap is the firmware's ring budget,
+   :need:`REQ_FW_FIELD_CAPTURE`), peak level below -0.5 dBFS (not clipped), and RMS
    at or above -45 dBFS. A corrupt or unreadable WAV is rejected
    (``unreadable: <exception>``), never a crash.
 
@@ -726,6 +728,141 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    CoreS3, one interaction per 10 s: assist 253/1000 of wall and 97 ms of
    inference per wall second, against 1000/1000 and 315 ms/s for the
    always-on recognise mode.
+
+.. req:: Field capture is opt-in and never writes inside the window
+   :id: REQ_FW_FIELD_CAPTURE
+   :status: implemented
+
+   In ``UI_MODE_ASSIST``, with capture switched **on**, every wake fire arms
+   one *field take*: the 1.5 s in front of the arming fire
+   (``FIELD_PREROLL_MS``) plus the assist window that fire opened, copied out
+   of the audio ring and saved as
+   ``storage_root()/field/<spkNN>/<boot>-<ms>.wav`` (16 kHz mono int16) with one
+   row in ``storage_root()/field/<spkNN>/field.csv``
+   (``file,fire_ms,wake_prob,device_intent,device_words,window_ms,ms,peak_dbfs``).
+   The speaker id is the current NVS id and is never bumped per interaction,
+   so one boot of one user is one field directory; ``<boot>`` is a counter in
+   the same ``kws`` namespace, bumped once per boot, so two boots of one
+   speaker cannot collide on the same ms-since-boot.
+
+   **The take spans the window that actually happened, not a constant.** A
+   second fire inside an open window extends it (:need:`REQ_FW_ASSIST_GATE`)
+   but does not start a second take: the *first* fire is latched, so the file
+   name, ``fire_ms`` and ``wake_prob`` stay anchored to the phrase the audio
+   begins with, and ``window_ms`` records the real close-minus-fire span. Only
+   the ring bounds the length — ``FIELD_MAX_TAKE_SAMPLES`` is
+   ``AUDIO_RING_SAMPLES`` minus 0.2 s of copy latency, 9.8 s today — and a
+   take that would exceed it is cut **at the end**, never at the front, so the
+   pre-roll and the wake phrase always survive. A cut take cannot say which
+   fires are still inside its audio, so it carries no ``device_intent`` /
+   ``device_words`` at all; ``ms < FIELD_PREROLL_MS + window_ms`` is how the
+   host side reads truncation off the two columns. ``pull-recordings.sh``
+   carries ``window_ms`` into ``sessions.csv`` for exactly this, and
+   ``kws_de.qc`` marks every such row with ``truncated=1`` in ``qc.csv``, so a
+   truncated take stays distinguishable from one the recogniser simply never
+   answered. A ``_Static_assert`` in ``field.h`` checks the ring against that
+   budget, so a future shrink fails the build rather than the recording. The
+   copy is also clamped to the ring's write head (``field_clamp_len()``): the
+   span's end is derived from the arming fire's position and the window's ms
+   length, sampled one inference apart, so the computed end can sit a few
+   dozen samples in front of what has actually been written.
+
+   Capture is **opt-in**: the toggle is off until the user turns it on once on
+   the Assistent screen ("Aufnahme"), is persisted in NVS under the existing
+   ``kws`` namespace (key ``field``) and restored in ``wake_start()`` before
+   the wake task exists, is settable over the serial console
+   (``field on|off``), and while on the screen carries a red "REC" badge — the
+   only visible difference. The badge is repainted from ``wake_field_get()``
+   on the assist screen's refresh, so a console ``field on`` and a tap on the
+   switch reach the screen by the same path. The in-RAM flag changes on the
+   caller's task, immediately — it is the privacy control — but the NVS write
+   behind it is flash I/O, so while a window is open it is *owed*, not done,
+   and paid at the window's closing edge (or on leaving the mode).
+
+   **No field-capture I/O happens while the recogniser is active.** The wake
+   task only records the fire's ring position (``field.c``, pure C,
+   host-tested); the copy and the FAT write happen on the record task, which is
+   idle in Assistent mode. That task copies the ring *first* — a PSRAM
+   ``memcpy``, so the samples cannot age out however long it then waits, and
+   nothing above it touches flash — and only afterwards waits out an open
+   window (bounded at 5 s, so a gate that stops ticking cannot park the
+   recorder) before checking the storage floor and opening the file. A FAT
+   write costs 100-300 ms, which is more than a whole recognise step. Below
+   ``STORAGE_MIN_FREE_BYTES`` the take is dropped with one log line
+   (``field: dropped, storage low``); a full command queue, a failed ``fopen``,
+   audio that has aged out of the ring and a field take arriving while a guided
+   session owns the take buffer are counted the same way, and ``status``
+   reports both counters (``field <on|off> takes <N> dropped <N>``).
+
+   One pre-existing write is the known exception, and it is not field capture:
+   ``wake.cc``'s ``log_fire()`` appends one ~20-byte line to ``wake.log`` on
+   every fire, i.e. at every window *open*. It predates this requirement and is
+   present on both sides of the measurements above; it is named here so the
+   guarantee reads as what the firmware actually honours.
+
+.. req:: Field takes are labelled by Whisper and the grammar, never by the device
+   :id: REQ_PIPE_FIELD_LABELS
+   :status: implemented
+
+   A pulled field take (``set=field`` in ``sessions.csv``, with the device
+   columns ``fire_ms,wake_prob,device_intent,device_words,window_ms`` appended
+   to the guided nine) is transcribed whole by the same Whisper model, prompt and
+   padding as every other take. If the first one or two word spans match the
+   wake regex ``(hey|hej|he|hei)(bus|buss|bos|boss)`` — one span, because
+   Whisper sometimes writes "HeyBus", or two — and end inside the first 1.8 s,
+   ``[0, end of "bus" + 0.15 s]`` is cut as a ``wake`` clip into
+   ``approved/wake/<spkNN>/``. The remaining words are normalised, filtered to
+   the command vocabulary and run through ``kws_de.grammar.parse`` — the same
+   grammar the device's vocabulary feeds. Because a field take has no prompt
+   to glue against, a token that is *entirely* a run of vocabulary words
+   ("lichtküche") is split back apart first, and only on a complete
+   decomposition, so ordinary speech ("dank", "anzug") is left whole.
+
+   - a valid intent -> the label is ``kws_de.eval.intent_text(intent)``, it is
+     written into the row's ``prompt`` column, and the take is filed exactly
+     like an approved guided *sentence* (``approved/phrases/``, index row,
+     word segmentation into ``approved/words/``);
+   - no valid intent -> ``approved/negatives/<spkNN>/`` with the transcript
+     itself as the index row's ``prompt``, so it still feeds ``_unknown_``
+     windows — **unless** the transcript the grammar rejected still carries
+     command vocabulary, which the existing negatives content gate refuses;
+     such a take is left unfiled rather than poisoning either the unknown
+     class or the false-accept set, and is counted in the report's Field line;
+   - an empty transcript, or a failed audio gate, rejects the take as today
+     (``empty_transcript``).
+
+   **Everything else is kept** — a field take is real usage, and speech the
+   grammar cannot parse is exactly the negative material the model needs.
+
+   The device's own intent is carried through to ``qc.csv`` as
+   ``device_intent``, and ``agrees`` records whether it equals the
+   Whisper-derived intent (``1``/``0``, empty when there was nothing to
+   compare — the take did not parse, **or** the device gave no answer). That
+   column is **provenance, never a label**: it is what
+   ``kws-eval --recordings``'s Field section reports as the field accuracy of
+   the model that was deployed at capture time, which is a different model
+   from the one the rest of the report measures. Parsable is read off a
+   non-empty ``prompt``, compared off ``agrees in ("0", "1")``, and the
+   agreement rate is agree over *compared*, so takes the device never answered
+   cannot depress it. ``truncated`` is ``1`` when the device's ring cut the
+   take short (``ms < FIELD_PREROLL_MS + window_ms``,
+   :need:`REQ_FW_FIELD_CAPTURE`), which is the usual reason a take carries no
+   device answer at all.
+
+   **"Field takes" means one thing:** every ``set=field`` row in the session,
+   approved or not. Approved is reported *beside* it, never instead of it, and
+   both ``kws_de.qc``'s ``report.md`` Field line and
+   ``kws_de.eval.field_figures`` count it that way, so the two reports cannot
+   quote different numbers for the same session.
+
+   A parsed field take is filed like a guided sentence, and like a guided
+   sentence its phrase clip holds only the phrase: it is cut from the end of
+   the wake split to the last word Whisper heard plus 0.3 s, not from the whole
+   take. ``kws-eval`` streams every ``approved/phrases/`` row through the
+   command model end to end, so the pre-roll and the trailing silence of a
+   field take would otherwise be streamed with it, and a spurious event there
+   would score a take the model got right as an end-to-end miss. Word clips are
+   still cut from the full take, whose Whisper timestamps index them.
 
 .. req:: Recordings-based eval never mixes held-out and in-training figures
    :id: REQ_PIPE_EVAL_LABELS

@@ -14,12 +14,23 @@
 
 LV_FONT_DECLARE(font_prompt_28);
 
-static lv_obj_t *scr, *l_state, *l_big, *l_stats;
+static lv_obj_t *scr, *l_state, *l_big, *l_stats, *l_rec, *sw_field;
 static uint32_t s_last_fire;
 static uint32_t s_flash_until;
 static bool s_listening;
+static bool s_field_on;              /* last toggle state painted, see ui_assist_refresh() */
 
 static void on_back(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_MENU); }
+
+/* The toggle reads its own state rather than the event target: LVGL 9 hands
+   back a void*, and the switch is a file static anyway. The badge is not touched
+   here — ui_assist_refresh() paints it from wake_field_get(), so the tap and the
+   console command take exactly the same path to the screen. */
+static void on_field(lv_event_t *e)
+{
+    (void)e;
+    wake_field_set(lv_obj_has_state(sw_field, LV_STATE_CHECKED));
+}
 
 void ui_show_assist(void)
 {
@@ -47,6 +58,25 @@ void ui_show_assist(void)
     lv_obj_set_style_text_color(l_stats, lv_color_hex(0x8a94a0), 0);
     lv_label_set_text(l_stats, "");
     lv_obj_align(l_stats, LV_ALIGN_CENTER, 0, 30);
+
+    /* Opt-in field capture: a switch the user must turn on once, and a "REC"
+       badge that is the only visible difference while it is on. */
+    l_rec = lv_label_create(scr);
+    lv_label_set_text(l_rec, "REC");
+    lv_obj_set_style_text_color(l_rec, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_align(l_rec, LV_ALIGN_TOP_RIGHT, -12, 12);
+
+    lv_obj_t *lf = lv_label_create(scr);
+    lv_label_set_text(lf, "Aufnahme");
+    lv_obj_set_style_text_color(lf, lv_color_hex(0x8a94a0), 0);
+    lv_obj_align(lf, LV_ALIGN_BOTTOM_LEFT, 12, -24);
+
+    sw_field = lv_switch_create(scr);
+    lv_obj_align(sw_field, LV_ALIGN_BOTTOM_LEFT, 100, -28);
+    lv_obj_add_event_cb(sw_field, on_field, LV_EVENT_VALUE_CHANGED, NULL);
+    s_field_on = wake_field_get();
+    if (s_field_on) lv_obj_add_state(sw_field, LV_STATE_CHECKED);
+    else lv_obj_add_flag(l_rec, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *b = lv_button_create(scr);
     lv_obj_set_size(b, 120, 44);
@@ -78,6 +108,21 @@ void ui_assist_refresh(const wake_status_t *wst, const recognise_status_t *rst, 
     if (listening != s_listening) {
         s_listening = listening;
         lv_label_set_text(l_state, listening ? "Ich hoere zu" : "Assistent - sag \"Hey Bus\"");
+    }
+
+    /* The badge follows the toggle, not the switch that was last tapped: `field
+       on` over the console must never leave the device recording with nothing
+       on screen to say so. Edge-triggered, so the common frame does no work. */
+    bool fon = wake_field_get();
+    if (fon != s_field_on) {
+        s_field_on = fon;
+        if (fon) {
+            lv_obj_clear_flag(l_rec, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_state(sw_field, LV_STATE_CHECKED);
+        } else {
+            lv_obj_add_flag(l_rec, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_state(sw_field, LV_STATE_CHECKED);
+        }
     }
     if (listening) {
         snprintf(buf, sizeof buf, "%s", rst->word[0] ? rst->word : "...");

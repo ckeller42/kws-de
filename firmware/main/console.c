@@ -62,6 +62,13 @@ static void handle_line(char *line)
     } else if (strcmp(cmd, "wakefire") == 0) {
         wake_inject_fire();                /* measurement hook: see wake.h */
         printf("ok\n");
+    } else if (strcmp(cmd, "field") == 0) {
+        char *arg = strtok(NULL, " ");
+        if (!arg) { printf("err missing on|off\n"); return; }
+        if (strcmp(arg, "on") == 0) wake_field_set(true);
+        else if (strcmp(arg, "off") == 0) wake_field_set(false);
+        else { printf("err unknown field arg %s\n", arg); return; }
+        printf("ok\n");
     } else if (strcmp(cmd, "status") == 0) {
         ui_mode_t m = app_get_mode();
         printf("mode %s\n", mode_name(m));
@@ -73,12 +80,13 @@ static void handle_line(char *line)
         printf("storage %s %llu/%llu %s\n", storage_is_sdcard() ? "sd" : "flash",
                storage_free_bytes() / div, storage_total_bytes() / div,
                storage_is_sdcard() ? "MB" : "KB");
-        if (m == UI_MODE_RECORD || m == UI_MODE_RECORD_WAKE) {
-            record_status_t st;
-            record_get_status(&st);
+        record_status_t st;
+        record_get_status(&st);
+        printf("field %s takes %lu dropped %lu\n", wake_field_get() ? "on" : "off",
+               (unsigned long)st.field_takes, (unsigned long)st.field_dropped);
+        if (m == UI_MODE_RECORD || m == UI_MODE_RECORD_WAKE)
             printf("phase %s index %d count %d speaker %s\n",
                    phase_name(st.phase), st.index, st.count, st.speaker);
-        }
         printf("ok\n");
     } else {
         printf("err unknown command\n");

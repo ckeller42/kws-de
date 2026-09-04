@@ -1252,6 +1252,153 @@ obvious fix if width sweeps become routine. Also, `command_v3_w48_qat_metadata.j
 carries the stock `budgets.macs` of 3,000,000, which both new widths exceed; nothing
 enforces it, but a deploy should either raise the declared budget or note the overrun.
 
+### E17 — field capture: real interactions as training data (2026-09-04, measured on the CoreS3)
+
+Assistent mode now optionally keeps what it hears. With the "Aufnahme" switch on,
+every wake fire arms one *field take* — the pre-roll before the fire plus the command
+window that fire opened — which the record task copies out of the always-on audio
+ring and writes **after** the window has closed, with the recogniser already switched
+off. That ordering is the whole design: a FAT write on this device costs 100–300 ms,
+more than a full recognise step, so capturing during the window would have changed the
+very behaviour being captured.
+
+The take spans the window that actually happened, not a constant. A second "Hey Bus"
+inside an open window extends it, and the extension has to reach the audio too, or the
+device's own answer would name words that fall past the end of the WAV. So the span is
+pre-roll + the real close-minus-first-fire, the *first* fire is latched (the file name,
+`fire_ms` and `wake_prob` stay anchored to the phrase the audio begins with), and only
+the ring caps the length — at 9.8 s, cut at the end, never at the front. A take that
+did get cut carries no device prediction at all, because it can no longer say which
+fires are still inside its own audio.
+
+**Measured on the device, one session, 13 capturing windows, 13 takes, 0 dropped.**
+The recognise step time inside a capturing window stayed at **38–42 ms** (5 trace
+samples; invoke 33.5–34.9 ms), against **38–45 ms** over 4 samples in the same assist
+mode with capture switched **off** (invoke 33.6–34.4 ms) — the capturing band sits
+inside the non-capturing one, and no sample anywhere near the 100–300 ms a write costs
+appears in either run. Each take's `field: saved` line landed 968–1181 ms *after* its
+window's `assist: recogniser off` — never before it, and the slowest is the one
+extended-window take, which is 30 % more audio to write. The write is a full second of
+work that a 2.5 s window has no room for; deferring it is not an optimisation, it is
+the only place it fits. The extending-window case checks out end to end: a
+second console fire 1.0 s into an open window produced one file of 73,088 samples
+against 56,272 for a single-window take, named after the first fire.
+
+The trace interval is worth stating, because it bounds how hard this measurement can
+be pushed: the recogniser prints its step cost every 50 steps and a window is only
+about 25, so roughly every second window contributes one sample. Thirteen windows buy
+five numbers. That is enough to exclude a 100–300 ms outlier, a two-order-of-magnitude
+effect, and not enough to resolve a 2 ms one.
+
+A review of that first build found the ordering claim was true of the design and not
+yet of the code: a `storage_free_bytes()` floor check — an `f_getfree()` that can scan
+the FAT and suspends both cores' cache — ran *before* the ring copy and before the
+wait, i.e. in exactly the place the design forbids, and it also ate the 0.2 s the ring
+reserves for the copy. It now runs last, immediately before the `fopen`. Two smaller
+holes closed with it: the copy is clamped to the ring's write head (the span's end is
+derived from the fire's ring position and the window's ms length, sampled one inference
+apart, so it could sit ~32 samples in front of what had actually been written and read
+the ring's previous lap into the tail), and the NVS write behind the "Aufnahme" toggle
+— flash I/O on the UI task, on the one screen where windows open — is deferred to the
+window's closing edge while the in-RAM flag still flips at once. Re-measured on the
+device after those changes, over two capturing windows: writes landed **970 ms** and
+**968 ms** after their window's `assist: recogniser off`, the one recognise step traced
+inside a window read **42 ms**, and toggling the switch off and on again *while that
+window was open* produced no outlier at all — the headline numbers above are unchanged,
+which is the point: the fix removed a hazard the sampling was too coarse to have caught.
+
+Then the first real pull rejected **all 60 takes as clipped**, peak −0.0/−0.1 dBFS, and
+the ring copy was the obvious suspect — wrongly. The block of full-scale samples in
+every take measures 996.7–1000.0 Hz and 2,416–2,455 samples long; `beep.c` plays 1 kHz
+for 150 ms (2,400 samples). It is the device's own wake-confirmation tone, played at
+the fire — which is the instant a take is built around — coming back into the ring at
+roughly full scale, because the speaker sits centimetres from the microphone on the
+same shared I2S codec. It landed 13.9–63.7 ms past the pre-roll boundary in every take
+(the jitter is the LVGL repaint between the two calls), takes with two fires carry two
+blocks, and with that region excluded the takes peak at 181–700 counts, below −45 dBFS.
+Nothing was wrong with the copy at all: the field path faithfully recorded the
+recorder. The tone is now muted while capture is armed, rather than edited out of the
+WAV afterwards, so the audio and the take's own `device_words` keep describing the same
+sound. Three takes on the fixed build peak at **137–434 counts (−47.6…−37.6 dBFS)** with
+zero samples above 2,000, against 32,768 and 0.0 dBFS before. The lesson is the cheap
+one: a self-recording device records itself, and "the copy must be corrupt" is a much
+more attractive hypothesis than "we are hearing ourselves".
+
+The pre-roll is now **1.5 s, not the 1.0 s** the measurements above were taken with. The
+wake model fires ~0.2–0.3 s *after* the end of a ~0.7 s "Hey Bus", so a second of
+look-back starts inside the phrase: only 3 of 11 real takes still transcribed with the
+wake phrase intact. The ring cap is on the whole take, so the wider pre-roll costs
+nothing but the tail of a long chain of fires. The host-side split window moved with it
+(`WAKE_MAX_S` 1.3 → 1.8 s): it tests when the phrase *ends*, so it is a function of the
+pre-roll and silently stops finding the phrase if the two drift apart.
+
+The label never comes from the device. On the workstation the take is transcribed by
+the same Whisper model as every guided take; a "Hey Bus" in the first 1.8 s is cut off
+as a wake positive, and the remaining words are run through the *same*
+`kws_de.grammar.parse` the firmware's vocabulary feeds. A valid intent becomes the
+phrase label, and the take joins training exactly like a guided sentence take (phrase
+clip, index row, per-word segmentation); anything that does not parse is kept as
+`_unknown_` material rather than discarded — real speech that the grammar rejects is
+the negative data this model is chronically short of.
+
+One rule had to be invented for the field path, and it is the mirror image of a guided
+one. The guided matcher glues *known prompt* tokens together when Whisper writes
+"Lichtdach" for "Licht Dach". A field take has no prompt, so the same failure has to be
+undone from the other side: a token that decomposes **completely** into a run of
+vocabulary words is split back apart, and one that does not is left exactly as heard.
+The bug that forced it was concrete — a real "Licht Küche an" came back as
+"Lichtküche an", failed to parse, and was filed as a *negative*, which is worse than
+losing the take: it teaches the model that its own command words are not commands.
+
+What the device *did* recognise is kept beside the label and scored against it. That
+gives a figure no synthetic evaluation can: **field accuracy**, the deployed model's
+agreement with the transcript on real, unprompted interactions in the van. The
+agreement is counted over the takes the device actually answered, not over every take
+that parsed, so a ring-truncated take with no device answer cannot depress a number it
+never had a chance to earn.
+
+**First real sessions (2026-09-04, one speaker, two sessions).** The first pull was
+blocked by a host-side fault, not a firmware one — a locked screen on the workstation
+makes macOS eject the `KWSREC` volume ~250 ms after it attaches (`ingest.sh` now names
+that cause and the recovery). The first spoken session then failed QC outright: every
+take was "clipped", and the reason was the device's own wake-fire beep (1 kHz, 150 ms,
+`beep.c`), recorded through the mic at full scale 14–64 ms after the fire. The fix mutes
+that beep while capture is armed; the QC clip gate was also changed from "peak above
+−0.5 dBFS" to "0.05 % of samples at the rail", so a one-sample click cannot discard a
+take. The same session showed the 1.0 s pre-roll cutting the wake phrase: only 3 of 11
+transcripts contained "Hey Bus" (the model fires ~0.2–0.3 s after a ~0.7 s phrase), so
+the pre-roll is 1.5 s from here on, with `qc.WAKE_MAX_S` moved with it and the
+session's real pre-roll inferred from `ms − window_ms` so older sessions are not
+flagged truncated.
+
+Figures from `kws-qc` + `kws-eval --recordings` over the two spoken sessions (the
+1.0 s-pre-roll session and the 1.5 s one; 11 + 9 takes, all approved by the audio and
+content gates):
+
+| | 1.0 s pre-roll (11) | 1.5 s pre-roll (9) | both (20) |
+|---|---|---|---|
+| parsable intent (Whisper + grammar) | 8 | 5 | 13 (0.65) |
+| wake clips ("Hey Bus" in the take) | 3 | 8 | 11 |
+| unparsed, vocabulary present | 2 | 2 | 4 |
+| device gave any command word | 8 | 4 | 12 |
+| device–Whisper agreement over compared | 2/8 | 0/2 | 2/10 (0.20) |
+
+The pre-roll change did what it was meant to: 3 of 11 → 8 of 9 takes carry the wake
+phrase. The agreement figure is the headline: the deployed w32 command model, measured
+on real Assistent-mode usage by its main user, agreed with Whisper on 2 of 10 answered
+takes and answered nothing at all on 5 of the 9 takes of the second session ("Hey Bus,
+Licht an" → no word fired). This is the number E16's width sweep should be read
+against. The 20 takes yielded 11 wake clips, 13 phrases, 26 word clips and 3 negatives
+into `approved/` (speaker spk18, held out: 0.269 word accuracy, 0 of 13 phrase intents,
+0 of 3 false accepts under the same model).
+
+Two honest caveats already visible. The agreement figure will belong to whichever model
+was flashed at capture time, not to the model a later report evaluates —
+`kws-eval --recordings` prints it in its own **Field** section for that reason. And a
+field take is self-selected: it exists only because the wake word fired, so it measures
+command accuracy *given* a successful wake, and says nothing about missed wakes, for
+which no trigger exists.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

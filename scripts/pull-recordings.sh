@@ -19,7 +19,7 @@ fi
 mkdir -p "$dest/logs"
 pulled=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 sessions="$dest/sessions.csv"
-[[ -f $sessions ]] || echo "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts" > "$sessions"
+[[ -f $sessions ]] || echo "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,fire_ms,wake_prob,device_intent,device_words,window_ms" > "$sessions"
 
 shopt -s nullglob
 for spk in "$mnt"/spk*/; do
@@ -31,6 +31,27 @@ for spk in "$mnt"/spk*/; do
   rm -rf "$spk"
   echo "pulled $name"
 done
+
+# Field takes (Assistent mode, opt-in): same shape as a guided take plus what
+# the device itself recognised. field.csv is folded into sessions.csv rather
+# than copied, so QC reads one file for every set.
+for spk in "$mnt"/field/spk*/; do
+  spk=${spk%/}; name=$(basename "$spk")
+  mkdir -p "$dest/field/$name"  # rsync creates only the last path component
+  rsync -a --exclude field.csv "$spk/" "$dest/field/$name/"
+  if [[ -f $spk/field.csv ]]; then
+    # field.csv: file,fire_ms,wake_prob,device_intent,device_words,window_ms,ms,peak_dbfs
+    # sessions:  speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,fire_ms,wake_prob,device_intent,device_words,window_ms
+    # window_ms ($6) rides along last: together with ms ($7) it is what lets QC
+    # mark a take the ring cut short (ms < FIELD_PREROLL_MS + window_ms).
+    tail -n +2 "$spk/field.csv" | awk -F, -v OFS=, -v s="$name" -v p="$pulled" \
+      '{print s, p, "", "field/" s "/" $1, $7, $8, "field", "", $2, $2, $3, $4, $5, $6}' >> "$sessions"
+  fi
+  rm -rf "$spk"
+  echo "pulled field/$name"
+done
+rmdir "$mnt/field" 2>/dev/null || true
+
 if [[ -f $mnt/recognise.log ]]; then
   mv "$mnt/recognise.log" "$dest/logs/recognise-${pulled//:/-}.log"
 fi

@@ -67,6 +67,18 @@ Gaps: requirements with no linked test
 
 As of this writing, four requirements are open gaps:
 
+.. note::
+
+   ``REQ_FW_ASSIST_GATE`` used to be listed here: its logic was covered on
+   the host (``firmware/test/test_assist_gate.c``) but its *wiring* was not
+   exercised by any checklist. :need:`TEST_MANUAL_FIELD_CAPTURE` now drives
+   Assistent mode on hardware — a wake fire reaching the gate, a second fire
+   extending the window instead of opening another, and the recogniser
+   actually stopping, all evidenced by the ``KWS_DUTY``,
+   ``assist: recogniser on/off`` and ``field: saved`` log lines under a
+   console-injected fire (``wakefire``) — so it is no longer a gap.
+
+
 - ``REQ_FW_RECORD_CLIP_REJECT`` — clip-and-redo is implemented but neither
   a host test nor the manual checklist currently exercises it (the
   checklist doesn't force a clipped take). Add a manual step, or a host
@@ -79,11 +91,6 @@ As of this writing, four requirements are open gaps:
 - ``REQ_FW_DATA_NOT_COMMITTED`` — enforced only by ``.gitignore`` and code
   review, not by a CI check (e.g. a ``git ls-files`` assertion that none
   of the ignored paths are tracked).
-- ``REQ_FW_ASSIST_GATE`` — the gate's logic is fully covered on the host
-  (``firmware/test/test_assist_gate.c``), but the wiring around it — that a
-  wake fire reaches the gate and that the recogniser actually stops — is
-  tier 3, evidenced by the ``KWS_DUTY`` and ``assist: recogniser on/off``
-  log lines under a console-injected fire (``wakefire``).
 - ``REQ_FW_ARENA_PLACEMENT`` — tier 3 by nature: which heap an arena lands
   in, and what it costs, only exist on real silicon. The boot log is the
   evidence (an ``INFO`` line naming internal RAM and the free size, or a

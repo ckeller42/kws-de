@@ -14,9 +14,11 @@ Boot menu
 ---------
 
 The device boots into a dark-theme selection screen: a small "kws-de"
-title over a column of five buttons, each a direct
+title over a column of six buttons, each a direct
 ``app_set_mode()`` call (:need:`REQ_FW_MENU_FLOW`):
 
+- **Assistent** — the always-on two-stage pipeline: the wake model runs
+  continuously and hands off to the command recogniser on a fire.
 - **Recognition** ("Recognition demo") — the on-device command recogniser.
 - **Hey Bus** ("Hey Bus demo") — the wake-word test mode, wake model only.
 - **Record** — the guided recorder: sentences, then negatives.
@@ -24,16 +26,48 @@ title over a column of five buttons, each a direct
 - **USB** — exposes recordings over USB mass storage.
 
 Every mode's own back/abort button returns to this menu; no mode links
-directly to another. **Not yet on the menu:** an "Assistent" mode that
-would run the wake model continuously and hand off to the command
-recogniser on a "Hey Bus" fire — the always-on two-stage pipeline the
-architecture is designed around (see the project paper's architecture
-section). Today Wake and Recognition only run in isolation from each other
-(:need:`REQ_FW_WAKE_ISOLATED`); a combined always-listening mode is planned
-but not implemented.
+directly to another. **Assistent is deliberately first**: it is the one
+mode that is meant to be *used*, the shape the architecture is designed
+around; the other five are measurement and data-collection modes.
+Recognition and Hey Bus still run their models in isolation from each other
+(:need:`REQ_FW_WAKE_ISOLATED`) — that is what makes them useful as
+measurements, and it is Assistent that combines them.
 
 Modes
 -----
+
+Assistent
+~~~~~~~~~~
+
+The deployment shape (:need:`REQ_FW_ASSIST_GATE`): the wake model runs
+continuously, and a fire opens a 2.5 s window (``ASSIST_WINDOW_MS``) in
+which the command recogniser runs. A fire inside an open window extends it
+rather than opening a second one — one interaction, not two. One screen with
+two states, so "listening for the wake word" and "listening for a command"
+are never ambiguous from across the van: idle shows the live wake
+probability and a request count, a fire flashes the background green and
+switches the big label to the recognised word for as long as the window
+stays open. Back path: **Menu** -> menu.
+
+An **"Aufnahme"** switch on this screen turns *field capture* on
+(:need:`REQ_FW_FIELD_CAPTURE`). It is off until switched on once, is
+remembered across reboots, and while on the screen carries a small red
+"REC" badge. With it on, every interaction — the 1.5 s before the arming
+wake fire plus the window it opened — is saved to
+``storage_root()/field/<spkNN>/`` together with what the device itself
+recognised, *after* the window closes: the recogniser is already off when
+the file is written, so the capture cannot slow a recognise step. The
+serial console can set the same switch (``field on|off``) and ``status``
+reports it along with the number of takes saved and dropped.
+
+Measured on the CoreS3 over 13 capturing windows, the recognise step time
+*inside* a capturing window was 38-42 ms (5 trace samples; the trace prints
+every 50 recogniser steps and a window is only ~25), against 38-45 ms over
+four samples in the same assist mode with capture switched off. The FAT
+write for each take landed 968-1181 ms *after* its window closed — never
+before it — and no take was dropped. The 100-300 ms outlier a write inside the window would
+have caused does not appear in either run — which is the whole point of
+deferring the write to the record task.
 
 Recognition demo
 ~~~~~~~~~~~~~~~~~

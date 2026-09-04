@@ -219,3 +219,126 @@ def test_eval_recordings_no_manifest_all_held_out(tmp_path):
     md = ev.render_recordings_section(res)
     assert "No training manifest given; all clips held-out." in md
     assert "## user-customised, in-training" in md and "## held-out" in md
+
+
+# --- Field section (Task 5) --------------------------------------------------
+#
+# Contract shipped by Task 4 (task-4-report.md "Fix round 1", qc.csv semantics
+# table; ruling R-9 in progress.md) — NOT the task-5 brief's superseded version:
+#   parsable  <=> row["prompt"] non-empty (agrees-based test in the brief was
+#                 wrong: a row can be parsable but uncompared, see spk02/c below)
+#   compared  <=> row["agrees"] in {"0", "1"}; "" means unparsable OR the device
+#                 gave no answer (e.g. a ring-truncated take)
+#   agreement <=> agrees=="1" / compared (NOT / parsable)
+#   unfiled ("N unparsed (vocab present)") lives only in each stamp's
+#   report.md Field line -- qc.csv carries no column for it (an unfiled row and
+#   a filed-negative row are identical in qc.csv: verdict=approve, prompt="").
+#   takes     <=> EVERY field row, approved or not; approved is its own number,
+#                 counted the same way as qc.py's own report.md Field line
+#   truncated <=> row["truncated"] == "1": the device's ring cut the take short
+
+
+def _qc_root(tmp_path):
+    """Two stamps' qc.csv + report.md. spk02: 5 field takes, 4 approved -- 3
+    parsable (one of which, c.wav, is parsable but NOT compared: the device gave
+    no answer, because the ring truncated it), 2 compared, 1 agreeing, plus one
+    REJECTED take that still counts as a take -- plus a guided `words` row that
+    must be ignored. spk03: 1 field take, parsable and agreeing."""
+    root = tmp_path / "qc"
+    cols = (
+        "file,set,prompt,speaker,verdict,reason,transcript,match_score,"
+        "rms_dbfs,peak_dbfs,dur_ms,device_intent,agrees,truncated\n"
+    )
+    (root / "s1").mkdir(parents=True)
+    (root / "s1" / "qc.csv").write_text(
+        cols
+        + "a.wav,field,Licht an,spk02,approve,,Hey Bus Licht an,1.0,-20,-6,3500,Licht an,1,0\n"
+        + "b.wav,field,Licht an,spk02,approve,,Hey Bus Licht aus,1.0,-20,-6,3500,Licht aus,0,0\n"
+        + "c.wav,field,Heizung waermer,spk02,approve,,Hey Bus Heizung waermer,1.0,-20,-6,"
+        + "3500,,,1\n"
+        + "d.wav,field,,spk02,approve,,wann fahren wir los,1.0,-20,-6,3500,,,0\n"
+        + "g.wav,field,,spk02,reject,empty_transcript,,0.0,-20,-6,3500,,,0\n"
+        + "e.wav,words,Licht,spk02,approve,,Licht,1.0,-20,-6,800,,,\n"
+    )
+    (root / "s1" / "report.md").write_text(
+        "# QC s1\n\n## Field\n\n5 field takes, 4 approved, 3 parsable, 1 wake clips, "
+        "1 unparsed (vocab present), 1 ring-truncated, "
+        "device-Whisper agreement 0.500 over 2 compared.\n"
+    )
+    (root / "s2").mkdir(parents=True)
+    (root / "s2" / "qc.csv").write_text(
+        cols + "f.wav,field,Heizung waermer,spk03,approve,,Hey Bus Heizung waermer,1.0,-20,-6,"
+        "3500,Heizung waermer,1,0\n"
+    )
+    (root / "s2" / "report.md").write_text(
+        "# QC s2\n\n## Field\n\n1 field takes, 1 approved, 1 parsable, 1 wake clips, "
+        "0 unparsed (vocab present), 0 ring-truncated, "
+        "device-Whisper agreement 1.000 over 1 compared.\n"
+    )
+    return root
+
+
+def test_field_figures_count_takes_parsable_compared_and_agreement(tmp_path):
+    fig = ev.field_figures(_qc_root(tmp_path))
+    # takes counts the rejected row too; approved is reported beside it, so the
+    # two reports cannot quote different numbers for "field takes" (S5).
+    assert fig["takes"] == 6
+    assert fig["approved"] == 5
+    assert fig["truncated"] == 1
+    assert fig["parsable"] == 4
+    assert fig["compared"] == 3
+    assert fig["agree"] == 2
+    assert fig["unfiled"] == 1
+    assert fig["per_speaker"]["spk02"] == {
+        "takes": 5,
+        "approved": 4,
+        "truncated": 1,
+        "parsable": 3,
+        "compared": 2,
+        "agree": 1,
+    }
+    assert fig["per_speaker"]["spk03"] == {
+        "takes": 1,
+        "approved": 1,
+        "truncated": 0,
+        "parsable": 1,
+        "compared": 1,
+        "agree": 1,
+    }
+
+
+def test_recordings_section_carries_the_field_table(tmp_path):
+    root, predict_fn = _build_approved(tmp_path)
+    res = ev.eval_recordings(root, predict_fn, qc_root=_qc_root(tmp_path))
+    md = ev.render_recordings_section(res)
+    assert "## Field" in md
+    assert "6 field takes, 5 approved, 4 parsable" in md
+    assert "1 unparsed (vocab present)" in md
+    assert "1 ring-truncated" in md
+    # spk02: agree/compared = 1/2 = 0.500 (NOT 1/3 -- parsable is not the
+    # denominator); spk03: 1/1 = 1.000.
+    assert "| spk02 | 5 | 4 | 3 | 0.500 |" in md
+    assert "| spk03 | 1 | 1 | 1 | 1.000 |" in md
+    assert "AT CAPTURE TIME" in md  # says whose accuracy this is
+
+
+def test_field_table_says_n_a_rather_than_nan_when_nothing_was_compared(tmp_path):
+    # a speaker whose takes the device never answered has no rate to print; qc.py
+    # prints "n/a" for exactly this case, so eval must not print `nan`.
+    fig = {
+        "per_speaker": {"spk09": dict.fromkeys(ev._FIELD_KEYS, 0) | {"takes": 2, "approved": 2}},
+        **dict.fromkeys(ev._FIELD_KEYS, 0),
+        "takes": 2,
+        "approved": 2,
+        "unfiled": 0,
+    }
+    md = ev.render_field_section(fig)
+    assert "| spk09 | 2 | 2 | 0 | n/a |" in md
+    assert "nan" not in md
+
+
+def test_recordings_section_has_no_field_table_without_field_takes(tmp_path):
+    root, predict_fn = _build_approved(tmp_path)
+    res = ev.eval_recordings(root, predict_fn)
+    assert res["field"]["takes"] == 0
+    assert "## Field" not in ev.render_recordings_section(res)

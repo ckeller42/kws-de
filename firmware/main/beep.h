@@ -29,8 +29,11 @@ void beep_init(void);
  *
  * No-op if beep_init() failed. Called from the wake task right after a
  * detection, inside the detector's refractory window, so the stall cannot
- * cost a second detection. Audio capture is unaffected: a separate always-on
- * task keeps filling the 10 s ring while this blocks.
+ * cost a second detection. The ring keeps filling while this blocks (a
+ * separate always-on task writes it) — but it fills with the tone too: the
+ * speaker sits centimetres from the mic and the beep returns at about full
+ * scale. That is why the wake task skips the tone while field capture is on;
+ * see wake.cc.
  */
 void beep_play(void);
 

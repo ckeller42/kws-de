@@ -75,7 +75,12 @@ if [[ -n $reply ]]; then
 else
   serial_send "mode usb"
 fi
-wait_for 'ls /Volumes/KWSREC 2>/dev/null' || { echo "KWSREC did not mount on $host within 20 s" >&2; exit 3; }
+wait_for 'ls /Volumes/KWSREC 2>/dev/null' || {
+  echo "KWSREC did not mount on $host within 20 s" >&2
+  echo "likely cause: the host's screen is locked, so loginwindow ejects the drive right after attach" >&2
+  echo "recovery: unlock the host's screen, then on the device do 'mode menu' then 'mode usb' again" >&2
+  exit 3
+}
 # 2. copy the pull script over (the host need not carry a kws-de checkout) and run it
 #    there into a stamped stage dir. Never wipe the host stage ourselves — it is the
 #    only surviving copy of the device's data until step 4 verifies the local rsync.
