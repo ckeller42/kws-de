@@ -144,7 +144,18 @@ def _trained_speakers(manifest_path) -> tuple[set[str], bool, str | None]:
 
 
 #: Per-speaker field counters, summed into the same top-level keys.
-_FIELD_KEYS = ("takes", "approved", "truncated", "parsable", "compared", "agree")
+_FIELD_KEYS = (
+    "takes",
+    "approved",
+    "truncated",
+    "parsable",
+    "compared",
+    "agree",
+    "near_miss",
+    "false_alarm",
+    "near_miss_capture",
+    "false_alarm_capture",
+)
 
 
 def field_figures(qc_root) -> dict:
@@ -164,6 +175,18 @@ def field_figures(qc_root) -> dict:
     (a ring-truncated take), so a row can be parsable without being compared.
     Agreement is agrees=="1" over COMPARED, never over parsable.
 
+    Takes are captured at a LOWER wake threshold than the shipped detector uses
+    (firmware `field thresh`), so `qc.csv` also carries what production would
+    have done: `wake_prob` (the peak of the run that fired), `would_fire` (that
+    peak against `qc.PROD_WAKE_THRESHOLD`) and `wake_clip` (did Whisper find
+    "Hey Bus" at the head of the take). **near_miss** is `wake_clip == "1"` with
+    `would_fire == "0"` -- a real wake the production gate would have missed;
+    **false_alarm** is `wake_clip == "0"` with `would_fire == "1"` -- production
+    would have fired on something that is not the wake word.
+    `near_miss_capture` / `false_alarm_capture` are the same two read against
+    `qc.CAPTURE_WAKE_THRESHOLD`. All four are decided only where `wake_clip` is
+    set, i.e. on the approved rows Whisper actually transcribed.
+
     `unfiled` ("N unparsed (vocab present)": grammar-rejected field speech that
     still contains command vocabulary, left unfiled by the negatives gate) has
     no qc.csv column at all -- an unfiled row and a filed-negative row are
@@ -173,6 +196,8 @@ def field_figures(qc_root) -> dict:
     import csv
     from collections import defaultdict
     from pathlib import Path
+
+    from kws_de import qc  # local: kws_de.qc imports kws_de.eval back
 
     per_spk: dict = defaultdict(lambda: dict.fromkeys(_FIELD_KEYS, 0))
     unfiled = 0
@@ -193,6 +218,20 @@ def field_figures(qc_root) -> dict:
                 if r.get("agrees") in ("0", "1"):
                     s["compared"] += 1
                     s["agree"] += r["agrees"] == "1"
+                # The capture gate is looser than the shipped one, so a take can
+                # be a wake the production gate would have MISSED (near-miss:
+                # Whisper found the phrase, `would_fire` is "0") or a non-wake it
+                # would have FIRED on (false alarm: no phrase, `would_fire` "1").
+                # Both are decided only for rows Whisper looked at, i.e. where
+                # `wake_clip` is set. `run_qc`'s report.md Field line counts the
+                # same four, so the two reports agree on one session.
+                prob = float(r.get("wake_prob") or 0.0)
+                if r.get("wake_clip") == "1":
+                    s["near_miss"] += r.get("would_fire") == "0"
+                    s["near_miss_capture"] += prob < qc.CAPTURE_WAKE_THRESHOLD
+                elif r.get("wake_clip") == "0":
+                    s["false_alarm"] += r.get("would_fire") == "1"
+                    s["false_alarm_capture"] += prob >= qc.CAPTURE_WAKE_THRESHOLD
         report_path = stamp / "report.md"
         if report_path.exists():
             m = re.search(r"(\d+) unparsed \(vocab present\)", report_path.read_text())
@@ -209,6 +248,8 @@ def render_field_section(field: dict) -> str:
     the model measured above (the field-derived phrases/words/negatives
     themselves already sit in the in-training / held-out figures above,
     filed through the same approved/ paths as guided takes)."""
+    from kws_de import qc  # local: kws_de.qc imports kws_de.eval back
+
     parsable_rate = _rate(field["parsable"], field["takes"])
     unfiled_bit = f", {field['unfiled']} unparsed (vocab present)" if field["unfiled"] else ""
     trunc_bit = f", {field['truncated']} ring-truncated" if field["truncated"] else ""
@@ -224,14 +265,27 @@ def render_field_section(field: dict) -> str:
         "takes.\n"
     )
     out.append(
+        # Field takes are captured at a looser wake gate than the shipped one, so
+        # the set deliberately contains clips the production detector would have
+        # handled differently -- which is the only way either kind gets recorded
+        # at all, since a take exists only because something fired.
+        f"\nAgainst the production gate {qc.PROD_WAKE_THRESHOLD:.2f}: "
+        f"{field['near_miss']} near-misses (wake clip, would not have fired), "
+        f"{field['false_alarm']} false alarms (no wake clip, would have fired); "
+        f"at the capture gate {qc.CAPTURE_WAKE_THRESHOLD:.2f}: "
+        f"{field['near_miss_capture']} near-misses, "
+        f"{field['false_alarm_capture']} false alarms.\n"
+    )
+    out.append(
         "| speaker | field takes | approved | parsable | device-Whisper agreement |"
-        "\n|---|---|---|---|---|"
+        " near-misses | false alarms |"
+        "\n|---|---|---|---|---|---|---|"
     )
     for spk in sorted(field["per_speaker"]):
         s = field["per_speaker"][spk]
         out.append(
             f"| {spk} | {s['takes']} | {s['approved']} | {s['parsable']} | "
-            f"{_rate(s['agree'], s['compared'])} |"
+            f"{_rate(s['agree'], s['compared'])} | {s['near_miss']} | {s['false_alarm']} |"
         )
     return "\n".join(out) + "\n"
 

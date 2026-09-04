@@ -67,6 +67,17 @@ PHRASE_TAIL_S = 0.3
 FIELD_PREROLL_MS = 2500
 TRUNCATED_SLACK_MS = 50  # tick/sample rounding between window_ms and the WAV length
 MIN_PREROLL_MS = 500  # no build ever kept less in front of the fire; smaller heads are cuts
+# firmware/main/wake.h's WAKE_THRESHOLD: the probability a step must reach for the
+# SHIPPED detector to count it. THE one place this number lives on the host side.
+# Field takes are captured at a looser gate (below), so every field row's
+# wake_prob - the peak of the run that fired - is re-read against this to say what
+# production would have done: `would_fire` in qc.csv.
+PROD_WAKE_THRESHOLD = 0.85
+# firmware/main/field.h's FIELD_THRESH_DEFAULT: the capture gate's own default.
+# Only a default - the device's `field thresh` command can move it, and a session
+# recorded at another value is still read against PROD_WAKE_THRESHOLD correctly;
+# it is the second figure ("at the capture gate") that assumes this one.
+CAPTURE_WAKE_THRESHOLD = 0.60
 
 
 @dataclass
@@ -78,6 +89,7 @@ class Take:
     device_intent: str = ""  # what the device itself recognised (field takes only)
     device_words: str = ""  # "<word>:<conf>" entries joined by '|'
     window_ms: int = 0  # how long the assist window was really open (field takes only)
+    wake_prob: float = 0.0  # the device's peak wake probability at the arming fire
     preroll_ms: int = FIELD_PREROLL_MS  # the recording build's pre-roll, inferred per session
     # seconds to cut for the phrase clip; None means the whole file
     span: tuple[float, float] | None = None
@@ -99,6 +111,14 @@ class QcRow:
     device_intent: str = ""  # verbatim from the device; NEVER used as a label
     agrees: str = ""  # "1"/"0" device vs Whisper, "" when there is nothing to compare
     truncated: str = ""  # "1"/"0" the ring cut this field take short, "" for a guided take
+    wake_prob: float = 0.0  # the device's peak wake probability at the fire, 0 for a guided take
+    # "1"/"0" the PRODUCTION gate (PROD_WAKE_THRESHOLD) would have fired on this
+    # take; "" for a guided take. Capture runs a looser gate, so a "0" here is a
+    # take the shipped detector would never have recorded.
+    would_fire: str = ""
+    # "1"/"0" Whisper found the wake phrase at the head of this field take; "" when
+    # nothing looked (a guided take, or a field take the gates rejected).
+    wake_clip: str = ""
 
 
 def normalise(text: str) -> list[str]:
@@ -325,6 +345,10 @@ def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
     if take.set == "field" and take.window_ms:
         short_by = take.preroll_ms + take.window_ms - m.get("dur_ms", 0)
         truncated = "1" if short_by > TRUNCATED_SLACK_MS else "0"
+    # What the deployed detector would have done with this take. Every field take
+    # cleared the *capture* gate by definition; this says whether it also cleared
+    # the production one, and it is decided for every field row, approved or not.
+    would_fire = "1" if take.wake_prob >= PROD_WAKE_THRESHOLD else "0"
     row = QcRow(
         file=str(take.file),
         set=take.set,
@@ -339,6 +363,8 @@ def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
         dur_ms=m.get("dur_ms", 0),
         device_intent=take.device_intent,
         truncated=truncated,
+        wake_prob=take.wake_prob,
+        would_fire=would_fire if take.set == "field" else "",
     )
     return row, tr
 
@@ -360,6 +386,7 @@ def read_sessions(incoming: Path) -> list[Take]:
                     device_intent=r.get("device_intent") or "",
                     device_words=r.get("device_words") or "",
                     window_ms=int(r.get("window_ms") or 0),
+                    wake_prob=float(r.get("wake_prob") or 0.0),
                 )
             )
             if r["set"] == "field" and r.get("window_ms"):
@@ -464,6 +491,9 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
     n_field = n_field_approved = n_field_truncated = 0
     n_field_wake = n_field_parsable = 0
     n_field_compared = n_field_agree = n_field_unfiled = 0
+    # What the loose capture gate actually bought, at both thresholds: a wake the
+    # production gate would have MISSED, and a non-wake it would have FIRED on.
+    n_near_miss = n_false_alarm = n_near_miss_cap = n_false_alarm_cap = 0
     for t in takes:
         try:
             row, tr = judge(t, transcriber)
@@ -492,6 +522,16 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         if t.set == "field":
             n_field_approved += 1
             cut_s, tokens = field_wake_split(tr)
+            # Whisper, not the device, decides whether this take really opens with
+            # "Hey Bus" — which is what makes the two counts below meaningful.
+            # Computed here, before `t` is rebound to the derived sentence take.
+            row.wake_clip = "1" if cut_s is not None else "0"
+            if row.wake_clip == "1":
+                n_near_miss += row.would_fire == "0"
+                n_near_miss_cap += t.wake_prob < CAPTURE_WAKE_THRESHOLD
+            else:
+                n_false_alarm += row.would_fire == "1"
+                n_false_alarm_cap += t.wake_prob >= CAPTURE_WAKE_THRESHOLD
             if cut_s is not None:
                 # the wake phrase is a real "Hey Bus" positive: file it exactly
                 # where the guided wake set goes, so it trains the wake model too
@@ -674,6 +714,16 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             f"{n_field_unfiled} unparsed (vocab present), "
             f"{n_field_truncated} ring-truncated, "
             f"device-Whisper agreement {agree_rate} over {n_field_compared} compared.\n"
+            # The capture gate is looser than the shipped one, so a take can be a
+            # wake the deployed detector would have MISSED, or a non-wake it would
+            # have FIRED on. Both are counted over approved takes, the only ones
+            # Whisper looked at. kws_de.eval.field_figures counts the same four
+            # off qc.csv's would_fire/wake_clip/wake_prob columns.
+            f"\nAgainst the production gate {PROD_WAKE_THRESHOLD:.2f}: "
+            f"{n_near_miss} near-misses (wake clip, would not have fired), "
+            f"{n_false_alarm} false alarms (no wake clip, would have fired); "
+            f"at the capture gate {CAPTURE_WAKE_THRESHOLD:.2f}: "
+            f"{n_near_miss_cap} near-misses, {n_false_alarm_cap} false alarms.\n"
         )
     else:
         field_section = ""
@@ -704,6 +754,10 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         "field_truncated": n_field_truncated,
         "field_parsable": n_field_parsable,
         "field_agree": n_field_agree,
+        "field_near_miss": n_near_miss,
+        "field_false_alarm": n_false_alarm,
+        "field_near_miss_capture": n_near_miss_cap,
+        "field_false_alarm_capture": n_false_alarm_cap,
     }
 
 

@@ -318,6 +318,10 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
         "field_truncated": 0,
         "field_parsable": 0,
         "field_agree": 0,
+        "field_near_miss": 0,
+        "field_false_alarm": 0,
+        "field_near_miss_capture": 0,
+        "field_false_alarm_capture": 0,
     }
     licht_files = sorted((appr / "words" / "Licht").glob("*.wav"))
     assert len(licht_files) == 2  # bare take + phrase-segmented word, distinct files
@@ -524,16 +528,20 @@ def _field_session(
     device_words: str = "Licht:0.93|an:0.88",
     window_ms: int = 2500,
     ms: int = 4000,
+    wake_prob: float = 0.910,
 ) -> Path:
     # 4000 ms of audio = FIELD_PREROLL_MS (1500) + a 2500 ms window, i.e. the
     # whole window fitted the ring: not truncated. A larger window_ms with the
     # same wav is what a ring-truncated take looks like on the host.
+    # wake_prob is the peak of the run that fired; the default clears the 0.85
+    # production gate, so the default session is neither a near-miss nor a false
+    # alarm however loose the capture gate that recorded it was.
     inc = tmp_path / "incoming" / "f1"
     _wav(inc / "field" / "spk05" / "1-123456.wav", _tone(ms=ms))
     (inc / "sessions.csv").write_text(
         "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,"
         "fire_ms,wake_prob,device_intent,device_words,window_ms\n"
-        f"spk05,t,,field/spk05/1-123456.wav,{ms},-10,field,,123456,123456,0.910,"
+        f"spk05,t,,field/spk05/1-123456.wav,{ms},-10,field,,123456,123456,{wake_prob:.3f},"
         f"{device_intent},{device_words},{window_ms}\n"
     )
     return inc
@@ -630,6 +638,57 @@ def test_run_qc_field_agreement_rate_counts_only_takes_the_device_answered(tmp_p
     rows = {r["file"].rsplit("/", 1)[-1]: r for r in csv.DictReader((qcd / "qc.csv").open())}
     assert rows["1-123456.wav"]["truncated"] == "0"
     assert rows["1-123457.wav"]["truncated"] == "1"
+
+
+def _no_wake_transcriber(p: Path):
+    """A take with no wake phrase in it at all — what the loose capture gate
+    records when it fires on something that is not "Hey Bus"."""
+    words = ["wann", "fahren", "wir", "eigentlich", "los"]
+    return {
+        "text": " ".join(words),
+        "words": [
+            {"word": w, "start": 0.3 + i * 0.4, "end": 0.6 + i * 0.4} for i, w in enumerate(words)
+        ],
+    }
+
+
+def test_run_qc_field_row_says_what_the_production_gate_would_have_done(tmp_path):
+    # Capture runs a looser gate than the shipped detector, so a take can be a
+    # real wake the production gate would have MISSED: this one opens with
+    # "Hey Bus" but peaked at 0.62, under qc.PROD_WAKE_THRESHOLD. Recording it is
+    # the entire point of the loose gate — at 0.85 the clip would not exist.
+    inc = _field_session(tmp_path, "Licht Küche an", wake_prob=0.62)
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
+
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["wake_prob"] == "0.62"
+    assert row["would_fire"] == "0"
+    assert row["wake_clip"] == "1"
+    assert counts["field_near_miss"] == 1
+    assert counts["field_false_alarm"] == 0
+    # 0.62 still cleared the 0.60 capture gate, so it is no near-miss THERE:
+    # the two thresholds are reported separately, never conflated.
+    assert counts["field_near_miss_capture"] == 0
+    report = (qcd / "report.md").read_text()
+    assert "Against the production gate 0.85: 1 near-misses" in report
+    assert "at the capture gate 0.60: 0 near-misses, 0 false alarms" in report
+
+
+def test_run_qc_field_row_counts_a_non_wake_take_as_a_false_alarm(tmp_path):
+    # No wake phrase anywhere in the take, yet the probability cleared 0.85: the
+    # shipped detector would have fired on this too. That is a production false
+    # alarm, and the clip is exactly the negative the wake model is short of.
+    inc = _field_session(tmp_path, "", device_words="", wake_prob=0.90)
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _no_wake_transcriber)
+
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["would_fire"] == "1" and row["wake_clip"] == "0"
+    assert counts["field_false_alarm"] == 1
+    assert counts["field_false_alarm_capture"] == 1
+    assert counts["field_near_miss"] == 0
+    assert "1 false alarms (no wake clip, would have fired)" in (qcd / "report.md").read_text()
 
 
 def test_run_qc_field_take_records_disagreement_without_relabelling(tmp_path):
