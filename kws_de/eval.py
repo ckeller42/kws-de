@@ -143,7 +143,100 @@ def _trained_speakers(manifest_path) -> tuple[set[str], bool, str | None]:
     return speakers, True, manifest.get("built_at")
 
 
-def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=None) -> dict:
+def field_figures(qc_root) -> dict:
+    """Per-speaker field-capture figures, read from every `qc/<stamp>/qc.csv`
+    plus each stamp's `report.md` (for the one figure `qc.csv` cannot carry).
+
+    Contract shipped by `kws_de.qc.run_qc` (task-4-report.md "Fix round 1",
+    ruling R-9 -- NOT the older agrees-based reading): a row is **parsable**
+    iff its `prompt` is non-empty (`run_qc` writes `prompt = intent_text(got)`
+    only for a parsed field row); a row is **compared** iff `agrees` is `"0"`
+    or `"1"` -- empty means either unparsable OR the device gave no answer
+    (a ring-truncated take), so a row can be parsable without being compared.
+    Agreement is agrees=="1" over COMPARED, never over parsable.
+
+    `unfiled` ("N unparsed (vocab present)": grammar-rejected field speech that
+    still contains command vocabulary, left unfiled by the negatives gate) has
+    no qc.csv column at all -- an unfiled row and a filed-negative row are
+    identical there (verdict=approve, prompt=""). It lives only in the
+    stamp's report.md Field line, so it is regex-read from there and summed;
+    stamps with no report.md (or no Field section) contribute 0."""
+    import csv
+    import re
+    from collections import defaultdict
+    from pathlib import Path
+
+    per_spk: dict = defaultdict(lambda: {"takes": 0, "parsable": 0, "compared": 0, "agree": 0})
+    unfiled = 0
+    for stamp in sorted(Path(qc_root).iterdir()):
+        csv_path = stamp / "qc.csv"
+        if not csv_path.exists():
+            continue
+        with csv_path.open(newline="") as fh:
+            for r in csv.DictReader(fh):
+                if r.get("set") != "field":
+                    continue
+                s = per_spk[r["speaker"]]
+                s["takes"] += 1
+                if r.get("prompt"):
+                    s["parsable"] += 1
+                if r.get("agrees") in ("0", "1"):
+                    s["compared"] += 1
+                    s["agree"] += r["agrees"] == "1"
+        report_path = stamp / "report.md"
+        if report_path.exists():
+            m = re.search(r"(\d+) unparsed \(vocab present\)", report_path.read_text())
+            if m:
+                unfiled += int(m.group(1))
+    return {
+        "per_speaker": dict(per_spk),
+        "takes": sum(s["takes"] for s in per_spk.values()),
+        "parsable": sum(s["parsable"] for s in per_spk.values()),
+        "compared": sum(s["compared"] for s in per_spk.values()),
+        "agree": sum(s["agree"] for s in per_spk.values()),
+        "unfiled": unfiled,
+    }
+
+
+def render_field_section(field: dict) -> str:
+    """Markdown for the field figures: per speaker, how many real interactions
+    were captured, how many parsed, and the device-vs-Whisper agreement AT
+    CAPTURE TIME -- the accuracy of whatever model was deployed then, not of
+    the model measured above (the field-derived phrases/words/negatives
+    themselves already sit in the in-training / held-out figures above,
+    filed through the same approved/ paths as guided takes)."""
+    parsable_rate = field["parsable"] / field["takes"] if field["takes"] else float("nan")
+    unfiled_bit = f", {field['unfiled']} unparsed (vocab present)" if field["unfiled"] else ""
+    out = ["\n## Field\n"]
+    out.append(
+        f"{field['takes']} field takes, {field['parsable']} parsable "
+        f"({parsable_rate:.3f}){unfiled_bit}. Agreement is the device's own intent vs "
+        "the Whisper-derived one AT CAPTURE TIME -- the accuracy of whatever model "
+        "was deployed then, not of the model measured above. The field-derived "
+        "phrases, words and negatives themselves are counted in the two figures "
+        "above, under the same in-training / held-out labels as guided takes.\n"
+    )
+    out.append("| speaker | field takes | parsable | device-Whisper agreement |\n|---|---|---|---|")
+    for spk in sorted(field["per_speaker"]):
+        s = field["per_speaker"][spk]
+        agree = s["agree"] / s["compared"] if s["compared"] else float("nan")
+        out.append(f"| {spk} | {s['takes']} | {s['parsable']} | {agree:.3f} |")
+    return "\n".join(out) + "\n"
+
+
+_EMPTY_FIELD = {
+    "per_speaker": {},
+    "takes": 0,
+    "parsable": 0,
+    "compared": 0,
+    "agree": 0,
+    "unfiled": 0,
+}
+
+
+def eval_recordings(
+    approved, predict_fn, *, step_ms: int = 100, manifest_path=None, qc_root=None
+) -> dict:
     """Recordings-based eval, split into the two honest figures: `IN_TRAINING`
     (`"user-customised, in-training"`) for clips whose speaker's device recordings
     are listed in `manifest_path`'s `train` split, `HELD_OUT` (`"held-out"`)
@@ -151,7 +244,10 @@ def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=N
     (`kws_de.dataset.build`) never reads `approved/phrases/`, only `approved/words/`
     and `approved/negatives/` (see `kws_de.data.recordings_root`/`negative_windows`),
     so a phrase clip is never actually training material regardless of speaker.
-    With no manifest (missing path or file absent), every clip is `HELD_OUT`."""
+    With no manifest (missing path or file absent), every clip is `HELD_OUT`.
+    `qc_root` (a `qc/` dir of per-stamp `qc.csv`+`report.md`, see
+    `field_figures`) is optional -- omitted or `None`, the result's `"field"`
+    is all zeros and `render_recordings_section` renders no Field section."""
     import csv
     from collections import defaultdict
     from pathlib import Path
@@ -236,6 +332,7 @@ def eval_recordings(approved, predict_fn, *, step_ms: int = 100, manifest_path=N
         "manifest_found": manifest_found,
         "manifest_built_at": built_at,
         "figures": figures,
+        "field": field_figures(qc_root) if qc_root is not None else dict(_EMPTY_FIELD),
     }
 
 
@@ -314,6 +411,8 @@ def render_recordings_section(res: dict) -> str:
                 f"| {e.get('n', 0)} | {e.get('acc', float('nan')):.3f} "
                 f"| {f.get('n', 0)} | {f.get('rate', float('nan')):.3f} |"
             )
+    if res.get("field", {}).get("takes"):
+        out.append(render_field_section(res["field"]))
     # one blank line between blocks, never two (markdownlint MD012/MD022/MD058)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out) + "\n")
 
@@ -758,6 +857,11 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         "manifest.json; e.g. features_v3 -> manifest_v3.json), see kws_de.dataset.build",
     )
     ap.add_argument(
+        "--qc",
+        default=None,
+        help="QC output root (default data/recordings/qc) -> adds the Field section",
+    )
+    ap.add_argument(
         "--qat",
         action="store_true",
         help="evaluate the QAT export (command<suffix>_qat.tflite) instead of the PTQ one",
@@ -798,7 +902,13 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         except Exception as e:  # noqa: BLE001 - re-raised with context, not swallowed
             raise SystemExit(f"could not load command model for --recordings: {e}") from e
         manifest_path = config.DATA_DIR / f"manifest{suffix}.json"
-        res = eval_recordings(approved_dir, predict_fn, manifest_path=manifest_path)
+        qc_root = Path(args.qc) if args.qc else config.DATA_DIR / "recordings" / "qc"
+        res = eval_recordings(
+            approved_dir,
+            predict_fn,
+            manifest_path=manifest_path,
+            qc_root=qc_root if qc_root.is_dir() else None,
+        )
         res["model_path"] = _relative_to_data_root(model_path)
         res["model_sha256"] = hashlib.sha256(tflite_bytes).hexdigest()
         res["evaluated_at"] = datetime.now(UTC).isoformat()
