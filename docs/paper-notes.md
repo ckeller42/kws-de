@@ -1487,6 +1487,12 @@ region moves with the command model:
 | app image (default config) | 1,002,560 B | 1,008,688 B | +6,128 B |
 | app image (`CONFIG_KWS_INFER_GENERATED=n`) | — | 1,174,096 B | — |
 
+Both image sizes are of the branch measured on the device, which was cut before E17's field
+capture merged; rebuilt on top of that merge the default image is 1,012,080 B, the extra
+3,392 B being `field.c` and its callers rather than anything in this entry. The `.bss` and
+scratch figures are unaffected — the merge adds no static arrays and does not touch the
+inference path.
+
 The DIRAM row is the one that makes the argument, and it is a link-map measurement rather
 than an estimate: internal `.bss` grows by *exactly* the 9,936 B the shared scratch grew, and
 not one byte more. The 15,680 B the arena gained landed in PSRAM, where `idf.py size` reports
