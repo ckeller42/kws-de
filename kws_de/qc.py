@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from kws_de import config
+from kws_de import config, tts
 from kws_de.grammar import Intent, Rejection, parse
 
 log = logging.getLogger(__name__)
@@ -138,7 +138,11 @@ def required_tokens(prompt: str, set_name: str) -> list[str]:
         return toks[:1]
     if set_name == "sentences":
         v = vocab()
-        return [t for t in toks if t in v]
+        # A guided sentence prompt always carries vocabulary words, so the filter is
+        # what matters there. Falling back to the whole prompt matters for arbitrary
+        # text (tts_gate): with an empty requirement list the gate accepts anything,
+        # which is exactly how an English clip would slip through.
+        return [t for t in toks if t in v] or toks
     if set_name == "wake":
         return ["hey", "bus"]
     return []
@@ -327,6 +331,49 @@ def audio_gate(path: Path, set_name: str) -> tuple[dict, str | None]:
     if m["rms_dbfs"] < MIN_RMS_DBFS:
         return m, "too_quiet"
     return m, None
+
+
+# --- synthetic (TTS) clips -------------------------------------------------------------
+# A synthesised clip is training data nobody ever listens to. macOS `say` falls back to an
+# ENGLISH voice when the German voice pack is not installed on the generating host, and it
+# says so nowhere: a device test once played "German" clips that were English, and only a
+# human ear caught it. Whisper's own language id is the check that would have caught it.
+TTS_MIN_S = 0.3
+TTS_MAX_S = 10.0
+
+
+def tts_gate(path: Path, text: str, transcriber: Transcriber) -> tuple[bool, str | None]:
+    """Is the clip at ``path`` really ``text``, really spoken in German?
+
+    Cheap checks first (readable, 0.3-10 s, not silent — no model), then ONE
+    transcription: the detected language must be German, and the transcript must pass
+    the same content rules a recorded take does — the ``wake`` rule for the wake phrase,
+    the order-tolerant ``sentences`` rule for anything else.
+
+    ``transcriber`` must report the DETECTED language, i.e.
+    ``whisper_transcriber(language=None)`` — one that forces ``language="de"`` would
+    answer "de" for an English clip. A transcript carrying no language at all is
+    rejected (``language:?``) rather than trusted.
+    """
+    path = Path(path)
+    try:
+        sig, sr = sf.read(path, dtype="float32", always_2d=True)
+    except Exception as e:  # corrupt/missing wav -> reject this clip, not the batch
+        return False, f"unreadable:{type(e).__name__}"
+    mono = sig[:, 0]
+    dur = len(mono) / sr if sr else 0.0
+    if not TTS_MIN_S <= dur <= TTS_MAX_S:
+        return False, f"duration:{dur:.2f}s"
+    rms = float(np.sqrt(np.mean(mono**2))) if len(mono) else 0.0
+    if 20 * np.log10(max(rms, 1e-9)) < MIN_RMS_DBFS:
+        return False, "silent"
+    tr = transcriber(path)
+    lang = str(tr.get("language") or "?").lower()
+    if lang != "de":
+        return False, f"language:{lang}"
+    set_name = "wake" if _WAKE_RE.fullmatch("".join(normalise(text))) else "sentences"
+    _score, reason = content_gate(set_name, text, tr.get("text", ""))
+    return reason is None, reason
 
 
 def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
@@ -771,7 +818,13 @@ _PAD_SAMPLES = config.SAMPLE_RATE // 2  # 500 ms of silence on each side
 
 def whisper_transcriber(
     model_id: str = "mlx-community/whisper-large-v3-mlx",
+    language: str | None = "de",
 ) -> Transcriber:  # pragma: no cover - model
+    """Whisper large-v3 (MLX) as a `Transcriber`. ``language`` is the decoding language;
+    pass ``None`` to let Whisper DETECT it — the returned transcript always carries the
+    language under ``"language"``, which is what ``tts_gate`` judges. Recording QC keeps
+    the default "de": those takes are known-German by construction, and forcing the
+    language is the more accurate decode."""
     import mlx_whisper
 
     def transcribe(path: Path) -> Transcript:
@@ -785,7 +838,7 @@ def whisper_transcriber(
         r = mlx_whisper.transcribe(
             padded,
             path_or_hf_repo=model_id,
-            language="de",
+            language=language,
             word_timestamps=True,
             temperature=0.0,
             initial_prompt=_QC_PROMPT,
@@ -800,7 +853,7 @@ def whisper_transcriber(
             for seg in r.get("segments", [])
             for w in seg.get("words", [])
         ]
-        return {"text": r.get("text", ""), "words": words}
+        return {"text": r.get("text", ""), "words": words, "language": r.get("language", "")}
 
     return transcribe
 
@@ -843,3 +896,88 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     with (qc_dir / "report.md").open("a") as fh:
         fh.write(f"\nModel: `{a.model}`\n")
     print(f"qc: {counts} -> {qc_dir}")
+
+
+TTS_CHECK_FIELDS = ["file", "voice", "engine", "ok", "reason", "language", "transcript"]
+
+
+def tts_check(manifest: Path, transcriber: Transcriber, quarantine: bool = False) -> dict:
+    """Run `tts_gate` over every clip a `manifest.csv` lists (see `kws_de.tts`), write
+    `tts_check.csv` beside it, and return `{"ok": n, "failed": n, "by_voice": {...}}`.
+    With `quarantine`, each failing clip is moved to `rejected/` next to the manifest, so
+    a rerun of whatever consumes the directory cannot pick it up again."""
+    manifest = Path(manifest)
+    root = manifest.parent
+    with manifest.open(newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    seen: Transcript = {}
+
+    def watched(p: Path) -> Transcript:  # keep the transcript the gate looked at
+        tr = transcriber(p)
+        seen.clear()
+        seen.update(tr)
+        return tr
+
+    out, by_voice = [], {}
+    for r in rows:
+        seen.clear()
+        f = root / r["file"]
+        ok, reason = tts_gate(f, r.get("text", ""), watched)
+        key = f"{r.get('engine', '?')}/{r.get('voice', '?')}"
+        n_ok, n_bad = by_voice.get(key, (0, 0))
+        by_voice[key] = (n_ok + ok, n_bad + (not ok))
+        out.append(
+            {
+                "file": r["file"],
+                "voice": r.get("voice", ""),
+                "engine": r.get("engine", ""),
+                "ok": int(ok),
+                "reason": reason or "",
+                "language": seen.get("language", ""),
+                "transcript": seen.get("text", "").strip(),
+            }
+        )
+        if not ok and quarantine and f.exists():
+            (root / "rejected").mkdir(exist_ok=True)
+            f.rename(root / "rejected" / f.name)
+    with (root / "tts_check.csv").open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=TTS_CHECK_FIELDS)
+        w.writeheader()
+        w.writerows(out)
+    return {
+        "ok": sum(r["ok"] for r in out),
+        "failed": sum(1 - r["ok"] for r in out),
+        "by_voice": by_voice,
+    }
+
+
+def tts_check_main() -> None:  # pragma: no cover - I/O wrapper
+    import argparse
+    import sys
+
+    ap = argparse.ArgumentParser(
+        prog="kws-tts-check",
+        description="gate synthesised clips: really German, really the intended text",
+    )
+    ap.add_argument("target", help="directory holding a manifest.csv, or the manifest itself")
+    ap.add_argument("--model", default="mlx-community/whisper-large-v3-mlx")
+    ap.add_argument("--quarantine", action="store_true", help="move failing clips to rejected/")
+    a = ap.parse_args()
+    target = Path(a.target)
+    man = target / tts.MANIFEST_NAME if target.is_dir() else target
+    if not man.exists():
+        print(f"{man}: no {tts.MANIFEST_NAME} (exit 2)", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        # language=None: the gate's whole point is catching a clip that came out English.
+        transcriber = whisper_transcriber(a.model, language=None)
+    except Exception as e:  # noqa: BLE001 - model download/import failure is a user-facing exit
+        print(f"could not load {a.model}: {e} (exit 4)", file=sys.stderr)
+        raise SystemExit(4) from e
+    counts = tts_check(man, transcriber, quarantine=a.quarantine)
+    for key, (n_ok, n_bad) in sorted(counts["by_voice"].items()):
+        pct = 100 * n_bad / max(n_ok + n_bad, 1)
+        print(f"  {key:40s} {n_ok:5d} ok / {n_bad:5d} failed  ({pct:.0f}% failed)")
+    print(f"tts-check: {counts['ok']} ok / {counts['failed']} failed -> {man.parent}/tts_check.csv")
+    if counts["failed"]:
+        raise SystemExit(1)

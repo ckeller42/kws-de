@@ -553,7 +553,8 @@ def _say_one(word: str, voice: str, rate: int, phrasing: str, wav_path: Path):  
         wav_path.unlink(missing_ok=True)
         return None
     y, _sr = sf.read(str(wav_path))
-    wav_path.unlink()
+    # The wav stays on disk: `kws_de.tts.synthesize` manifests it and the TTS gate has to
+    # be able to transcribe it. Whoever asked for the synthesis deletes it.
     return y.astype(np.float32), f"tts:{voice}:{rate}"
 
 
@@ -587,33 +588,75 @@ def _tts_combo_plan(word: str, n: int, engines: list[str]) -> list[tuple[str, st
     return (base * reps)[: max(n, 0)]
 
 
-def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4) -> list:
+def tts_gate_transcriber():  # pragma: no cover - loads Whisper
+    """The transcriber the synthetic-clip gate needs: Whisper with language DETECTION on
+    (not forced to German), since catching a clip that came out English is the point.
+    Returns None — gate disabled, every clip kept — when ``KWS_TTS_GATE=0`` or when
+    mlx-whisper is not installed (Linux CI has no MLX; it also builds no TTS clips)."""
+    if os.environ.get("KWS_TTS_GATE") == "0":
+        return None
+    try:
+        from kws_de.qc import whisper_transcriber
+
+        return whisper_transcriber(language=None)
+    except Exception as e:  # noqa: BLE001 - missing/unloadable model must not fail a build
+        print(f"[tts] gate disabled — no Whisper ({type(e).__name__}: {e})")
+        return None
+
+
+def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=None) -> list:
     # pragma: no cover - shells out / loads models
     """Synthesize up to n clips of `word` across all engines from `tts_engines()`
     (parallelized — each synthesis call is independent, so this is I/O/compute-bound and
     speeds up with a thread pool), varied by engine/voice/rate. Returns
     [(np.ndarray, speaker_id)] with speaker_id="tts:{engine}:{voice}" — rate is augmentation,
-    not identity, so the speaker-disjoint split holds out whole voices."""
+    not identity, so the speaker-disjoint split holds out whole voices.
+
+    With a `gate` transcriber (`tts_gate_transcriber()`), every clip is judged by
+    `kws_de.qc.tts_gate` before it is kept: a clip that is not German, or does not say
+    `word`, is DROPPED and counted, never silently mixed into the training data. Dropped
+    clips are not re-synthesized — the same voice would produce the same clip again."""
     from concurrent.futures import ThreadPoolExecutor
+
+    from kws_de.qc import tts_gate
 
     combos = _tts_combo_plan(word, n, tts_engines())
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     def _job(args):
         i, (engine, voice, rate) = args
-        audio = tts.synthesize(word, engine, voice, rate, tmp_dir / f"{word}_{i}.wav")
-        return None if audio is None else (audio, f"tts:{engine}:{voice}")
+        wav = tmp_dir / f"{word}_{i}.wav"
+        audio = tts.synthesize(word, engine, voice, rate, wav)
+        return None if audio is None else (wav, audio, f"tts:{engine}:{voice}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        results = list(ex.map(_job, enumerate(combos)))
-    return [r for r in results if r is not None]
+        results = [r for r in ex.map(_job, enumerate(combos)) if r is not None]
+    # The gate runs here, single-threaded: one Whisper model, not one per worker.
+    # ponytail: one Whisper pass per clip. If the TTS stage ever dominates a build,
+    # gate a sample per (engine, voice) and drop the whole voice on a failure — the
+    # failure mode this exists for is a voice, not a clip.
+    kept, dropped = [], {}
+    for wav, audio, speaker in results:
+        ok, reason = (True, None) if gate is None else tts_gate(wav, word, gate)
+        wav.unlink(missing_ok=True)
+        if ok:
+            kept.append((audio, speaker))
+        else:
+            dropped[f"{speaker} {reason}"] = dropped.get(f"{speaker} {reason}", 0) + 1
+    if dropped:
+        print(f"[tts] {word}: gate dropped {sum(dropped.values())}/{len(results)}: {dropped}")
+    return kept
 
 
 def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragma: no cover
     """Top up any word (from `words`, default `config.COMMANDS`) under `target`
-    real clips with macOS-`say` TTS clips. Returns {word: n_tts_added}."""
+    real clips with TTS clips that passed the synthetic-clip gate. Returns
+    {word: n_tts_kept}."""
+    import shutil
+
     words = list(words) if words is not None else config.COMMANDS
     tmp_dir = config.DATA_DIR / "tts_tmp"
+    gate = tts_gate_transcriber()
     added = {}
     for cmd in words:
         have = len(clips.get(cmd, []))
@@ -621,10 +664,10 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
             continue
         need = target - have
         print(f"[tts] {cmd}: {have} real clips, synthesizing {need} more")
-        clips.setdefault(cmd, []).extend(_tts_fill_word(cmd.lower(), need, tmp_dir))
-        added[cmd] = need
-    if tmp_dir.exists():
-        tmp_dir.rmdir()
+        new = _tts_fill_word(cmd.lower(), need, tmp_dir, gate=gate)
+        clips.setdefault(cmd, []).extend(new)
+        added[cmd] = len(new)
+    shutil.rmtree(tmp_dir, ignore_errors=True)  # clips, and the manifest beside them
     return added
 
 

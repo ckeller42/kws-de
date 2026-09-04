@@ -114,6 +114,27 @@ microfrontend's noise and PCAN estimates are warm, then report fire time minus t
 endpoint (energy-based), not minus the file end. A wake word that answers a second after you
 stop speaking feels broken in a way no accuracy number captures.
 
+### 5. Gate the synthetic clips before they become features
+
+The Piper/`say` positives and negatives are most of the training set, and nobody ever
+listens to them. macOS `say` silently substitutes an English voice when the German one is
+missing — or when the name is ambiguous, `say -v Eddy` being the *English* Eddy on a
+machine that has both — so a whole "German" voice can come out English with no error
+anywhere. That reached a device test once (paper notes E23).
+
+`wake-retrain.sh` therefore runs `kws-tts-check` over `WAKE_TTS_DIRS` (default
+`generated_samples_v3/{positives,negatives}`) before `gen_features_real.py`, and a failing
+clip stops the round:
+
+```bash
+uv run --no-sync kws-tts-check <dir> --quarantine
+```
+
+It reads the `manifest.csv` that `kws_de.tts.synthesize` writes beside the clips, so a set
+generated before that existed has to be regenerated to be checkable at all. The per-voice
+summary is the useful part: a voice that is not German shows up as 100 % failed, not as
+scattered bad luck.
+
 ### Probing
 
 Use `scripts/wake_probe.py` (device gate 0.85 x 2 consecutive steps), not an ad-hoc loop:

@@ -303,6 +303,14 @@ partition table erases the partition on the next flash, so pull first.
 
 ## Manual test checklist
 
+Playing clips at the device (`afplay` a synthesised set at the microphone
+instead of speaking): the clips must pass `uv run --no-sync kws-tts-check
+<dir>` — exit 0, no failures — **before** any of them is played. macOS `say`
+falls back to an English voice when the German one is missing or the name is
+ambiguous, silently, and a test driven by English "German" clips measures
+nothing while looking like a result; it has happened (paper notes E23).
+`kws_de.tts` writes the `manifest.csv` the check reads, beside the clips.
+
 Storage: boot with the microSD slot **empty** → the boot log reports no
 usable card and mounts the flash partition, `status` answers `storage
 flash <free>/<total> KB`, a session writes `spkNN/session.csv` and its
