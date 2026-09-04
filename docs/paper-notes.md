@@ -1251,6 +1251,7 @@ path, validated by reproducing E15's deployed-w32 row exactly. A `--model` flag 
 obvious fix if width sweeps become routine. Also, `command_v3_w48_qat_metadata.json` still
 carries the stock `budgets.macs` of 3,000,000, which both new widths exceed; nothing
 enforces it, but a deploy should either raise the declared budget or note the overrun.
+
 ### E17 — field capture: real interactions as training data (2026-09-04, measured on the CoreS3)
 
 Assistent mode now optionally keeps what it hears. With the "Aufnahme" switch on,

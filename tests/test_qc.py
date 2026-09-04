@@ -662,6 +662,16 @@ def test_run_qc_truncated_field_take_has_no_device_answer_to_compare(tmp_path):
     assert idx[0]["prompt"] == "Licht Küche an"
 
 
+def test_run_qc_rounding_short_field_take_is_not_truncated(tmp_path):
+    # 4000 ms of audio against a 1500 + 2530 ms span: the 30 ms is tick/sample
+    # rounding on the device (seen on every real take), not a ring cut.
+    inc = _field_session(tmp_path, "Licht Küche an", window_ms=2530)
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["truncated"] == "0" and counts["field_truncated"] == 0
+
+
 def test_run_qc_field_take_that_does_not_parse_is_kept_as_a_negative(tmp_path):
     inc = _field_session(tmp_path, "")
     qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"

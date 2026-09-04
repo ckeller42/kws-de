@@ -63,6 +63,7 @@ PHRASE_TAIL_S = 0.3
 # wake fire. `ms < FIELD_PREROLL_MS + window_ms` is how a ring-truncated take is
 # read off the two columns the pull carries (REQ_FW_FIELD_CAPTURE).
 FIELD_PREROLL_MS = 1500
+TRUNCATED_SLACK_MS = 50  # tick/sample rounding between window_ms and the WAV length
 
 
 @dataclass
@@ -314,9 +315,12 @@ def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:
     # A field take the device cut to fit its audio ring holds less than the
     # pre-roll plus the window it recorded. Marked here so the truncated ones are
     # distinguishable downstream from takes the recogniser simply never answered.
+    # window_ms is tick-based and dur_ms floors the sample count, so a whole
+    # take can read 1-30 ms "short"; only a real cut is more than that.
     truncated = ""
     if take.set == "field" and take.window_ms:
-        truncated = "1" if m.get("dur_ms", 0) < FIELD_PREROLL_MS + take.window_ms else "0"
+        short_by = FIELD_PREROLL_MS + take.window_ms - m.get("dur_ms", 0)
+        truncated = "1" if short_by > TRUNCATED_SLACK_MS else "0"
     row = QcRow(
         file=str(take.file),
         set=take.set,
