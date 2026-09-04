@@ -112,7 +112,8 @@ needs_wake = pytest.mark.skipif(not WAKE.exists(), reason=f"{WAKE} absent (KWS_D
 # DATA_DIR -- skip on what is actually used, so a data root with models but no
 # splits skips instead of erroring.
 needs_command = pytest.mark.skipif(
-    not config.DATA_DIR.exists(), reason="KWS_DATA_ROOT feature splits absent"
+    not (config.DATA_DIR / "features_v3_test.npz").exists(),
+    reason="KWS_DATA_ROOT feature splits absent",
 )
 
 
