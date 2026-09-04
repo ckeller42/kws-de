@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include "audio.h"
 #include "storage.h"
+#include "task.h"
 #include "vad.h"
 #include "wav.h"
 #include "prompts.h"
@@ -244,7 +245,7 @@ void record_start(void)
        (isolated words are not part of the guided session). */
     prompt_session_init(&s_prompts, PROMPT_SENTENCES, (uint32_t)esp_timer_get_time() | 1);
     snprintf(s_st.speaker, sizeof s_st.speaker, "spk%02lu", (unsigned long)s_speaker);
-    xTaskCreatePinnedToCore(record_task, "record", 8192, NULL, 5, NULL, 0);
+    task_spawn(TAG, record_task, "record", 8192, NULL, 5, 0);
     status_set(REC_IDLE);
 }
 

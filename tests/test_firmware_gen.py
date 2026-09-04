@@ -1,3 +1,4 @@
+import pathlib
 import re
 
 import numpy as np
@@ -118,3 +119,39 @@ def test_wake_int8_matches_microwakeword_requantisation():
     assert firmware_gen.wake_int8(666) == 127  # 26.0 in float terms saturates
     assert firmware_gen.wake_int8(65535) == 127  # and stays clamped well beyond it
     assert all(firmware_gen.wake_int8(v) <= firmware_gen.wake_int8(v + 1) for v in range(700))
+
+
+def test_check_catches_an_embedded_model_that_does_not_match_its_stamp(tmp_path):
+    """The two model headers are written together by kws-export --firmware but
+    are two files; a half-regeneration leaves the device running a model the
+    KWS_MODEL_ID beside it does not describe, and everything downstream --
+    including the generated inference, built from model_data.h -- is then
+    self-consistently wrong."""
+    gen = pathlib.Path(__file__).resolve().parents[1] / "firmware" / "main" / "gen"
+    firmware_gen.generate(tmp_path)
+    for f in ("model_config.h", "model_data.h"):
+        (tmp_path / f).write_text((gen / f).read_text())
+    assert firmware_gen.check(tmp_path) == []
+    # Flip one byte of the embedded model: same length, different hash.
+    data = (tmp_path / "model_data.h").read_text()
+    head, sep, rest = data.partition("{")
+    first, comma, tail = rest.partition(",")
+    (tmp_path / "model_data.h").write_text(f"{head}{sep}{int(first) ^ 1}{comma}{tail}")
+    assert any("model_data.h" in name for name in firmware_gen.check(tmp_path))
+
+
+def test_check_catches_a_wake_model_that_does_not_match_its_stamp(tmp_path):
+    """The same guard over the wake pair (final-review S-2), which had none.
+    It matters more here than for the command model: CI has no
+    models/hey_bus.tflite to compare against, so KWS_WAKE_MODEL_ID is the only
+    thing tying the committed wake bytes to the model they claim to be."""
+    gen = pathlib.Path(__file__).resolve().parents[1] / "firmware" / "main" / "gen"
+    firmware_gen.generate(tmp_path)
+    for f in ("wake_model_config.h", "wake_model_data.h"):
+        (tmp_path / f).write_text((gen / f).read_text())
+    assert firmware_gen.check(tmp_path) == []
+    data = (tmp_path / "wake_model_data.h").read_text()
+    head, sep, rest = data.partition("{")
+    first, comma, tail = rest.partition(",")
+    (tmp_path / "wake_model_data.h").write_text(f"{head}{sep}{int(first) ^ 1}{comma}{tail}")
+    assert any("wake_model_data.h" in name for name in firmware_gen.check(tmp_path))

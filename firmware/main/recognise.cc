@@ -10,15 +10,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "gen/command_infer.h"
 #include "gen/features_config.h"
 #include "gen/labels.h"
 #include "gen/model_config.h"
 #include "gen/model_data.h"
 #include "gen/test_vectors.h"
+#include "infer_lock.h"
 #include "mfcc.h"
 #include "nn_timers.h"
 #include "storage.h"
 #include "stream.h"
+#include "task.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
@@ -26,13 +29,44 @@
 
 _Static_assert(KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES,
                "label count (fwgen) must match model output classes (export)");
+static_assert(COMMAND_INFER_INPUT_LEN == KWS_N_FRAMES * KWS_N_MFCC,
+              "generated command input length must match the feature window");
+static_assert(COMMAND_INFER_OUTPUT_LEN == KWS_NUM_LABELS,
+              "generated command output length must match the label count");
+static_assert(COMMAND_INFER_STATE_BYTES == 0,
+              "the command model is stateless; nothing to carry between steps");
+
+/* Is the interpreter in this build at all? It is the inference path when the
+   generated one is switched off, and the reference the parity log needs when it
+   is on. With the generated path alone — the shipped default — nothing here
+   instantiates it and its arena is never allocated. Same switch wake.cc uses. */
+#if !CONFIG_KWS_INFER_GENERATED || CONFIG_KWS_INFER_PARITY_LOG
+#define KWS_CMD_TFLM 1
+#else
+#define KWS_CMD_TFLM 0
+#endif
+
+/* Where gen/command_infer.c's 51 KB arena was linked (Kconfig choice
+   KWS_INFER_COMMAND_ARENA; see CMakeLists.txt, which is what actually defines
+   COMMAND_INFER_ARENA_ATTR). PSRAM by default: internal SRAM is what the task
+   stacks need and cannot be moved out of. */
+#ifdef CONFIG_KWS_INFER_COMMAND_ARENA_PSRAM
+#define KWS_CMD_ARENA_WHERE "static, PSRAM"
+#else
+#define KWS_CMD_ARENA_WHERE "static, internal RAM"
+#endif
 
 static const char *TAG = "recognise";
 
 static SemaphoreHandle_t s_lock;
 static recognise_status_t s_st;
 static volatile bool s_active;
+#if KWS_CMD_TFLM
 static uint8_t *s_arena;
+#endif
+#if CONFIG_KWS_INFER_GENERATED && CONFIG_KWS_INFER_PARITY_LOG
+static bool s_parity_pending;        /* log both paths' output on the next step (recognise_task only) */
+#endif
 static FILE *s_log;
 static volatile int64_t s_off_at_us;   /* assist window deadline, 0 = run until told otherwise */
 
@@ -77,6 +111,11 @@ static void duty_log(bool was_active, int64_t interval_us, int64_t busy_us)
 
 static void recognise_task(void *)
 {
+    /* The model's 23 int8 outputs, whichever path produced them. 16-byte
+       aligned because esp-nn's S3 kernels write the softmax result straight
+       into it (gen/command_infer.h says so). */
+    static int8_t logits[COMMAND_INFER_OUTPUT_LEN] __attribute__((aligned(16)));
+#if KWS_CMD_TFLM
     static tflite::MicroMutableOpResolver<7> resolver;
     resolver.AddConv2D(); resolver.AddDepthwiseConv2D(); resolver.AddFullyConnected();
     resolver.AddMean(); resolver.AddSoftmax(); resolver.AddReshape(); resolver.AddAdd();
@@ -88,20 +127,93 @@ static void recognise_task(void *)
     if (interp.AllocateTensors() != kTfLiteOk) { ESP_LOGE(TAG, "AllocateTensors failed"); vTaskDelete(nullptr); return; }
     ESP_LOGI(TAG, "arena used %u / %u", (unsigned)interp.arena_used_bytes(), (unsigned)KWS_MODEL_ARENA_BYTES);
     TfLiteTensor *in = interp.input(0), *out = interp.output(0);
+    int8_t *feat = in->data.int8;      /* the front-end writes here, both paths read it */
+#else
+    static int8_t s_feat[COMMAND_INFER_INPUT_LEN] __attribute__((aligned(16)));
+    int8_t *feat = s_feat;
+#endif
+
+#if CONFIG_KWS_INFER_GENERATED
+    bool use_generated = true;
+    command_infer_init();
+    /* COMMAND_INFER_SCRATCH_BYTES is this model's share of kws_infer_scratch —
+       the maximum over every op, sized by a Python port of the
+       esp_nn_get_*_scratch_size_esp32s3() family (kws_de/codegen.py). Ask the
+       real functions, on the real chip: the query is generated alongside the
+       kernels from the same dims, so it covers every op that takes scratch
+       (both the 3x3 depthwise convs and the convolutions — querying only the
+       widest of today's would let a future esp-nn whose other formula grew slip
+       past the guard) and cannot describe a model that is no longer here. If
+       the port under-reserved, the kernels would scribble past the shared
+       region, so this refuses to run rather than logging a number nobody
+       diffs. */
+    int scratch = command_infer_scratch_query();
+    if (scratch > COMMAND_INFER_SCRATCH_BYTES) {
+        ESP_LOGE(TAG, "esp-nn scratch %d B > the %u B gen/command_infer.c reserved — regenerate with kws-codegen",
+                 scratch, (unsigned)COMMAND_INFER_SCRATCH_BYTES);
+        use_generated = false;
+#if !KWS_CMD_TFLM
+        ESP_LOGE(TAG, "no interpreter in this build (CONFIG_KWS_INFER_PARITY_LOG=n) — recognition disabled");
+        vTaskDelete(nullptr); return;
+#endif
+        ESP_LOGE(TAG, "falling back to the TFLite Micro interpreter");
+    }
+    /* The two models keep separate arenas but share one esp-nn scratch region,
+       because esp-nn's scratch pointers are file-static globals and separate
+       regions would be handed to the wrong model's kernels. In assist mode the
+       wake task (priority 3) can preempt this one mid-inference, so the two
+       evaluations are serialised on kws_infer_lock() — see infer_lock.h. */
+    ESP_LOGI(TAG, "inference: %s, %u B arena (%s) + %u B state + %u B shared scratch, "
+                  "esp-nn scratch %d B queried / %u B reserved; TFLM %s; free internal %u",
+             use_generated ? "generated (esp-nn)" : "TFLite Micro interpreter (generated path refused)",
+             (unsigned)command_infer_arena_bytes(), KWS_CMD_ARENA_WHERE,
+             (unsigned)command_infer_state_bytes(), (unsigned)KWS_INFER_SCRATCH_BYTES,
+             scratch, (unsigned)COMMAND_INFER_SCRATCH_BYTES,
+             KWS_CMD_TFLM ? "arena kept as the parity reference and fallback" : "not built in",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#else
+    const bool use_generated = false;
+    ESP_LOGI(TAG, "inference: TFLite Micro interpreter; free internal %u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
+
+    /* One model evaluation on whichever path is active, so the selftest below
+       and the step loop cannot drift apart. `feat` is the input buffer both
+       paths read; `logits` receives the 23 output bytes. */
+    auto evaluate = [&]() -> bool {
+        bool ok = false;
+#if CONFIG_KWS_INFER_GENERATED
+        /* Both models' kernels work in one esp-nn scratch region (infer_lock.h
+           says why there is only one), and the wake task — priority 3, this
+           core — can preempt this one mid-inference in assist mode. */
+        kws_infer_lock();
+        if (use_generated) { command_infer(feat, logits); ok = true; }
+#endif
+#if KWS_CMD_TFLM
+        if (!ok && interp.Invoke() == kTfLiteOk) {
+            memcpy(logits, out->data.int8, sizeof logits);
+            ok = true;
+        }
+#endif
+#if CONFIG_KWS_INFER_GENERATED
+        kws_infer_unlock();
+#endif
+        return ok;
+    };
 
     /* Numeric fingerprint of the inference path, once per boot: the golden MFCC
-       vector through the real interpreter, printed as its 23 int8 outputs.
+       vector through the active path, printed as its 23 int8 outputs.
        Kernel-level build options (esp-nn's requantise rounding, for one) change
        device arithmetic that no host test can observe — the host runs neither
-       esp-nn nor TFLM — so this line is the only way to tell a change that is
-       bit-exact from one that quietly moved the model's outputs. Compare it
-       across two boot logs. */
-    mfcc_quantize(TV_MFCC, in->data.int8, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
-    if (interp.Invoke() == kTfLiteOk) {
+       esp-nn's S3 kernels nor TFLM — so this line is the only way to tell a
+       change that is bit-exact from one that quietly moved the model's outputs.
+       Compare it across two boot logs. */
+    mfcc_quantize(TV_MFCC, feat, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
+    if (evaluate()) {
         char line[6 * KWS_NUM_LABELS + 1];      /* "-128," is 5 chars plus the terminator */
         int n = 0;
         for (int i = 0; i < KWS_NUM_LABELS && n < (int)sizeof line - 1; i++)
-            n += snprintf(line + n, sizeof line - (size_t)n, "%d,", out->data.int8[i]);
+            n += snprintf(line + n, sizeof line - (size_t)n, "%d,", logits[i]);
         ESP_LOGI(TAG, "selftest int8 out: %s", line);
     }
 
@@ -134,6 +246,9 @@ static void recognise_task(void *)
             uint32_t now = audio_write_pos();
             frame_start = now > KWS_SAMPLE_RATE ? now - KWS_SAMPLE_RATE : 0;
             primed = true;
+#if CONFIG_KWS_INFER_GENERATED && CONFIG_KWS_INFER_PARITY_LOG
+            s_parity_pending = true;                       /* one parity line per mode entry */
+#endif
         }
         vTaskDelay(pdMS_TO_TICKS(100));                    /* ~10 Hz cadence */
         int64_t t0 = esp_timer_get_time();
@@ -154,26 +269,56 @@ static void recognise_task(void *)
         if (audio_write_pos() > frame_start + 2 * KWS_SAMPLE_RATE) { primed = false; continue; }  /* stalled: resync */
         if (mstate.count < KWS_N_FRAMES) continue;         /* not a full 1 s of frames yet */
         mfcc_finish(&mstate, feats);
-        mfcc_quantize(feats, in->data.int8, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
+        mfcc_quantize(feats, feat, KWS_MODEL_INPUT_SCALE, KWS_MODEL_INPUT_ZERO_POINT);
         NN_TIMERS_RESET();
         int64_t t_invoke = esp_timer_get_time();
-        if (interp.Invoke() != kTfLiteOk) { ESP_LOGE(TAG, "Invoke failed"); continue; }
+        if (!evaluate()) { ESP_LOGE(TAG, "inference failed"); continue; }
         int64_t invoke_us = esp_timer_get_time() - t_invoke;
+#if CONFIG_KWS_INFER_GENERATED && CONFIG_KWS_INFER_PARITY_LOG
+        /* Once per mode entry, on the same live features: run the interpreter
+           too and say whether the two paths still agree byte for byte. Costs
+           one extra Invoke on that one step, so the trace window it lands in
+           reads high. */
+        if (s_parity_pending && use_generated) {
+            s_parity_pending = false;
+            kws_infer_lock();      /* TFLM's kernels move the same esp-nn globals */
+            TfLiteStatus st = interp.Invoke();
+            kws_infer_unlock();
+            if (st != kTfLiteOk) {
+                ESP_LOGE(TAG, "parity: interpreter Invoke failed");
+            } else {
+                int diff = 0;
+                for (int i = 0; i < KWS_NUM_LABELS; i++)
+                    if (logits[i] != out->data.int8[i]) diff++;
+                ESP_LOGI(TAG, "parity: %d/%d output bytes differ", diff, KWS_NUM_LABELS);
+            }
+        }
+#endif
         int best = 0;
         for (int i = 0; i < KWS_NUM_LABELS; i++) {
-            probs[i] = (out->data.int8[i] - KWS_MODEL_OUTPUT_ZERO_POINT) * KWS_MODEL_OUTPUT_SCALE;
+            probs[i] = (logits[i] - KWS_MODEL_OUTPUT_ZERO_POINT) * KWS_MODEL_OUTPUT_SCALE;
             if (probs[i] > probs[best]) best = i;
         }
         int fired = stream_push(&stream, probs);
         step_us = esp_timer_get_time() - t0;
         uint32_t ms = (uint32_t)(step_us / 1000);
         if ((++steps % 50) == 0)                         /* ~every 5 s: front-end + inference cost */
-            ESP_LOGI(TAG, "step %lu ms (front-end %lld us over %d new frames, invoke %lld us: " NN_TIMERS_FMT ")",
+            /* The stack headroom is in the trace because RECOGNISE_STACK was
+               cut to fit internal RAM (see below): the number stays checkable
+               on any build instead of being a one-off measurement. */
+            ESP_LOGI(TAG, "step %lu ms (front-end %lld us over %d new frames, invoke %lld us: " NN_TIMERS_FMT
+                          ", stack %u B free)",
                      (unsigned long)ms, pushed ? fe_us / pushed : (int64_t)0, pushed,
-                     invoke_us, NN_TIMERS_ARGS(invoke_us));
+                     invoke_us, NN_TIMERS_ARGS(invoke_us),
+                     (unsigned)uxTaskGetStackHighWaterMark(nullptr));
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        s_st.infer_ms = ms; s_st.arena_used = interp.arena_used_bytes();
+        s_st.infer_ms = ms;
+#if KWS_CMD_TFLM
+        s_st.arena_used = interp.arena_used_bytes();
+#else
+        s_st.arena_used = command_infer_arena_bytes();
+#endif
         /* Test view: show the live top-1 prediction + its confidence every step, so
            speaking a word immediately shows what the model hears (not only threshold
            fires). fired_count still tracks how often the detector actually triggered. */
@@ -194,15 +339,35 @@ static void recognise_task(void *)
 extern "C" void recognise_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+#if CONFIG_KWS_INFER_GENERATED
+    kws_infer_lock_init();     /* before the task exists, so nothing races to create it */
+#endif
+#if KWS_CMD_TFLM
     s_arena = arena_alloc(TAG, "command", KWS_MODEL_ARENA_BYTES);
     assert(s_arena);
+#endif
     /* Core 0, priority 2. LVGL (priority 4, 5 ms tick) and the audio task own
        core 1, and LVGL preempted a 40 ms Invoke several times over.
        Priority 2 puts this BELOW the wake task (3), which shares core 0 in
        assist mode: the wake model is always on and costs 1.7 ms per 30 ms,
        while this one is a best-effort burst costing 46 ms per step. At equal
-       priority the burst starved the detector. */
-    xTaskCreatePinnedToCore(recognise_task, "recognise", 16384, nullptr, 2, nullptr, 0);
+       priority the burst starved the detector.
+
+       10 KB of stack, down from the interpreter era's 16 KB, for both paths.
+       A task stack must come out of internal RAM and cannot be moved to PSRAM
+       (CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY is off), and this task is only
+       the first of four app_main creates — record (8 KB) and console (4 KB)
+       follow it and were the ones that silently failed when the generated
+       arena took 51 KB of internal SRAM. The arena lives in PSRAM by default
+       now, which is the real fix, but the stack stays at its measured size
+       rather than its historical one: the high-water mark is 6,436 B on the
+       generated path and 6,368 B on the interpreter path (both with the
+       recognise screen live), so ~3.8 KB is left for what that measurement
+       does not reach — a fire opening recognise.log through FATFS. The
+       "stack N B free" field in the step trace above is that high-water mark,
+       so the size stays checkable on any build. */
+#define RECOGNISE_STACK 10240
+    task_spawn(TAG, recognise_task, "recognise", RECOGNISE_STACK, nullptr, 2, 0);
 }
 extern "C" void recognise_set_active(bool on)
 {

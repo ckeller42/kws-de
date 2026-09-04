@@ -11,6 +11,7 @@
 #include "gen/wake_model_config.h"
 #include "record.h"
 #include "storage.h"
+#include "task.h"
 #include "ui/ui.h"
 
 static const char *mode_name(ui_mode_t m)
@@ -131,5 +132,5 @@ void console_start(void)
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
     usb_serial_jtag_vfs_use_driver();
-    xTaskCreatePinnedToCore(console_task, "console", 4096, NULL, 1, NULL, 0);
+    task_spawn("console", console_task, "console", 4096, NULL, 1, 0);
 }

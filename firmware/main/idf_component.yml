@@ -2,4 +2,11 @@ dependencies:
   idf: ">=5.5"
   espressif/m5stack_core_s3: "^2"
   espressif/esp-tflite-micro: "^1"
+  # esp-tflite-micro pulls esp-nn in as a private dependency with a floor of
+  # >=1.1.1, which would let the registry hand the device a different release
+  # from the one firmware/test/Makefile links the host parity harness against —
+  # and "esp-nn's ANSI and S3 kernels agree bit for bit" is the last link in the
+  # bit-exactness chain. Pinned exactly, so the two sides can only move together
+  # in a reviewed diff (firmware/dependencies.lock is not committed).
+  espressif/esp-nn: "==1.3.1"
   espressif/esp_tinyusb: "^1"

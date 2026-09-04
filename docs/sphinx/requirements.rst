@@ -344,6 +344,74 @@ Recogniser
    needs an unlisted op fails to build rather than silently pulling in
    unaudited kernels.
 
+.. req:: Generated inference is bit-exact with the interpreter
+   :id: REQ_FW_INFER_GENERATED
+   :status: implemented
+
+   With ``CONFIG_KWS_INFER_GENERATED=y`` both shipped models run as C generated
+   by ``kws-codegen`` (``firmware/main/gen/wake_infer.c``,
+   ``firmware/main/gen/command_infer.c``) calling esp-nn's ESP32-S3 kernels
+   directly, not through ``tflite::MicroInterpreter``. Every output byte is
+   identical to the interpreter's for the same
+   input: requantisation multipliers and shifts are prepared with TFLM's own
+   ``QuantizeMultiplier`` integer math, activation ranges with TFLM's own
+   rounding, and ``LOGISTIC`` is a 256-entry table read out of the reference
+   kernel itself. The generated footprint replaces, not supplements, the TFLM
+   arena in the default build. Wake: a 128 B transient arena plus 4,200 B of
+   persistent ring state in ``.bss``, against the 40,960 B arena the
+   interpreter allocates. Command: a 31,360 B transient arena and no state at
+   all, against the 65,536 B arena the interpreter allocates. Both then work in
+   one shared 19,888 B esp-nn scratch region, sized for the widest op of either
+   — esp-nn's kernels reach their scratch through file-static globals, one per
+   kernel family for the whole image, so a region per model would be handed to
+   the other model's kernels, which *write* into it. The two evaluations are
+   serialised on one mutex (``firmware/main/infer_lock.h``); they contend only
+   inside an assist window, and the wait is bounded by one command inference.
+   The generated arena is one static array, so its placement is a
+   link-time choice (Kconfig ``KWS_INFER_COMMAND_ARENA``) rather than an
+   allocation: PSRAM by default, internal SRAM as an opt-in. The scratch region
+   stays internal either way, which is where nearly all of that choice's
+   ~1.7 ms lived — the choice now covers 31,360 B of activations and is worth
+   27.3 -> 27.0 ms, measured, with 55,239 B free at recogniser start against
+   23,879 B. PSRAM stays the default because 31 KB of the scarcest memory on
+   the board is a poor trade for 0.3 ms; when that same choice still moved all
+   51,248 B it left 8,431 B free and the record task's stack, which must be
+   internal, was then never created (:need:`REQ_FW_ARENA_PLACEMENT`).
+   Neither reserve is taken on trust: at boot the firmware calls
+   ``<model>_infer_scratch_query()``, generated beside the kernels from the
+   same dimensions, which asks the chip's own
+   ``esp_nn_get_*_scratch_size_esp32s3`` for every op of that model that takes
+   scratch, and refuses to run the generated path if the answer exceeds
+   ``WAKE_INFER_SCRATCH_BYTES`` / ``COMMAND_INFER_SCRATCH_BYTES`` from the
+   generated header. Generating the query rather than hand-copying the
+   dimensions is what stops a regenerated model leaving the guard asking about
+   an op that is no longer there, since the failure it guards against is a
+   silent overrun out of the shared scratch region.
+
+.. req:: TFLite Micro stays as a build-time fallback
+   :id: REQ_FW_INFER_FALLBACK
+   :status: implemented
+
+   Both inference paths live in one firmware family; ``menuconfig``'s
+   ``CONFIG_KWS_INFER_GENERATED`` (``firmware/main/Kconfig.projbuild``) picks
+   one and the boot log prints which is active. A model that uses an op the
+   generator refuses is a loud generation-time error naming the op and tensor,
+   and the interpreter build still runs it. The default build compiles the
+   interpreter *out*: no ``MicroInterpreter``, no resource variables and
+   neither tensor arena, which is the memory the generated path is there to
+   save. Enabling ``CONFIG_KWS_INFER_PARITY_LOG`` builds it back in for both
+   models and logs ``parity: 0/23 output bytes differ`` on live device audio
+   once per mode entry; that build is tight enough that the record task is not
+   created (logged, not silent), so it verifies rather than ships. The
+   interpreter is a fallback for a model the generator refuses, not a
+   configuration the device has room to run alongside the generated one. Both
+   configurations are built in CI — the ``firmware-build`` job runs
+   ``idf.py build`` a second time with ``CONFIG_KWS_INFER_GENERATED=n`` — so
+   the fallback cannot rot behind an edit that only compiles under the
+   default. The gating semantics around the model are untouched either
+   way: threshold, consecutive-step count and refractory period
+   (:need:`REQ_FW_WAKE_DETECT`) see the same probability byte.
+
 .. req:: Recogniser model is the 23-class v2 command model
    :id: REQ_FW_23_CLASSES
    :status: implemented
@@ -389,10 +457,12 @@ Wake word ("Hey Bus")
    :id: REQ_FW_WAKE_DETECT
    :status: implemented
 
-   ``wake.cc`` runs the streaming ``models/hey_bus.tflite`` interpreter
-   once per 3 feature rows (30 ms of audio), keeping the interpreter and
-   its resource variables alive between steps and resetting them when the
-   mode is entered. A detection needs ``WAKE_THRESHOLD`` (0.99) on
+   ``wake.cc`` runs the streaming ``models/hey_bus.tflite`` graph once per 3
+   feature rows (30 ms of audio) — by default on the generated path
+   (:need:`REQ_FW_INFER_GENERATED`), otherwise through the interpreter — and
+   keeps the streaming state (the generated ring buffers, or the interpreter's
+   resource variables) alive between steps, resetting it when the mode is
+   entered. A detection needs ``WAKE_THRESHOLD`` (0.85) on
    ``WAKE_MIN_CONSECUTIVE`` (2) consecutive steps, after which
    ``WAKE_REFRACTORY_MS`` (1500) suppresses further fires, so one spoken
    "Hey Bus" produces exactly one fire. Each fire is logged to

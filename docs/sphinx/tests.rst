@@ -94,6 +94,63 @@ binary is a small ``assert``-based program built by
    config or the requantisation drifted. Also asserts the 3-row
    ``wakefront_take`` block the model consumes is oldest-row-first.
 
+.. test:: Generated inference matches the interpreter byte for byte
+   :id: TEST_INFER_PARITY
+   :status: passing
+   :links: REQ_FW_INFER_GENERATED, REQ_FW_HOST_TESTS_NO_IDF
+
+   ``firmware/test/test_wake_smoke.c`` and
+   ``firmware/test/test_command_smoke.c``: compile the committed generated
+   inference (``gen/wake_infer.c``, ``gen/command_infer.c``) against esp-nn's
+   ANSI-C reference kernels and replay the synthetic feature windows of
+   ``gen/wake_smoke_vectors.h`` (64 steps of one continuous clip) and
+   ``gen/command_smoke_vectors.h`` (16 independent windows — the command model
+   is stateless), asserting every output byte equals the reference
+   interpreter's answer frozen in the same header. Model-free and data-free, so
+   these are the ones that run in CI: ``wake smoke: 0/64 steps differ`` and
+   ``command smoke: 0/368 bytes differ``.
+
+   Two wider comparisons run only where the models and recordings are present
+   (a developer machine with ``KWS_DATA_ROOT``, never CI):
+   ``firmware/test/test_wake_parity.c`` replays the ten approved "Hey Bus"
+   takes plus the golden vector through the same generated code
+   (``wake parity: 0/635 steps differ (11 clips, 4200 B state)``), and
+   ``tests/test_codegen_parity.py`` extends the byte-for-byte comparison to
+   the command model over 4 synthetic vectors plus 64 real test-split feature
+   windows (``command parity: 0/1564 bytes differ (68 clips, arena
+   31360 B)``). Both generate
+   their vectors into a scratch directory, never into the committed
+   ``firmware/main/gen``. Zero LSB difference is the pass condition
+   throughout; one differing byte fails.
+
+   On the device the same comparison runs once per mode entry with
+   ``CONFIG_KWS_INFER_PARITY_LOG=y``, on live microphone features:
+   ``parity: generated <a>, interpreter <b>`` for the wake model and
+   ``parity: 0/23 output bytes differ`` for the command model. A second,
+   always-on device check needs no such build — the ``selftest int8 out:``
+   line prints all 23 output bytes for the golden MFCC vector, and is
+   byte-identical between the interpreter build and the generated build.
+
+.. test:: Generated arena stays within the TFLM arena
+   :id: TEST_INFER_ARENA
+   :status: passing
+   :links: REQ_FW_INFER_GENERATED, REQ_FW_ARENA_PLACEMENT
+
+   ``tests/test_codegen.py``: the first-fit lifetime planner's arena for each
+   model, plus its ring state and its share of the shared esp-nn scratch
+   region, is asserted to be at or below the ``KWS_WAKE_ARENA_BYTES`` /
+   ``KWS_MODEL_ARENA_BYTES`` the firmware allocates for TFLM today, read from
+   the committed ``firmware/main/gen/`` headers, and the per-op esp-nn scratch
+   sizes are pinned to hand-derived
+   ``esp_nn_get_*_scratch_size_esp32s3`` values (15,552 B for the wake model's
+   widest convolution, 19,888 B for the command model's 3x3 depthwise). The
+   device confirms those figures at boot by asking the real esp-nn on the real
+   chip — through ``<model>_infer_scratch_query()``, which the generator emits
+   from the same dimensions it emits the kernels from — and refuses the
+   generated path if it answers more. A further test asserts that the query's
+   dimension declarations are character-for-character the kernels' own, so a
+   regenerated model cannot leave the guard asking about an op it dropped.
+
 Python tests (pytest)
 ----------------------
 

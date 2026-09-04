@@ -19,6 +19,8 @@ them to the nearest real (compute or ring) node.
 import argparse
 import pathlib
 
+import numpy as np
+
 AMBER = "#C98A1E"
 AMBER_SOFT = "#F3E3BF"
 TEAL = "#2F9E8F"
@@ -58,8 +60,6 @@ def _ring_label(shape) -> str:
 
 
 def _nbytes(shape, dtype) -> int:
-    import numpy as np
-
     n = 1
     for d in shape:
         n *= d
@@ -120,22 +120,28 @@ def _node_label(op, info: dict) -> str:
 
 
 def analyze(tflite: bytes) -> dict:
-    """Read a .tflite flatbuffer through the TFLite interpreter and return
+    """Read a .tflite flatbuffer through kws_de.tflite_graph and return
     the structure `to_dot` renders: compute ops with their MACs, ring-state
     variables, per-op pipeline stage, and the edges between all of it."""
-    import tensorflow as tf
+    from kws_de import tflite_graph
 
-    itp = tf.lite.Interpreter(model_content=tflite)
-    itp.allocate_tensors()
-    ops = itp._get_ops_details()  # noqa: SLF001 -- no public equivalent; see budgets.py
-    tensors = {t["index"]: t for t in itp.get_tensor_details()}
-    in_detail = itp.get_input_details()[0]
-    out_detail = itp.get_output_details()[0]
-
-    # The XNNPACK delegate appends its own partition-wrapper ops (op_name
-    # DELEGATE) that alias tensors already produced by the real ops below --
-    # skip them when tracing the graph, they're not part of the model.
-    real_ops = [o for o in ops if o["op_name"] != "DELEGATE"]
+    g = tflite_graph.read_graph(tflite)
+    # The rest of this function speaks the old dict shape; adapt once, here.
+    tensors = {
+        i: {"index": i, "shape": list(t.shape), "dtype": np.dtype(t.dtype)}
+        for i, t in g.tensors.items()
+    }
+    real_ops = [
+        {
+            "index": op.index,
+            "op_name": op.name,
+            "inputs": list(op.inputs),
+            "outputs": list(op.outputs),
+        }
+        for op in g.ops
+    ]
+    in_detail = tensors[g.inputs[0]]
+    out_detail = tensors[g.outputs[0]]
     producer = {}
     for op in real_ops:
         for t in op["outputs"]:
@@ -216,7 +222,7 @@ def analyze(tflite: bytes) -> dict:
         edges.add((src, "OUT", "out"))
 
     return {
-        "n_ops": len(ops),
+        "n_ops": len(real_ops),
         "n_tensors": len(tensors),
         "compute_ops": compute_ops,
         "infos": infos,
@@ -262,7 +268,7 @@ def to_dot(tflite: bytes, title: str | None = None) -> str:
         f'  node [shape=box, style=filled, fillcolor="{AMBER_SOFT}", color="{AMBER}", '
         'fontname="Helvetica", fontsize=11];',
         '  edge [fontname="Helvetica", fontsize=9];',
-        f'  IN [label="input {in_shape}\\n{g["in_detail"]["dtype"].__name__}", shape=oval, '
+        f'  IN [label="input {in_shape}\\n{g["in_detail"]["dtype"].name}", shape=oval, '
         f'style=filled, fillcolor=white, color="{AMBER}"];',
         f'  OUT [label="output", shape=oval, style=filled, fillcolor="{CORAL_SOFT}", '
         f'color="{CORAL}"];',

@@ -852,6 +852,201 @@ device (and CI) behaves exactly as before. Practical note for data collection: c
 the weak link — the first card tried acknowledged every write and persisted none, which is
 why the mount now ends with a write-and-read-back probe before the card is trusted.
 
+### E12 — generated inference vs. the TFLM interpreter (wake, 2026-09-04, measured on the CoreS3)
+
+The wake model no longer runs through `tflite::MicroInterpreter`. `kws-codegen` emits the
+graph as a flat C function (`firmware/main/gen/wake_infer.c`) that calls esp-nn's ESP32-S3
+kernels directly, with the streaming ring buffers as plain static arrays;
+`CONFIG_KWS_INFER_GENERATED` picks the path, and in the default build the interpreter is
+compiled *out*: no `MicroInterpreter`, no resource variables, no 40 KB tensor arena. Both
+builds measured on the device in one session, same configuration otherwise, two minutes of
+the 2 s peak trace each (medians over the trace windows):
+
+| | TFLM interpreter | generated (esp-nn) |
+|---|---|---|
+| wake step | 1891 µs | **1281 µs** (−32 %) |
+| model evaluation alone | 1735 µs | **1220 µs** (−30 %) |
+| within-window spread | ±502 µs | **±151 µs** |
+| model memory | 40,960 B heap arena (31,388 B used) + 1 KB variable arena | **15,680 B arena + 4,200 B ring state, all `.bss`** |
+| free internal RAM once wake is up | 58,511 B | **81,371 B** (+22,860 B) |
+| app image | 1,165,872 B | **1,098,992 B** (−66,880 B: no interpreter, no kernel set) |
+| output on live device audio | `parity: out byte generated 71, interpreter 71` | identical |
+
+The memory row is what changes the deployment shape: the tensor arena is not *also*
+allocated, it is gone, and the 22.9 KB that frees is internal SRAM — the scarce kind. (It did
+not buy the command model a seat: its 65,536 B arena needs one contiguous block and the
+largest is 31,744 B, so the recogniser still runs from PSRAM.) `CONFIG_KWS_INFER_PARITY_LOG=y`
+re-links the interpreter and re-allocates the arena — that is the developer-verification
+build, not the shipped one.
+
+**Why it is faster is not "better kernels" — they are the same esp-nn kernels.** The kernel
+timers say so: in the interpreter run, conv + depthwise + FC is ~1,090 µs of the 1,735 µs
+`Invoke`, and the remaining ~640 µs is per-op dispatch, resource-variable bookkeeping and the
+reference-C glue ops (`CONCATENATION`, `STRIDED_SLICE`, `QUANTIZE`, `LOGISTIC`). The generated
+function keeps the ~1,090 µs of kernels, replaces the glue with `memcpy`/`memmove` on the rings
+and a 256-entry LUT, and lands at 1,220 µs total. **The interpreter's overhead was a third of
+the wake inference**, and the variance collapses with it: no allocator and no per-step tensor
+bookkeeping competing with the LVGL task.
+
+That also settles what is left of the spec's "wake step well under 1 ms" target: it is **not**
+met at 1.28 ms, and code generation cannot close the gap — ~1.1 ms of the 1.22 ms is esp-nn
+kernel time for *this* model, so the remaining lever is model size (channels, layers), not the
+inference runtime. Recorded as open rather than quietly restated.
+
+Bit-exactness is the point, and it is checked at three levels: `wake smoke: 0/64 steps differ`
+(synthetic vectors, model-free, runs in CI), `wake parity: 0/635 steps differ (11 clips,
+4200 B state)` (the ten approved "Hey Bus" takes, needs the data root), and on the device
+itself once per mode entry on live microphone features. The generated arena's esp-nn scratch
+block is sized by a Python port of `esp_nn_get_conv_scratch_size_esp32s3`, emitted into the
+header as `WAKE_INFER_SCRATCH_BYTES`; the firmware asks the real function on the real chip at
+boot, gets 15,552 B — exactly what the port reserved — and refuses to run the generated path
+if it ever comes back larger, because that failure mode is a silent overrun into the ring
+state rather than a crash.
+
+### E13 — generated inference for the command model (2026-09-04, measured on the CoreS3)
+
+The same treatment for the 23-class DS-CNN, and with it the interpreter leaves the firmware
+entirely: `firmware/main/gen/command_infer.c` is 10 straight-line esp-nn calls (CONV_2D, then
+three DEPTHWISE_CONV_2D / 1x1 CONV_2D pairs, MEAN, FULLY_CONNECTED, SOFTMAX), no ring state,
+one static arena. Both builds measured on the device in one session, ~100 s of recognition
+each, medians over the ~5 s trace lines with the cold first one dropped:
+
+| | TFLM interpreter | generated, arena PSRAM (default) | generated, arena internal |
+|---|---|---|---|
+| recognise step | 46.0 ms | **33.0 ms** (−28 %) | **31.0 ms** (−33 %) |
+| model evaluation alone | 41,710 µs | **28,726 µs** (−31 %) | **26,983 µs** (−35 %) |
+| arena / state | 65,536 B in PSRAM (54,824 B used) | 51,248 B in PSRAM, 0 B state | 51,248 B in internal `.bss`, 0 B state |
+| free internal at recogniser start | 36,231 B | **59,679 B** | 8,431 B |
+| every app_main task created? | yes | yes | **no** — record's 8 KB stack fails |
+| recognise task stack high-water | 6,368 B of 10,240 | 6,516 B of 10,240 | 6,436 B of 10,240 |
+| app image | 1,165,696 B (as built at `78fa92c`) | **1,001,616 B** | 1,001,632 B |
+| `selftest int8 out:` (23 bytes, golden vector) | `-128,…,-36,…,0,-94,…,-127,…` | byte-identical | byte-identical |
+| live `parity:` line (PARITY_LOG=y) | — | **`parity: 0/23 output bytes differ`** | build too tight to run |
+
+**Same story as E12, at ten times the scale.** The interpreter's own kernel timers attribute
+28.4 ms of its 41.7 ms `Invoke` to conv + depthwise + FC + softmax and ~13.0 ms to the
+`rest` column — dispatch, tensor bookkeeping, the reference-C `MEAN`. The generated function
+keeps the kernels and deletes the 13 ms. So the spec's "command Invoke at least 2x faster" is
+**not** met: 1.45x with the shipping arena placement (1.55x with the arena internal) is what
+removing all interpreter overhead is worth here, because unlike the wake model this one is
+genuinely arithmetic-bound (49x10x32 activations through three depthwise blocks). Recorded as
+open, like E12's sub-1 ms target; the lever left is the model, not the runtime.
+
+**Arena placement turned out to be a memory question, not a speed one.** The generated arena is
+one static array, so where it lands is settled at link time — no allocation, no contiguity
+requirement — which made internal SRAM look free. It is not: 51,248 B is more internal memory
+than this board has spare, and taking it left 8,431 B at recogniser start. Task stacks must be
+internal (`CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY` is off, and `SPIRAM_MALLOC_ALWAYSINTERNAL`
+only redirects `malloc`), so the *next* task `app_main` creates simply did not exist:
+
+```text
+E (27435) record: record task (8192 B stack) not created: free internal 8035, largest block 7680
+```
+
+Record mode would have sat in `REC_IDLE` for ever, queueing into a queue nobody drained. It was
+invisible because every `xTaskCreatePinnedToCore` in the firmware dropped its return value;
+they all go through one checked helper now (`firmware/main/task.h`), which is how the line
+above exists at all. The fix proper is a Kconfig choice defaulting to PSRAM: 1.7 ms of the
+~28.7 ms evaluation buys back 51 KB of the scarcest memory on the board, and the interpreter
+it is being compared against ran its own arena from PSRAM anyway. Internal stays as the
+opt-in for measurement builds. **The general lesson is worth keeping for the paper: moving a
+model from an interpreter to generated code converts a heap allocation into a linker
+placement, and a linker placement has no failure path — it succeeds and something else
+starves.**
+
+Bit-exactness on the device is now checked two ways rather than one. `CONFIG_KWS_INFER_PARITY_LOG=y`
+fits once the arena is in PSRAM, and logs `parity: 0/23 output bytes differ` on live microphone
+features on the first step after entering the mode (that build is still tight enough to lose
+the record task — logged, and acceptable for a verification build). Independently, the
+`selftest int8 out:` line prints all 23 output bytes for the golden MFCC vector on *every*
+build, and is byte-identical between the interpreter and generated builds. Off-device:
+`command smoke: 0/368 bytes differ` (16 synthetic windows, model-free, runs in CI) and
+`command parity: 0/1564 bytes differ (68 clips, arena 51248 B)` (4 synthetic vectors plus 64
+real test-split windows, needs the data root).
+
+**A trap found on the way.** `models/command_v3_qat.tflite` is *not* the model the firmware
+runs. A retrain rewrites the `.tflite` without touching `firmware/main/gen/model_data.h`, and
+the two had already diverged (17,912 B / `f985f282` on disk against the 17,880 B / `fc36da9f`
+the device's `KWS_MODEL_ID` names — different weights, not a re-serialisation). Generating
+from the `.tflite` would have shipped a generated path computing a different model from the
+one `model_config.h`'s quantisation constants describe, with nothing failing loudly. So
+`kws-codegen` reads the embedded C array directly (`codegen.model_bytes` accepts a
+`model_data.h`), which makes the model the device runs the single source of truth — and, as a
+side effect, puts the command model's byte-exact freshness check inside CI, where the wake
+model's could never go because `models/` is not in the repository.
+
+### E14 — one esp-nn scratch region for both models (2026-09-04, measured on the CoreS3)
+
+Review finding on E12/E13's arrangement, and a real latent bug: each generated model carved
+its esp-nn scratch out of the end of its own arena, on the theory that a crossed pointer would
+at worst read the other model's scratch. Scratch is a **write** target, and the two reserves
+differ by 4,336 B. esp-nn's kernels reach it through file-static globals — one per kernel
+family for the whole image, not one per model — so in assist mode, where the wake task
+(priority 3) preempts the recogniser (priority 2) on the same core, the command model's
+depthwise could run with the wake arena's pointer and write 4,336 B past the end of a
+15,680 B array in internal `.bss`. Silent, heap-adjacent corruption; small per step, and
+assist mode runs both models continuously.
+
+Fixed in two halves. The generator now emits one shared region, `kws_infer_scratch`, sized to
+the widest op of *any* shipped model (19,888 B), 16-byte aligned, in internal `.bss`, pointed
+at once per inference entry rather than once per kernel; the arenas hold activations only.
+The firmware serialises the two evaluations on one mutex (`firmware/main/infer_lock.h`) — the
+models contend only inside an assist window, and the wait is bounded by one command inference,
+which the wake task absorbs because it reads from an audio ring holding a second of history.
+Re-measured, same session, same method as E12/E13:
+
+| | E12/E13 (scratch inside each arena) | E14 (one shared region) |
+|---|---|---|
+| wake arena / state / scratch | 15,680 + 4,200 B (scratch inside the arena) | **128 + 4,200 B, + 19,888 B shared** |
+| command arena / state / scratch | 51,248 B PSRAM (scratch inside) | **31,360 B PSRAM, + 19,888 B shared internal** |
+| wake step | 1,281 µs | **1,250 µs** |
+| wake evaluation | 1,220 µs | 1,248 µs |
+| wake within-window spread | ±151 µs | **±97 µs** |
+| recognise step (arena in PSRAM) | 33.0 ms | **31 ms** |
+| command evaluation (arena in PSRAM) | 28,726 µs | **27,283 µs** |
+| command evaluation (arena internal) | 26,983 µs | 26,981 µs |
+| free internal, recogniser start, arena internal | 8,431 B (record task lost) | **23,879 B** (every task created) |
+| free internal, wake up | 81,371 B | 77,291 B (−4,080) |
+| free internal, recogniser start | 59,679 B | 55,239 B (−4,440) |
+| app image | 1,001,616 B | 1,002,560 B (+944: the scratch-query functions) |
+| `selftest int8 out:` | `-128,…,-36,…,0,-94,…,-127,…` | byte-identical |
+
+**The interesting row is the command model's.** Its scratch used to live in the PSRAM arena;
+sharing put it in internal RAM, and that alone recovers nearly all of E13's arena-placement
+gap for 4,336 B of internal RAM instead of 51,248 B. The Kconfig choice that was worth
+1.7 ms is now worth **0.3 ms** (27,283 → 26,981 µs, both re-measured), because the part of the
+working set that wanted the fast memory is already in it: the kernels hit scratch on every
+output row and the activations far less often. The choice also stopped being a starvation
+risk — with only 31,360 B of activations to place, the internal build leaves 23,879 B free at
+recogniser start and every `app_main` task is created, where E13's 51,248 B left 8,431 B and
+lost the record task. PSRAM stays the default anyway: 31 KB of the scarcest memory for 0.3 ms
+is still a poor trade, and the headroom is what keeps the next task from hitting that line.
+E13's conclusion stands but sharpens: the placement question is not "arena in PSRAM or not",
+it is "which part of the working set is worth internal SRAM" — and answering it per-part
+bought both the speed and the memory.
+
+The wake numbers moved within the noise of the trace (the step is a mean per 2 s window, the
+evaluation figure a single sample from it); the fix adds one mutex pair and three pointer
+stores per step. Bit-exactness is unchanged at every level: `wake smoke: 0/64`,
+`command smoke: 0/368`, `wake parity: 0/635`, `command parity: 0/1564`, and the device's
+always-on `selftest int8 out:` line byte for byte.
+
+Two smaller things from the same review, both about guards that checked one half of a
+symmetric pair. The boot scratch guard's dimensions used to be a hand copy of the generated C
+into `wake.cc`/`recognise.cc`; a regenerated model would have left it querying the *previous*
+geometry, getting an answer that fits, and passing — the exact failure it exists to prevent,
+with a green boot log in front of it. The generator now emits `<model>_infer_scratch_query()`
+from the same dimensions it emits the kernels from, and the firmware calls that; the device
+answers 15,552 B and 19,888 B, exactly what the Python port reserved. And the model-stamp
+drift check covered the command pair only, though the wake model is the one whose `.tflite`
+CI can never see; it now loops over both.
+
+### E12/E13 memory rows, superseded
+
+Every arena figure in E12 and E13 predates E14: the esp-nn scratch was inside those arenas
+and is now a separate shared region. The step and evaluation timings in E12/E13 stand as
+measured; E14's table gives the current ones.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

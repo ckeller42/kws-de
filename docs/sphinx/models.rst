@@ -473,6 +473,66 @@ always 1x1 (a streaming model advances the ring by one row per Invoke
 instead of recomputing a window), so MACs = weights count exactly, unlike
 the command model's 49x10 = 490x multiplier above.
 
+Generated inference
+---------------------
+
+Both shipped models run as generated C, not through the TFLite Micro
+interpreter (:need:`REQ_FW_INFER_GENERATED`). ``kws-codegen`` reads the same
+``.tflite`` graph the diagrams above are drawn from and emits straight-line
+calls into esp-nn's ESP32-S3 kernels with the requantisation constants folded
+in, so the op sequence in the generated C is exactly the op sequence in the
+figures:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Model
+     - Source read by ``kws-codegen``
+     - Generated ops, in order
+     - Arena / state
+
+   * - Command
+     - ``firmware/main/gen/model_data.h``
+     - CONV_2D, then 3x (DEPTHWISE_CONV_2D, CONV_2D 1x1), MEAN,
+       FULLY_CONNECTED, SOFTMAX — 10 ops
+     - 31,360 B arena, 0 B state, plus 19,888 B of the shared esp-nn scratch
+       region; arena in PSRAM by default (Kconfig
+       ``KWS_INFER_COMMAND_ARENA``), scratch always internal
+
+   * - Wake
+     - ``firmware/main/gen/wake_model_data.h``
+     - the streaming stem CONV_2D, the depthwise/1x1 stack over ring buffers,
+       FULLY_CONNECTED, LOGISTIC, QUANTIZE — 14 ops after the streaming
+       rewrite
+     - 128 B arena, 4,200 B ring state (3,792 B of history plus one step's
+       408 B of new rows), 15,552 B of the shared scratch region; all internal
+       SRAM — small, and it runs every 30 ms
+
+The scratch region is one 19,888 B array for both models, not a block of each
+model's arena: esp-nn's kernels reach their scratch through file-static
+globals, one per kernel family for the whole image, so separate regions would
+be handed to the wrong model's kernels — and scratch is written, not just
+read. The firmware serialises the two evaluations
+(``firmware/main/infer_lock.h``); they only contend inside an assist window.
+
+Both are generated from the C array the firmware embeds, not from
+``models/*.tflite``: a retrain rewrites the ``.tflite`` without touching the
+device headers, so only ``*_model_data.h`` is guaranteed to be the bytes the
+device actually runs — and the command model's had already drifted from its
+``.tflite`` when this was written. ``kws-fwgen --check`` guards that from both
+sides now: it fails when the embedded array stops matching the sha8 in
+``KWS_MODEL_ID``, and warns when the ``.tflite`` the stamp names has been
+re-exported since. Because the headers are in the repository, both freshness
+checks also run in CI, where ``models/`` does not exist at all. Regenerate
+either with:
+
+.. code-block:: console
+
+   $ uv run --no-sync kws-codegen firmware/main/gen/model_data.h \
+       --name command --out firmware/main/gen
+   $ uv run --no-sync kws-codegen firmware/main/gen/wake_model_data.h \
+       --name wake --out firmware/main/gen
+
 Data provenance
 -----------------
 

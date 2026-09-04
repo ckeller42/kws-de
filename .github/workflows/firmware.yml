@@ -28,6 +28,21 @@ jobs:
           name: kws-de-fw-${{ github.sha }}
           path: firmware/build/kws-de-fw-*.bin
           retention-days: 30
+      # The TFLM fallback (REQ_FW_INFER_FALLBACK) is a documented, supported
+      # configuration, and the #if structure in wake.cc/recognise.cc is
+      # three-way — an edit that only compiles under the default is easy to
+      # write and invisible. Last in the job, into its own build directory, so
+      # it cannot disturb the image uploaded above; sdkconfig is removed first
+      # because sdkconfig.defaults only seeds a config that does not exist yet.
+      - name: idf.py build with the generated inference off
+        uses: espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d # v1
+        with:
+          esp_idf_version: v5.5.5
+          target: esp32s3
+          path: firmware
+          command: >-
+            echo CONFIG_KWS_INFER_GENERATED=n >> sdkconfig.defaults &&
+            rm -f sdkconfig && idf.py -B build-tflm build
   gen-fresh:
     runs-on: ubuntu-latest
     steps:
@@ -47,6 +62,14 @@ jobs:
           # tolerance that clears hardware last-digit noise but catches any real
           # config/generator change. See kws_de.firmware_gen.check.
           uv run kws-fwgen --check firmware/main/gen
+          # The generated inference C is pure integer arithmetic over the model's
+          # own bytes, so its check is byte-exact. Both models are read from the
+          # C array the firmware embeds, not from models/*.tflite: that is the
+          # model the device actually runs, and it is in the repo, so both
+          # checks run for real here and catch a generator change nobody
+          # regenerated and committed.
+          uv run kws-codegen firmware/main/gen/wake_model_data.h --name wake --check firmware/main/gen
+          uv run kws-codegen firmware/main/gen/model_data.h --name command --check firmware/main/gen
   host-test:
     runs-on: ubuntu-latest
     steps:
