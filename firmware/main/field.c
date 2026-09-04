@@ -23,9 +23,14 @@ void field_on_wake(field_state_t *f, uint32_t fire_pos)
     f->fire_pos = fire_pos;
 }
 
-bool field_take_span(const field_state_t *f, uint32_t *start, uint32_t *len)
+bool field_take_span(const field_state_t *f, uint32_t window_ms,
+                     uint32_t *start, uint32_t *len, bool *truncated)
 {
     if (!f->enabled || !f->armed) return false;
+    /* The window's real length, not ASSIST_WINDOW_MS: every fire inside an open
+       window pushes the gate's deadline out, so the audio the recogniser
+       listened to is as long as the gate actually stayed open. */
+    uint32_t window = (uint32_t)((uint64_t)KWS_SAMPLE_RATE * window_ms / 1000u);
     /* ponytail: a fire less than the pre-roll into the ring is treated as a
        boot-time fire and the take is shortened to what exists. The same test is
        true once every 74 h, when the uint32 sample counter wraps; the cost is
@@ -33,11 +38,15 @@ bool field_take_span(const field_state_t *f, uint32_t *start, uint32_t *len)
        position if that ever matters. */
     if (f->fire_pos < FIELD_PREROLL_SAMPLES) {
         *start = 0;
-        *len = f->fire_pos + FIELD_WINDOW_SAMPLES;
+        *len = f->fire_pos + window;
     } else {
         *start = f->fire_pos - FIELD_PREROLL_SAMPLES;
-        *len = FIELD_TAKE_SAMPLES;
+        *len = FIELD_PREROLL_SAMPLES + window;
     }
+    /* Cut at the end, never at the front: the pre-roll and the wake phrase are
+       what make the take an interaction rather than a clip. */
+    *truncated = *len > FIELD_MAX_TAKE_SAMPLES;
+    if (*truncated) *len = FIELD_MAX_TAKE_SAMPLES;
     return true;
 }
 

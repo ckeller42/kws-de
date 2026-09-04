@@ -328,13 +328,21 @@ static void recognise_task(void *)
             s_st.fired_count++;
             /* Field capture's device prediction: what THIS window fired, in
                order, kept next to the audio so the workstation can score the
-               deployed model against Whisper's label. Never a label itself. */
+               deployed model against Whisper's label. Never a label itself.
+
+               Whole entries only: snprintf would truncate safely but mid-value,
+               and a tail like "|an:0.8" reads as a confidence that was never
+               measured. A dropped entry is honest, a mangled one is not. */
             const char *w = KWS_LABELS[fired];
+            char e[48];
             size_t n = strlen(s_st.window_intent);
-            snprintf(s_st.window_intent + n, sizeof s_st.window_intent - n, "%s%s", n ? " " : "", w);
+            int k = snprintf(e, sizeof e, "%s%s", n ? " " : "", w);
+            if (k > 0 && (size_t)k < sizeof e && n + (size_t)k < sizeof s_st.window_intent)
+                memcpy(s_st.window_intent + n, e, (size_t)k + 1);
             n = strlen(s_st.window_words);
-            snprintf(s_st.window_words + n, sizeof s_st.window_words - n, "%s%s:%.2f",
-                     n ? "|" : "", w, (double)probs[fired]);
+            k = snprintf(e, sizeof e, "%s%s:%.2f", n ? "|" : "", w, (double)probs[fired]);
+            if (k > 0 && (size_t)k < sizeof e && n + (size_t)k < sizeof s_st.window_words)
+                memcpy(s_st.window_words + n, e, (size_t)k + 1);
         }
         recognise_status_t copy = s_st;
         xSemaphoreGive(s_lock);

@@ -27,10 +27,16 @@
 /** Worst case between the window closing and the record task starting the copy
  *  (a full recogniser step plus scheduling), rounded up to 0.2 s. */
 #define FIELD_COPY_LATENCY_SAMPLES (KWS_SAMPLE_RATE / 5)
+/** The most one take may hold: what is left of the ring once the copy latency is
+ *  reserved. A wake fire inside an open window *extends* it
+ *  (assist_gate_on_wake), so a window has no fixed length and a long enough
+ *  chain of fires outgrows the ring; such a take is cut at the end and says so
+ *  (field_take_span()'s `truncated`). */
+#define FIELD_MAX_TAKE_SAMPLES (AUDIO_RING_SAMPLES - FIELD_COPY_LATENCY_SAMPLES)
 
-/* The ring must still hold the whole take when the copy starts. It is 10 s
+/* The ring must still hold an un-extended take when the copy starts. It is 10 s
    today, so this is a guard against a future shrink, not a constraint. */
-_Static_assert(AUDIO_RING_SAMPLES >= FIELD_TAKE_SAMPLES + FIELD_COPY_LATENCY_SAMPLES,
+_Static_assert(FIELD_TAKE_SAMPLES <= FIELD_MAX_TAKE_SAMPLES,
                "audio ring must hold pre-roll + assist window + the copy latency");
 
 #ifdef __cplusplus
@@ -54,6 +60,9 @@ typedef struct {
     uint32_t start;     /**< Absolute position of the take's first sample. */
     uint32_t len;       /**< Samples to copy out of the ring. */
     uint32_t fire_ms;   /**< ms since boot of the wake fire (names the file). */
+    uint32_t window_ms; /**< How long the window was really open: the gate's close
+                             time minus `fire_ms`. ASSIST_WINDOW_MS for a lone
+                             fire, longer for every fire that extended it. */
     float wake_prob;    /**< Wake probability at that fire. */
     char intent[64];    /**< Ordered fired command words, space-joined; "" if none. */
     char words[96];     /**< The same fires as "<word>:<conf>", joined by '|'. */
@@ -67,10 +76,18 @@ void field_set_enabled(field_state_t *f, bool on);
 void field_on_wake(field_state_t *f, uint32_t fire_pos);
 /**
  * @brief The span to copy for the armed take.
+ * @param window_ms How long the window was open (its close time minus the arming
+ *        fire), so an extended window is captured whole instead of being cut to
+ *        ASSIST_WINDOW_MS.
+ * @param truncated Set true when the span did not fit FIELD_MAX_TAKE_SAMPLES and
+ *        was cut at the end. The caller must then drop the take's device
+ *        prediction: it cannot say which fires are still inside the audio.
  * @return false if capture is off or nothing is armed; otherwise @p start and
- *         @p len describe the take and `start + len` is the window's end.
+ *         @p len describe the take and, when not truncated, `start + len` is the
+ *         window's close.
  */
-bool field_take_span(const field_state_t *f, uint32_t *start, uint32_t *len);
+bool field_take_span(const field_state_t *f, uint32_t window_ms,
+                     uint32_t *start, uint32_t *len, bool *truncated);
 /** @brief Forget the armed take (it has been handed to the recorder). */
 void field_disarm(field_state_t *f);
 

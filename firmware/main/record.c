@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include "assist_gate.h"
 #include "audio.h"
 #include "storage.h"
 #include "task.h"
@@ -41,8 +40,13 @@ static record_status_t s_st;
 static prompt_session_t s_prompts;
 static uint32_t s_speaker;
 static int s_paused = 1;
-static int16_t *s_take;                       /* PSRAM, 6 s + pre-roll */
+static int16_t *s_take;                       /* PSRAM; see TAKE_BUF_SAMPLES */
 #define TAKE_MAX (KWS_SAMPLE_RATE * 6 + PREROLL_SAMPLES)
+/* One buffer serves both writers. A field take of a re-triggered window can be
+   longer than a guided take, so the buffer is the larger of the two — 313 KB of
+   the 8 MB PSRAM, which is what lets field_take_span() cap on the ring rather
+   than on this allocation. */
+#define TAKE_BUF_SAMPLES (TAKE_MAX > FIELD_MAX_TAKE_SAMPLES ? TAKE_MAX : FIELD_MAX_TAKE_SAMPLES)
 static field_take_t s_field_pending;          /* payload for REC_CMD_FIELD_TAKE */
 
 static void status_set(record_phase_t ph)
@@ -139,14 +143,16 @@ void record_post_field_take(const field_take_t *t)
     s_field_pending = *t;
     xSemaphoreGive(s_lock);
     record_cmd_t cmd = REC_CMD_FIELD_TAKE;
-    xQueueSend(s_cmds, &cmd, 0);
+    if (xQueueSend(s_cmds, &cmd, 0) != pdTRUE) {
+        /* A lost take must show up in `status`, not vanish silently. */
+        ESP_LOGW(TAG, "field: dropped, command queue full");
+        xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_dropped++; xSemaphoreGive(s_lock);
+    }
 }
 
-/* storage_root()/field/spkNN/<boot-ms>.wav plus one field.csv row. Runs on the
-   record task AFTER the assist window has closed: the recogniser is already
-   off, so the 100-300 ms FAT write cannot lengthen a recognise step. The
-   speaker id is the current NVS id and is never bumped here — one boot of one
-   user is one field directory. */
+/* storage_root()/field/spkNN/<boot-ms>.wav plus one field.csv row. The speaker
+   id is the current NVS id and is never bumped here — one boot of one user is
+   one field directory. */
 static void save_field_take(void)
 {
     field_take_t t;
@@ -161,7 +167,8 @@ static void save_field_take(void)
         xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_dropped++; xSemaphoreGive(s_lock);
         return;
     }
-    if (t.len > TAKE_MAX) t.len = TAKE_MAX;
+    /* Copy first: a PSRAM memcpy, no I/O, and it takes the samples out of the
+       ring before they can age out while we wait below. */
     audio_read(t.start + t.len, s_take, t.len);
     int peak = 0;
     for (uint32_t i = 0; i < t.len; i++) {
@@ -170,13 +177,25 @@ static void save_field_take(void)
     }
     float peak_dbfs = 20.f * log10f((peak > 0 ? peak : 1) / 32768.f);
 
+    /* THE GUARANTEE: no FAT write happens while an assist window is open. This
+       task runs at priority 5 on the model tasks' core and a flash write
+       suspends the cache for both cores, so a window opening in the second after
+       the previous one closed would otherwise land a 100-300 ms write on top of
+       a live recogniser. Bounded, so a gate that stops ticking cannot park the
+       recorder for ever; the ring copy above is already safe in hand. */
+    for (int i = 0; i < 250 && wake_window_open(); i++) vTaskDelay(pdMS_TO_TICKS(20));
+
     char dir[96], path[160], csv[128], name[24];
     snprintf(dir, sizeof dir, "%s/field", storage_root());              mkdir(dir, 0777);
     snprintf(dir, sizeof dir, "%s/field/%s", storage_root(), speaker);  mkdir(dir, 0777);
     snprintf(name, sizeof name, "%lu.wav", (unsigned long)t.fire_ms);
     snprintf(path, sizeof path, "%s/%s", dir, name);
     FILE *f = fopen(path, "wb");
-    if (!f) { ESP_LOGE(TAG, "field: open %s failed", path); return; }
+    if (!f) {
+        ESP_LOGE(TAG, "field: open %s failed", path);
+        xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_dropped++; xSemaphoreGive(s_lock);
+        return;
+    }
     uint8_t hdr[WAV_HEADER_BYTES];
     wav_write_header(hdr, t.len, KWS_SAMPLE_RATE);
     fwrite(hdr, 1, sizeof hdr, f);
@@ -186,10 +205,20 @@ static void save_field_take(void)
     snprintf(csv, sizeof csv, "%s/field.csv", dir);
     struct stat st; int fresh = stat(csv, &st) != 0;
     FILE *c = fopen(csv, "a");
-    if (!c) { ESP_LOGE(TAG, "field: csv open failed"); return; }
+    if (!c) {
+        /* The WAV is already on disk; without its row the pull would see an
+           orphan file, so count it as a drop and say so. */
+        ESP_LOGE(TAG, "field: csv open failed, %s has no row", name);
+        xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_dropped++; xSemaphoreGive(s_lock);
+        return;
+    }
     if (fresh) fputs("file,fire_ms,wake_prob,device_intent,device_words,window_ms,ms,peak_dbfs\n", c);
-    fprintf(c, "%s,%lu,%.3f,%s,%s,%d,%lu,%.1f\n", name, (unsigned long)t.fire_ms,
-            (double)t.wake_prob, t.intent, t.words, ASSIST_WINDOW_MS,
+    /* window_ms is how long the gate was really open; ms is the audio actually
+       written. ms < FIELD_PREROLL_MS + window_ms means the take was cut to fit
+       the ring — those rows carry no device prediction (see field_take_span()).
+       fclose() flushes through FatFs, so only an in-flight row can be lost. */
+    fprintf(c, "%s,%lu,%.3f,%s,%s,%lu,%lu,%.1f\n", name, (unsigned long)t.fire_ms,
+            (double)t.wake_prob, t.intent, t.words, (unsigned long)t.window_ms,
             (unsigned long)(t.len * 1000 / KWS_SAMPLE_RATE), peak_dbfs);
     fclose(c);
     xSemaphoreTake(s_lock, portMAX_DELAY); s_st.field_takes++; xSemaphoreGive(s_lock);
@@ -313,7 +342,7 @@ void record_start(void)
 {
     s_cmds = xQueueCreate(8, sizeof(record_cmd_t));
     s_lock = xSemaphoreCreateMutex();
-    s_take = heap_caps_malloc(TAKE_MAX * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    s_take = heap_caps_malloc(TAKE_BUF_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     assert(s_take);
     nvs_load();
     /* Idle-state placeholder only; REC_CMD_START_SESSION re-seeds this for real

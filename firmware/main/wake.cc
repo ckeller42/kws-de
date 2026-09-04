@@ -103,17 +103,26 @@ static void log_fire(uint32_t ms, float prob)
 /* The window has closed: hand the recorder the span to copy. NOTHING is written
    here — the copy and the FAT write happen on the record task, with the
    recogniser already off, so no I/O can lengthen a recognise step. */
-static void post_field_take(void)
+static void post_field_take(uint32_t close_ms)
 {
     field_take_t t = {};
-    if (!field_take_span(&s_field, &t.start, &t.len)) return;
+    bool truncated = false;
+    /* The gate pushes its deadline out on every fire, so the window is as long
+       as it really stayed open — not ASSIST_WINDOW_MS. */
+    t.window_ms = close_ms - s_fire_ms;
+    if (!field_take_span(&s_field, t.window_ms, &t.start, &t.len, &truncated)) return;
     field_disarm(&s_field);
-    recognise_status_t rst;
-    recognise_get_status(&rst);
     t.fire_ms = s_fire_ms;
     t.wake_prob = s_fire_prob;
-    strlcpy(t.intent, rst.window_intent, sizeof t.intent);
-    strlcpy(t.words, rst.window_words, sizeof t.words);
+    if (!truncated) {
+        /* The prediction may only name fires whose audio is in the WAV. A cut
+           take cannot say which those are, so it carries none and travels as an
+           unknown-prediction take — a case the QC pipeline already handles. */
+        recognise_status_t rst;
+        recognise_get_status(&rst);
+        strlcpy(t.intent, rst.window_intent, sizeof t.intent);
+        strlcpy(t.words, rst.window_words, sizeof t.words);
+    }
     record_post_field_take(&t);
 }
 
@@ -333,9 +342,12 @@ static void wake_task(void *)
             if (assist) {
                 if (fired) {
                     assist_gate_on_wake(&s_gate, now_ms);
+                    /* Latch the ARMING fire only, matching field_on_wake()'s own
+                       "first fire wins": a later fire extends the window, but the
+                       audio — and with it the file name, fire_ms and wake_prob —
+                       stays anchored to the phrase the take begins with. */
+                    if (!s_field.armed) { s_fire_ms = now_ms; s_fire_prob = prob; }
                     field_on_wake(&s_field, audio_write_pos());
-                    s_fire_ms = now_ms;
-                    s_fire_prob = prob;
                 }
                 bool listen = assist_gate_tick(&s_gate, now_ms);
                 if (listen != s_listening) {
@@ -346,7 +358,7 @@ static void wake_task(void *)
                         recognise_listen_for(ASSIST_WINDOW_MS);
                     } else {
                         recognise_set_active(false);
-                        post_field_take();
+                        post_field_take(now_ms);
                     }
                     ESP_LOGI(TAG, "assist: recogniser %s (window %lu)", listen ? "on" : "off",
                              (unsigned long)s_gate.windows);
@@ -402,8 +414,13 @@ extern "C" void wake_set_active(bool on)
 {
     if (on) s_restart = true;
     s_active = on;
+    /* Leaving the mode closes the window too, so nothing is left waiting on a
+       gate whose task has stopped ticking (see wake_window_open()). */
+    if (!on) s_listening = false;
     if (!on && s_log) { fclose(s_log); s_log = nullptr; }
 }
+
+extern "C" bool wake_window_open(void) { return s_listening; }
 
 extern "C" void wake_inject_fire(void) { s_inject = true; }
 
