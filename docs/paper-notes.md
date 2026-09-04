@@ -2013,6 +2013,72 @@ language, an ASR forced into a language it was not given — each is individuall
 each destroys the one property the data is supposed to have. Synthetic data needs a machine
 check for exactly the property nobody will verify by ear.
 
+### E24 — deploying round 6d (2026-09-04, host-only)
+
+E22 recommended `hey_bus_r6d.tflite`: best candidate on every real-audio and German-speech
+gate at identical size and MACs, keeping round 6c's ~0.8 s latency win. This entry does the
+deploy, host-side only — no device work, no audio played to any device or speaker.
+
+| | round 5a (was deployed) | round 6d (deployed) |
+|---|---|---|
+| `KWS_WAKE_MODEL_ID` | `hey_bus.tflite@dd9db24f 2026-09-03` | `hey_bus.tflite@5fcdaf63 2026-09-04` |
+| size / MACs | 58,080 B / 24,736 | 58,080 B / 24,736 (unchanged) |
+| held-out session fires (3) | 3/3 @ 0.996 | 3/3 @ 0.996 |
+| held-out / in-training real non-wake | 0/9, 0/5 | 0/9, 0/5 |
+| TTS non-wake, seen (46) / unseen (36) | 6/46 / 2/36 | **4/46** / 2/36 |
+| fire latency, held-out (median) | 1.13 s | **0.14 s** |
+
+Full acceptance table and TTS-quality-gate method: `HEYBUS-R6D-REPORT.md` in the training
+directory (round 6d = round 6c's weights plus TTS near-miss hard negatives for the
+"hallo bus" / "der bus kommt gleich" family that regressed in 6c).
+
+Since PR #48 the firmware embeds generated esp-nn C rather than the TFLM interpreter, so
+"deploy" means regenerating `gen/wake_model_{data,config}.h` from the new `.tflite` and
+`gen/wake_infer.{c,h}` + `gen/wake_smoke_vectors.h` from that, not touching the command
+model. As E15/E18 warn, `kws-export --firmware` unconditionally rewrites the wake pair from
+the fixed `models/hey_bus.tflite` path alongside a full command re-export, so this deploy
+called `kws_de.export.write_wake_headers` directly instead — the wake-only half of that
+function — after promoting the candidate to the canonical filename (round 5's bytes kept on
+disk as `hey_bus.v5.tflite`, following the `hey_bus.v1.tflite` / `hey_bus.v4.tflite`
+precedent from earlier rounds). `test_check_is_clean_against_the_committed_headers` hardcodes
+`models/hey_bus.tflite` as the wake source of truth, which is what makes the promote step
+necessary rather than optional: pointing the generator at `hey_bus_r6d.tflite` in place
+produces byte-identical headers but fails that test.
+
+**Command model untouched.** `gen/model_data.h`, `gen/model_config.h`, `gen/command_infer.c`,
+`gen/command_infer.h` are sha256-identical before and after this deploy.
+
+**Architecture unchanged, confirmed in `gen/wake_infer.h`:**
+
+| | round 5 | round 6d |
+|---|---|---|
+| `WAKE_INFER_ARENA_BYTES` | 128 B | 128 B |
+| `WAKE_INFER_STATE_BYTES` | 4,200 B | 4,200 B |
+| `WAKE_INFER_SCRATCH_BYTES` | 15,552 B | 15,552 B |
+
+**Host checks, all clean.** `kws-fwgen --check firmware/main/gen` and both `kws-codegen
+--check` runs (wake and command) exit 0. `make -C firmware/test`: `wake smoke: 0/64 steps
+differ`, `command smoke: 0/368 bytes differ`, `host tests OK`. `pytest -q`: 308 passed, 1
+skipped, 1 xfailed — includes `test_whole_wake_model_matches_the_interpreter_on_every_step`
+(`wake parity: 0/635 steps differ (11 clips, 4200 B state)`) and the four `wake-opN` layer
+parity cases. `ruff check` / `ruff format --check`: clean, 93 files formatted.
+`markdownlint-cli@0.42.0 --config .markdownlint.json`: clean. `sphinx-build -W --keep-going`:
+clean apart from the local "doxygen XML absent" warning CI's doxygen install would clear (the
+same known-environment gap E15/E18 noted). ESP-IDF v5.5.5 Docker build (default config): OK,
+app image **1,020,048 B** (`0xf9090`, 68% of the 0x300000 partition free).
+
+**Device (2026-09-04 22:55, console only).** Flashed on the CoreS3: boot banner and
+`status` read `wake=hey_bus.tflite@5fcdaf63 2026-09-04`; `mode wake` trace
+`step 1256 +/- 111 us (invoke 1226 us)` over 68 steps per 2 s window — identical to E18's
+round-5 baseline, as the unchanged arena/state/scratch predicted; room-noise peak 0.176,
+no false fire. Left in Assistent mode with field capture armed at the production gate
+(0.85) for a soak. Still open: a real "Hey Bus" fire check spoken aloud — round 6d's own
+gate is TTS- and held-out-recording based, not a live-microphone confirmation; the first
+spoken field session on this build supplies it (`kws-qc` Field line, `wake_prob`).
+- `selftest int8 out:` line changes from round 5a's bytes (expected — different weights).
+- A few hours of field-capture soak per E22's recommendation, before treating this as more
+  than a host-side candidate swap.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
