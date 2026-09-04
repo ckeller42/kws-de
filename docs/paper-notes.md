@@ -1647,6 +1647,18 @@ close. (2) It must not lengthen an inference step, so playback is a priority-1 t
 by a task notification; both model tasks only post. The tone reuses the existing shared duplex
 codec path (`beep.c`), so nothing about the mic stream changes.
 
+Measured on the CoreS3. The speaker opens after the mic on the same codec without error
+(`beep: speaker ready (wake 1000 Hz/150 ms, confirm 2 x 1500 Hz/80 ms)`). Playing the tone in
+wake mode leaves the front-end at a full 68 steps per 2 s trace window, so the concurrent write
+costs the mic stream nothing, and the wake probability peaks at 0.242 against a 0.99 threshold —
+the device does not hear its own beep as a wake word. Same in recognise mode: the tone played
+into the live recogniser produced no fire at all, so there is no feedback loop to guard against.
+An injected wake fire on silence opens and closes the usual window (2537 ms, duty 251/1000 of
+wall, 70 ms per wall second) with no tone, confirming that a rejection stays silent. Measured
+before this branch was rebased onto E17, so with capture *disabled* — the capture-armed mute
+added in the rebase rides on the same `s_field.enabled` predicate E17 already gates the wake
+tone with, and needs no separate device evidence.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
