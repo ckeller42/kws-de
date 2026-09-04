@@ -1873,6 +1873,51 @@ peaks below the *capture* threshold is still invisible, so the near-miss count i
 bound on the misses, never the miss rate — there is no threshold at which a
 self-triggering recorder can observe what failed to trigger it.
 
+### E23 — the synthetic clips were English, and nothing checked (2026-09-04, host-only)
+
+A device test was driven by "German" clips synthesised with macOS `say` on a host without the
+German voice packs. `say` substitutes an English voice for a missing one and prints nothing, so
+the clips were English throughout; the test looked like a result and measured nothing. **A human
+ear was the only check in the pipeline**, and it caught this one by luck — the same clips could
+as easily have gone into the training set, where nobody listens at all.
+
+The substitution is not limited to a host with no German voices. On a Mac that *has* them,
+`say -v Eddy` and `say -v Flo` — bare names straight out of this repo's `ENGINE_VOICES["say"]`
+pool — produce **English** audio identical to `say -v Samantha`, because those names exist in
+both languages and the German ones are listed as "Eddy (German (Germany))". Eight of the nine
+names in the pool are ambiguous that way. Whisper transcribed all three as "Lichtkoschen" for
+"Licht Küche an", detected language `en`; only "Anna", which exists in German alone, was German.
+So every `say` clip in the v3 dataset build on this machine, except Anna's, was English.
+
+Two fixes, both cheap, and both needed. `engine_voices("say")` now asks `say -v '?'` which
+German voices are installed and uses their full names — prevention. And `kws_de.qc.tts_gate`
+judges an individual clip: duration/level without a model, then one Whisper pass whose
+**detected** language must be `de` (forcing `language="de"`, as recording QC does, answers "de"
+for an English clip — the gate must not), plus the existing content rules, the `wake` rule for
+the wake phrase and the order-tolerant `sentences` rule otherwise. `required_tokens` for
+`sentences` used to return the empty list for a prompt holding no command vocabulary, which
+accepted *any* transcript; it now falls back to the whole prompt.
+
+Detection needs a record of intent, so every synthesis writes `manifest.csv`
+(`file,text,voice,engine`) beside its clips, and `kws-tts-check <dir>` gates a whole directory
+into `tts_check.csv`, summarised per voice — a voice that is not German is 100 % failed, which
+is what makes it legible. It runs in the dataset build's TTS top-up (failures dropped and
+counted, never silently kept), in `wake-retrain.sh` before feature generation, and by hand
+before clips are played at the device.
+
+Seven-clip real sample, three `say` German voices by full name, three Piper `de_DE`, one
+deliberate `say -v Samantha`: the Samantha clip rejected `language:en`, all three `say` German
+clips and `de_DE-thorsten-medium` accepted. Two low-quality Piper voices were also rejected and
+deserved to be — `de_DE-eva_k-x_low` said "liegt an" for "Licht an", and `de_DE-kerstin-low`
+produced 0.37 s that Whisper could not transcribe even with German forced. The gate is
+conservative by design: a rejected clip is dropped, never repaired.
+
+The general lesson is the one worth writing up: **every silent fallback in a data pipeline is a
+labelling bug waiting to happen.** `say` substituting a voice, a voice name resolving to another
+language, an ASR forced into a language it was not given — each is individually reasonable and
+each destroys the one property the data is supposed to have. Synthetic data needs a machine
+check for exactly the property nobody will verify by ear.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

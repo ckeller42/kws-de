@@ -55,6 +55,7 @@ kws-codegen = "kws_de.codegen:main"
 kws-transducer = "kws_de.transducer:main"
 kws-distill = "kws_de.distill:main"
 kws-qc = "kws_de.qc:main"
+kws-tts-check = "kws_de.qc:tts_check_main"
 kws-eta = "kws_de.eta:main"
 kws-model-graph = "kws_de.model_graph:main"
 

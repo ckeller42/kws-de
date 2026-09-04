@@ -16,12 +16,28 @@ and unit-tested. Generated audio is 16 kHz mono float32, gitignored training dat
 
 from __future__ import annotations
 
+import csv
+import functools
 import itertools
 import json
+import re
+import subprocess
+import threading
 from pathlib import Path
+
+# Every synthesis appends a row here, next to the clips it wrote: what the clip was meant
+# to say, and which voice said it. Without it nothing downstream can tell whether a wav
+# holds its intended text — `kws-tts-check` reads this back and judges each clip against
+# its row (kws_de.qc.tts_check).
+MANIFEST_NAME = "manifest.csv"
+MANIFEST_FIELDS = ["file", "text", "voice", "engine"]
+_MANIFEST_LOCK = threading.Lock()  # batch generators synthesize from a thread pool
 
 # Per-engine voice pools (extend as more are installed). Kept as data so voice_combos is pure.
 ENGINE_VOICES: dict[str, list[str]] = {
+    # Backstop only. At runtime `engine_voices("say")` asks `say -v '?'` which German
+    # voices are really installed and uses their FULL names — these bare ones resolve to
+    # the English voice of the same name on a machine that has both.
     "say": ["Anna", "Eddy", "Flo", "Grandma", "Grandpa", "Reed", "Rocko", "Sandy", "Shelley"],
     # Fallback when data/piper-voices/ is empty (fresh checkout, CI). At runtime
     # `engine_voices("piper")` discovers whatever is cached there instead — see
@@ -60,13 +76,46 @@ def piper_voices(root: Path) -> list[str]:
     return sorted(out)
 
 
+def de_say_voices(listing: str) -> list[str]:
+    """German (``de_DE``) voice names out of ``say -v '?'`` output, VERBATIM — including the
+    parenthesised suffix macOS appends to a name that exists in several languages ("Eddy
+    (German (Germany))"). Pure parse.
+
+    The bare name is not enough and that is the whole point: ``say -v Eddy`` picks the
+    ENGLISH Eddy on a machine that has both, and says so nowhere — measured, it produced
+    the same audio as ``-v Samantha`` for German text. A voice that is not installed at
+    all falls back to the system default just as silently."""
+    out = []
+    for line in listing.splitlines():
+        m = re.match(r"^(.+?)\s+([a-z]{2}_[A-Z]{2})\s+#", line)
+        if m and m.group(2) == "de_DE":
+            out.append(m.group(1).strip())
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def say_voices() -> list[str]:  # pragma: no cover - shells out to macOS `say`
+    """German ``say`` voices really installed here (empty off macOS). Memoized: the voice
+    pool is asked for once per word."""
+    try:
+        r = subprocess.run(
+            ["say", "-v", "?"], capture_output=True, text=True, timeout=10, check=True
+        )
+    except Exception:
+        return []
+    return de_say_voices(r.stdout)
+
+
 def engine_voices(engine: str) -> list[str]:
-    """Voices to draw from for ``engine``. Piper: whatever is cached on disk, falling back to
-    ``ENGINE_VOICES`` when the cache is empty; other engines: the static list."""
+    """Voices to draw from for ``engine``. Piper: whatever is cached on disk; ``say``:
+    the German voices actually installed on this machine; both fall back to
+    ``ENGINE_VOICES`` when discovery comes up empty. Other engines: the static list."""
     if engine == "piper":
         from kws_de import config
 
         return piper_voices(config.DATA_DIR / "piper-voices") or ENGINE_VOICES["piper"]
+    if engine == "say":
+        return say_voices() or ENGINE_VOICES["say"]
     return ENGINE_VOICES.get(engine) or ["default"]
 
 
@@ -108,21 +157,44 @@ def voice_combos(n: int, engines: list[str]) -> list[tuple[str, str, int]]:
     return combos[:n]
 
 
+def append_manifest(out_wav: Path, text: str, voice: str, engine: str) -> None:
+    """Append one row to ``manifest.csv`` in ``out_wav``'s directory. Thread-safe (append
+    under a lock) because generators synthesize in parallel."""
+    out_wav = Path(out_wav)
+    man = out_wav.parent / MANIFEST_NAME
+    with _MANIFEST_LOCK:
+        new = not man.exists()
+        with man.open("a", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=MANIFEST_FIELDS)
+            if new:
+                w.writeheader()
+            w.writerow({"file": out_wav.name, "text": text, "voice": voice, "engine": engine})
+
+
 def synthesize(word: str, engine: str, voice: str, rate: int, out_wav):  # pragma: no cover
     """Dispatch one synthesis to the chosen engine → 16 kHz mono float32, or None on failure.
-    Integration code (shells out / loads heavy models); see each engine's backend."""
+    Integration code (shells out / loads heavy models); see each engine's backend.
+
+    The wav is LEFT at ``out_wav`` and a ``manifest.csv`` row is written beside it: a clip
+    nobody can check is a clip nobody can trust, and the check (`kws-tts-check`) needs both
+    the file and the text it was supposed to say. Callers that only want the samples own
+    the cleanup — delete the file (and the manifest) when done with it."""
     if engine == "say":
         from kws_de.data import _say_one
 
         r = _say_one(word, voice, rate, "{w}", out_wav)
-        return None if r is None else r[0]
-    if engine == "piper":
-        return _piper_say(word, voice, rate, out_wav)
-    if engine == "parler":
-        return _parler_say(word, voice, out_wav)
-    if engine == "xtts":
-        return _xtts_say(word, voice, out_wav)
-    return None
+        audio = None if r is None else r[0]
+    elif engine == "piper":
+        audio = _piper_say(word, voice, rate, out_wav)
+    elif engine == "parler":
+        audio = _parler_say(word, voice, out_wav)
+    elif engine == "xtts":
+        audio = _xtts_say(word, voice, out_wav)
+    else:
+        return None
+    if audio is not None:
+        append_manifest(Path(out_wav), word, voice, engine)
+    return audio
 
 
 def _piper_voice_path(voice: str) -> Path:
@@ -179,8 +251,7 @@ def _piper_say(word, voice, rate, out_wav):  # pragma: no cover - loads model, r
 
             audio = librosa.resample(audio, orig_sr=sr, target_sr=config.SAMPLE_RATE)
         audio = audio.astype(np.float32)
-        sf.write(str(out_wav), audio, config.SAMPLE_RATE)
-        out_wav.unlink()
+        sf.write(str(out_wav), audio, config.SAMPLE_RATE)  # left on disk for the gate
     except Exception:
         return None
     return audio

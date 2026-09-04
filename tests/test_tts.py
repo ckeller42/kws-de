@@ -1,7 +1,14 @@
 import json
 
-from kws_de import config
-from kws_de.tts import ENGINE_VOICES, _piper_voice_path, engine_voices, piper_voices, voice_combos
+from kws_de import config, tts
+from kws_de.tts import (
+    ENGINE_VOICES,
+    _piper_voice_path,
+    de_say_voices,
+    engine_voices,
+    piper_voices,
+    voice_combos,
+)
 
 
 def test_voice_combos_round_robin_spans_engines(monkeypatch, tmp_path):
@@ -58,6 +65,7 @@ def test_piper_voices_scans_cache_and_expands_multi_speaker(tmp_path):
 
 def test_engine_voices_uses_cache_then_falls_back(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(tts, "say_voices", lambda: [])  # no macOS voices discovered
     assert engine_voices("piper") == ENGINE_VOICES["piper"]  # empty cache -> static list
     _fake_voice(tmp_path / "piper-voices", "kerstin", "low")
     assert engine_voices("piper") == ["de_DE-kerstin-low"]
@@ -69,7 +77,29 @@ def test_piper_voice_path_strips_speaker_suffix():
     assert p.name == "de_DE-mls-medium.onnx" and p.parent.name == "medium"
 
 
-def test_voice_combos_spread_over_voices_before_rates():
+def test_voice_combos_spread_over_voices_before_rates(monkeypatch):
+    monkeypatch.setattr(tts, "say_voices", lambda: [])
     combos = voice_combos(len(ENGINE_VOICES["say"]), ["say"])
     assert len({v for _, v, _ in combos}) == len(ENGINE_VOICES["say"])  # every voice once
     assert len({r for _, _, r in combos}) == 1  # ...at a single rate
+
+
+# `say -v '?'` as macOS 15 prints it: a name that exists in several languages carries a
+# parenthesised suffix, and only ONE space separates it from the locale.
+SAY_LISTING = """Alice               it_IT    # Ciao! Mi chiamo Alice.
+Anna                de_DE    # Hallo! Ich heiße Anna.
+Eddy (German (Germany)) de_DE    # Hallo! Ich heiße Eddy.
+Eddy (English (US)) en_US    # Hello! My name is Eddy.
+Samantha            en_US    # Hello! My name is Samantha.
+"""
+
+
+def test_de_say_voices_keeps_the_full_name_of_a_multilingual_voice():
+    # The bug this exists for: `say -v Eddy` picks the English Eddy, silently.
+    assert de_say_voices(SAY_LISTING) == ["Anna", "Eddy (German (Germany))"]
+    assert de_say_voices("") == []
+
+
+def test_engine_voices_say_prefers_the_installed_german_voices(monkeypatch):
+    monkeypatch.setattr(tts, "say_voices", lambda: ["Anna", "Eddy (German (Germany))"])
+    assert engine_voices("say") == ["Anna", "Eddy (German (Germany))"]
