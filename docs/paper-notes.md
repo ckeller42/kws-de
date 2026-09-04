@@ -1357,26 +1357,40 @@ agreement is counted over the takes the device actually answered, not over every
 that parsed, so a ring-truncated take with no device answer cannot depress a number it
 never had a chance to earn.
 
-**First-session figures: pending the first pull.** The takes now on the device are
-console-injected (`wakefire`) windows with nothing spoken into them, so they carry no
-speech to transcribe and no device intent to compare; and the pull itself is blocked by
-a host-side fault, not a firmware one — a locked screen on the workstation makes macOS
-eject the `KWSREC` volume ~250 ms after it attaches, so `ingest.sh` times out (it now
-names that cause and the recovery in its error message). Once a real session is
-captured with the screen unlocked, these numbers come from:
+**First real sessions (2026-09-04, one speaker, two sessions).** The first pull was
+blocked by a host-side fault, not a firmware one — a locked screen on the workstation
+makes macOS eject the `KWSREC` volume ~250 ms after it attaches (`ingest.sh` now names
+that cause and the recovery). The first spoken session then failed QC outright: every
+take was "clipped", and the reason was the device's own wake-fire beep (1 kHz, 150 ms,
+`beep.c`), recorded through the mic at full scale 14–64 ms after the fire. The fix mutes
+that beep while capture is armed; the QC clip gate was also changed from "peak above
+−0.5 dBFS" to "0.05 % of samples at the rail", so a one-sample click cannot discard a
+take. The same session showed the 1.0 s pre-roll cutting the wake phrase: only 3 of 11
+transcripts contained "Hey Bus" (the model fires ~0.2–0.3 s after a ~0.7 s phrase), so
+the pre-roll is 1.5 s from here on, with `qc.WAKE_MAX_S` moved with it and the
+session's real pre-roll inferred from `ms − window_ms` so older sessions are not
+flagged truncated.
 
-```bash
-scripts/ingest.sh -H <device-host>          # pulls field/ into incoming/<stamp>/
-kws-qc data/recordings/incoming/<stamp>     # -> qc/<stamp>/report.md, "## Field" line
-kws-eval --recordings data/recordings/approved --prefix features_v3 --qat
-```
+Figures from `kws-qc` + `kws-eval --recordings` over the two spoken sessions (the
+1.0 s-pre-roll session and the 1.5 s one; 11 + 9 takes, all approved by the audio and
+content gates):
 
-The QC report's Field line gives takes, parsable, wake clips, unfiled and the agreement
-over compared takes; `kws-eval --recordings` renders the same figures per speaker in
-its own **Field** section. Until then the row stays empty rather than guessed — the
-rule for this file is real numbers only, and a pipeline that has so far seen only
-synthetic fixtures and one hand-assembled real-audio smoke has not yet measured
-anything.
+| | 1.0 s pre-roll (11) | 1.5 s pre-roll (9) | both (20) |
+|---|---|---|---|
+| parsable intent (Whisper + grammar) | 8 | 5 | 13 (0.65) |
+| wake clips ("Hey Bus" in the take) | 3 | 8 | 11 |
+| unparsed, vocabulary present | 2 | 2 | 4 |
+| device gave any command word | 8 | 4 | 12 |
+| device–Whisper agreement over compared | 2/8 | 0/2 | 2/10 (0.20) |
+
+The pre-roll change did what it was meant to: 3 of 11 → 8 of 9 takes carry the wake
+phrase. The agreement figure is the headline: the deployed w32 command model, measured
+on real Assistent-mode usage by its main user, agreed with Whisper on 2 of 10 answered
+takes and answered nothing at all on 5 of the 9 takes of the second session ("Hey Bus,
+Licht an" → no word fired). This is the number E16's width sweep should be read
+against. The 20 takes yielded 11 wake clips, 13 phrases, 26 word clips and 3 negatives
+into `approved/` (speaker spk18, held out: 0.269 word accuracy, 0 of 13 phrase intents,
+0 of 3 false accepts under the same model).
 
 Two honest caveats already visible. The agreement figure will belong to whichever model
 was flashed at capture time, not to the model a later report evaluates —
