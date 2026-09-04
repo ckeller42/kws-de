@@ -53,6 +53,26 @@ one of exactly two labels, never mixed — ``held-out`` or
      - **0.615** (n=13), *user-customised*
      - **0.737** (n=38), *user-customised*
      - 0/10, *user-customised*
+   * - v3 QAT, session-2 rebuild (3 speakers; **deployed**, 2026-09-04)
+     - 90.7 %
+     - 17,912 B
+     - 0.538 (n=13), *user-customised*
+     - 0.605 (n=38), *user-customised*
+     - 0/10, *user-customised*
+
+The last row is the model on the device — ``KWS_MODEL_ID
+"command_v3_qat.tflite@f985f282 2026-09-04"``, 17,912 B. It is the only
+row that goes *down* on both of this table's real-voice columns, and it
+was still the one deployed, because those two columns are the narrowest
+view of the change: the rebuild folded a third speaker's session into
+train, and this table has no column for that speaker. Measured over the
+whole approved set instead — 197 word clips, 101 phrases, 29 negatives,
+all three speakers, both models on the same clips — word accuracy goes
+0.538 → **0.655**, phrase intent 6/101 → **8/101**, and the false-accept
+rate 3/29 → **1/29**; ``spk10`` alone moves 0.479 → 0.678 on 146 clips.
+A fixed-capacity model split across three voices instead of two is the
+plain reading of why the first two speakers gave ground. Full
+side-by-side table: ``docs/paper-notes.md`` §3, E15.
 
 The v2 row is what the recorder pipeline exists to fix: a model reporting
 ~0.9 on its own synthetic/MSWC split recognised roughly a quarter of what

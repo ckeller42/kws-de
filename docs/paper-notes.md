@@ -1047,6 +1047,114 @@ Every arena figure in E12 and E13 predates E14: the esp-nn scratch was inside th
 and is now a separate shared region. The step and evaluation timings in E12/E13 stand as
 measured; E14's table gives the current ones.
 
+### E15 — deploying the session-2 command export (2026-09-04, measured on the CoreS3)
+
+E13 closed on a trap rather than a fix: `models/command_v3_qat.tflite` was a newer export than
+the model the firmware embedded, so the device had been running the *previous* training loop's
+command model since the session-2 rebuild. This entry closes it. The deploy is three
+regenerations and a flash — `kws-export --firmware --qat --prefix features_v3 --model
+command_v3.keras` rewrites `gen/model_data.h` + `gen/model_config.h` and the `KWS_MODEL_ID`
+stamp, then `kws-codegen firmware/main/gen/model_data.h --name command` regenerates
+`gen/command_infer.{c,h}` + `gen/command_smoke_vectors.h` **from the newly embedded bytes**,
+which is what makes the generated path and the stamp the same object by construction (E13).
+
+| | old (was on the device) | new (deployed) |
+|---|---|---|
+| `KWS_MODEL_ID` | `command_v3_qat.tflite@fc36da9f 2026-09-03` | `command_v3_qat.tflite@f985f282 2026-09-04` |
+| size | 17,880 B | 17,912 B |
+| INT8 held-out test accuracy | 91.2 % | **90.7 %** |
+| training speakers | spk01, spk02 | spk01, spk02, spk10 |
+| input scale / zero point | 3.17866826 / 71 | 3.18189716 / 71 |
+| generated ops / arena / scratch | 10 / 31,360 B / 19,888 B | unchanged |
+
+**One incidental confirmation worth keeping.** Re-running the export reproduced
+`f985f282` byte for byte from the QAT SavedModel — the TFLite conversion is deterministic
+across runs on this host, so the bytes flashed are exactly the bytes evaluated below, not a
+re-conversion that happens to be close.
+
+**The real-voice comparison, both models on the same clips.** The deciding measurement is not
+the held-out test accuracy in the table above — that went *down* — but `kws_de.eval`'s
+`eval_recordings` over the full QC-approved set (197 word clips, 101 phrases, 29 negatives,
+three speakers), run twice: once on the bytes parsed straight out of the old
+`gen/model_data.h`, once on the new export. Same clips, same feature front-end, same
+`manifest_v3_qat.json` for the in-training/held-out labelling, so only the weights differ:
+
+| speaker | words n | old acc | new acc | phrases n | old intent | new intent | neg n | old FA | new FA |
+|---|---|---|---|---|---|---|---|---|---|
+| spk01 | 13 | **0.615** | 0.538 | 0 | — | — | 0 | — | — |
+| spk02 | 38 | **0.737** | 0.605 | 4 | 0.000 | 0.000 | 10 | 0.000 | 0.000 |
+| spk10 | 146 | 0.479 | **0.678** | 97 | 0.062 | **0.082** | 19 | 0.158 | **0.053** |
+| **all** | **197** | 0.538 | **0.655** | **101** | 6/101 | **8/101** | **29** | 3/29 | **1/29** |
+
+Deployed on that table, and the argument is worth stating precisely because the first two rows
+argue against it. `spk01` and `spk02` were in training for *both* models and both lose ground —
+8 and 13 points. `spk10` was an unseen voice for the old model and is in training for the new
+one, so its 20-point gain is partly a training-set score and must not be quoted as
+generalisation. What is *not* discountable is the aggregate over every clip either model has
+ever been asked about (0.538 → 0.655) and the false-accept rate on negatives (3/29 → 1/29),
+which is the safety-side metric and improves by two-thirds. Phrase intent is 6/101 → 8/101:
+better, and still the open problem it has been since v3.
+
+**Two lessons for the paper, both about which number you look at.** The synthetic held-out
+split and the real-voice set moved in *opposite* directions here — 91.2 → 90.7 % against
+0.538 → 0.655 — which is the strongest instance yet of E2/E3's theme that a TTS-dominated test
+split is not a proxy for a microphone. And the per-speaker regressions are the honest cost of
+personalisation at fixed capacity: 5,879 parameters split three ways instead of two. The
+session-2 note above records this change as "spk02 0.553 → 0.605", which compares the new model
+against the *PTQ* baseline rather than against the QAT model actually deployed; against the
+deployed one it is 0.737 → 0.605, a regression. Comparing a new model against whichever
+previous number flatters it is an easy mistake to make twice, and the fix is mechanical —
+evaluate the bytes in `gen/model_data.h`, because that is the only artefact that is definitely
+what the device was running.
+
+**Everything downstream regenerated and checked.** `kws-fwgen --check firmware/main/gen` and
+`kws-codegen … --name command --check firmware/main/gen` are both clean, and E13's drift
+warning ("`command_v3_qat.tflite` has been re-exported since the firmware headers were
+written") is gone — the stamp, the embedded array and the `.tflite` are one model again. The
+wake pair was deliberately not touched and is byte-identical. Host smoke parity on the
+regenerated vectors: `command smoke: 0/368 bytes differ` — same 368 bytes (16 synthetic
+windows x 23 classes, a shape not a weight count), different expected values, zero differing.
+`wake smoke: 0/64` unchanged.
+
+Regenerating `docs/sphinx/_generated/command.dot` turned up a third stale artefact nobody was
+watching: its caption read "11 ops … 17,880 B" while the graph it captions draws ten nodes and
+`kws-codegen` has reported ten ops for both models. The node structure was already right, so
+only the summary line was wrong — a caption that had not been regenerated since a model two
+retrains back. Same class of bug as the model drift itself, and it survived because a caption
+is not checked by anything. `kws-fwgen --check` and `kws-codegen --check` cover the headers;
+the diagram caption has no equivalent, which is worth either a check or a note in the docs.
+
+**On the device, same rig and method as E12–E14.** Flashed, and the boot banner now names the
+new model: `models: command command_v3_qat.tflite@f985f282 2026-09-04, wake
+hey_bus.tflite@dd9db24f 2026-09-03`, with `status` agreeing. The placement figures are
+untouched, as expected from a same-architecture retrain — `31360 B arena (static, PSRAM) +
+0 B state + 19888 B shared scratch, esp-nn scratch 19888 B queried / 19888 B reserved`,
+15,552 B queried and reserved on the wake side, 55,103 B free internal at recogniser start:
+
+| | E14 (old model) | E15 (new model) |
+|---|---|---|
+| recognise step, arena in PSRAM | 31 ms | **31 ms** (31/31/31/31 over four traces) |
+| command evaluation | 27,283 µs | **27,108–27,451 µs** |
+| wake step | 1,250 µs | 1,245–1,287 µs |
+| command arena / shared scratch | 31,360 B PSRAM / 19,888 B | unchanged |
+| free internal, recogniser start | 55,239 B | 55,103 B |
+| app image | 1,002,560 B | 1,002,560 B |
+| `selftest int8 out:` | `-128,…,-36,…,0,-94,…,-127,…` | `-124,-128,-112,…,-37,-107,…,-90,-125` |
+
+The step time stays in the 31–33 ms band on 32 more bytes of weights, which is the expected
+answer and worth having measured rather than assumed: the generated C's cost is set by the op
+shapes, and the retrain changed only the values in them. The `selftest int8 out:` line is the
+one row that *must* change — it is the golden MFCC vector through the deployed weights, so a
+byte-identical line here would have meant the flash had not taken. In assist mode a wake fire
+opens the usual one-second recogniser window (`recogniser active 250/1000 of wall, inference
+70 ms per wall second`); continuous `mode recognise` reaches 1000/1000 and 239 ms per wall
+second. Left in the menu on this build.
+
+One rig note, not a firmware finding: the microSD failed its mount probe again this boot
+(`failed to mount card (13)`, ~26 s of reformat attempt before the fallback), so recordings
+went to the flash partition. Same defective card as E12's; it costs the boot latency the
+console tooling already waits out.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
