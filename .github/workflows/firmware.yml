@@ -28,6 +28,21 @@ jobs:
           name: kws-de-fw-${{ github.sha }}
           path: firmware/build/kws-de-fw-*.bin
           retention-days: 30
+      # The TFLM fallback (REQ_FW_INFER_FALLBACK) is a documented, supported
+      # configuration, and the #if structure in wake.cc/recognise.cc is
+      # three-way — an edit that only compiles under the default is easy to
+      # write and invisible. Last in the job, into its own build directory, so
+      # it cannot disturb the image uploaded above; sdkconfig is removed first
+      # because sdkconfig.defaults only seeds a config that does not exist yet.
+      - name: idf.py build with the generated inference off
+        uses: espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d # v1
+        with:
+          esp_idf_version: v5.5.5
+          target: esp32s3
+          path: firmware
+          command: >-
+            echo CONFIG_KWS_INFER_GENERATED=n >> sdkconfig.defaults &&
+            rm -f sdkconfig && idf.py -B build-tflm build
   gen-fresh:
     runs-on: ubuntu-latest
     steps:
