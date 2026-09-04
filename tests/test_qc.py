@@ -118,6 +118,16 @@ def test_audio_gate_ok_clipped_quiet_short(tmp_path):
     assert qc.audio_gate(_wav(tmp_path / "long6.wav", _tone(ms=4500)), "sentences")[1] is None
 
 
+def test_audio_gate_click_is_not_clipping(tmp_path):
+    # A 2-sample full-scale click (a seam glitch, a pop) must not throw away a
+    # 3.5 s take; real clipping parks hundreds of samples at the rail.
+    sig = _tone(ms=3500)
+    sig[16489:16491] = 1.0
+    assert qc.audio_gate(_wav(tmp_path / "click.wav", sig), "field")[1] is None
+    sig[16000:16400] = 1.0  # 400 rail samples = 1.1 % -> clipped
+    assert qc.audio_gate(_wav(tmp_path / "rail.wav", sig), "field")[1] == "clipped"
+
+
 def test_audio_gate_unreadable_file_is_rejection_not_crash(tmp_path):
     bad = tmp_path / "bad.wav"
     bad.write_bytes(b"not a wav\x00")  # 10 bytes garbage, not a real RIFF/WAV

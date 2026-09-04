@@ -38,6 +38,7 @@ CAP_MS = {
 MIN_MS = 300
 MIN_RMS_DBFS = -45.0
 CLIP_DBFS = -0.5
+CLIP_FRACTION = 0.0005  # share of samples at/above CLIP_DBFS that counts as clipping (8 of 16,000)
 FILLER = {"prozent"}
 
 # Whisper large-v3 writes the light-level number words as numerals ("50" not "fünfzig") -
@@ -291,7 +292,10 @@ def audio_gate(path: Path, set_name: str) -> tuple[dict, str | None]:
         return m, "too_short"
     if dur_ms > CAP_MS.get(set_name, 6000):
         return m, "too_long"
-    if m["peak_dbfs"] >= CLIP_DBFS:
+    # Clipping parks many samples at the rail; a 1-2 sample click (pop, seam
+    # glitch) is not a reason to throw away a whole take.
+    rail = 10 ** (CLIP_DBFS / 20)
+    if len(mono) and float(np.mean(np.abs(mono) >= rail)) >= CLIP_FRACTION:
         return m, "clipped"
     if m["rms_dbfs"] < MIN_RMS_DBFS:
         return m, "too_quiet"

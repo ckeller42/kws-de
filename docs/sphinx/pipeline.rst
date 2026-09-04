@@ -100,7 +100,9 @@ text; the numbers:
 - Format: 16000 Hz, mono, 16-bit PCM.
 - Duration: at least 300 ms; at most 4000 ms for a word or wake take,
   6000 ms for a sentence or negative take.
-- Level: peak below -0.5 dBFS (not clipped); RMS at or above -45 dBFS.
+- Level: fewer than 0.05 % of samples at or above -0.5 dBFS (clipping parks
+  many samples at the rail; a one-sample click does not); RMS at or above
+  -45 dBFS.
 - Transcript normalisation: NFC, lower-cased, ``ß`` -> ``ss``, punctuation
   stripped, the filler word "prozent" dropped, and the numerals Whisper
   writes for the light levels (``25``/``50``/``75``/``100``, an optional
