@@ -1397,7 +1397,7 @@ was flashed at capture time, not to the model a later report evaluates —
 `kws-eval --recordings` prints it in its own **Field** section for that reason. And a
 field take is self-selected: it exists only because the wake word fired, so it measures
 command accuracy *given* a successful wake, and says nothing about missed wakes, for
-which no trigger exists.
+which no trigger exists. E21 is what answers that second caveat.
 
 **The pre-roll was still too short, and what was wrong was a number, not a formula
 (fix/field-take-offset).** At 1.5 s the wake phrase came back *clipped at the take's
@@ -1839,6 +1839,39 @@ fallback ledger instead of the shared one — three runs had accumulated there u
 
 **Nothing was promoted.** The installed `hey_bus.tflite` is unchanged, `firmware/main/gen/` was
 not touched, and no device work was done (the CoreS3 was in use).
+
+### E21 — the loose capture gate (2026-09-04, feat/field-loose-gate)
+
+E17 closed on a caveat it could not fix: a field take is self-selected, because it exists
+only where the wake word fired. Every clip the feature has produced so far is therefore a
+*successful* wake, and the set is structurally incapable of containing the two cases the
+wake model most needs — the phrase it should have woken on and did not, and the speech it
+woke on and should not have. No amount of capturing at 0.85 changes that; the gate is the
+sampling bias.
+
+So while capture is armed in Assistent mode the wake gate compares against **0.60**
+instead of the shipped 0.85 (`field thresh`, persisted per device). It is the same gate,
+not a second detector: `WAKE_MIN_CONSECUTIVE` and the refractory period are untouched, and
+`field_gate_thresh()` returns the production value everywhere else — wake mode, Assistent
+mode with capture off, every other mode — and can only ever lower the bar, never raise it.
+At 0.60 the set also holds the phrase that peaked at 0.7, which is the first real training
+example of the failure the user actually experiences, and the non-wake speech that got
+near the bar, which is real-environment negative data no synthetic corpus provides.
+
+Nothing is lost by loosening it, because the shipped gate is reconstructed on the
+workstation rather than assumed. Each take's `wake_prob` is the peak of the run that fired
+(not its last step, which is a different and less informative number), and `kws-qc` re-reads
+it against 0.85 into `qc.csv`'s `would_fire`. Crossed with `wake_clip` — did Whisper, never
+the device, find the phrase at the head of the take — that gives the two figures directly:
+a wake clip with `would_fire=0` is a **near-miss**, a take with no wake clip and
+`would_fire=1` is a **false alarm**, and both are reported again against the capture
+threshold itself. The trigger for missed wakes now exists; it is just deliberately
+over-eager, and the report separates the two gates rather than blurring them.
+
+The honest limit is that this widens the window rather than closing it. A phrase that
+peaks below the *capture* threshold is still invisible, so the near-miss count is a lower
+bound on the misses, never the miss rate — there is no threshold at which a
+self-triggering recorder can observe what failed to trigger it.
 
 ## Open questions
 

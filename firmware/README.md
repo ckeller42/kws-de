@@ -335,14 +335,14 @@ tap **Menu** → `wake.log` on the recording volume has one
 
 Field capture (Assistent mode): after a fresh flash, tap **Assistent** → the
 "Aufnahme" switch is off and no "REC" badge is shown; `status` over the console
-answers `field off takes 0 dropped 0`. Turn the switch on → the badge appears;
+answers `field off thresh 0.60 takes 0 dropped 0`. Turn the switch on → the badge appears;
 reset the device and re-open Assistent → the switch is still on (the toggle is
 in NVS; `takes` re-zeroes, it counts since boot). Send `field off` / `field on`
 over the console instead → the badge follows that too, so the screen can never
 disagree with what is actually being recorded. Say "Hey Bus" and then a command:
 the screen behaves exactly as before (green flash, recognised word) — but
 silently, since capture is armed and both tones are muted.
-`status` now reports `field on takes 1 dropped 0`, and in USB-drive mode the
+`status` now reports `field on thresh 0.60 takes 1 dropped 0`, and in USB-drive mode the
 drive holds `field/<spkNN>/<boot>-<ms>.wav` plus a `field.csv` row for it. Say
 "Hey Bus" a **second** time while the window is still open → still exactly one
 take, named after the *first* fire, with a larger `window_ms` and a longer WAV
@@ -352,7 +352,14 @@ inside the window stay in their usual range — a 100–300 ms outlier would mea
 file was written while the recogniser ran. Toggling `field off` then `field on`
 over the console *while a window is open* must not produce an outlier either:
 the toggle takes effect at once, but the NVS write behind it is deferred to the
-window's closing edge.
+window's closing edge. Capture threshold: `field thresh 0.6` answers `ok`,
+`status` echoes `thresh 0.60` and the badge reads `REC 0.60` (plain `REC` again
+at `field thresh 0.85`, which is the production gate); `field thresh 0.2` and
+`field thresh abc` answer `err thresh must be 0.30..0.85` and change nothing;
+the value survives a reset. With it set, a "Hey Bus" said quietly enough to peak
+below 0.85 must still fire and still produce a take — the near-miss the shipped
+gate would have dropped — while the same phrase in Assistent mode with capture
+**off** must not fire at all.
 
 Serial commands: with the device connected over USB serial,
 `echo 'mode wake' > /dev/cu.usbmodemNNN` switches the screen to wake mode

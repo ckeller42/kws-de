@@ -209,6 +209,22 @@ never had a chance to earn. Truncation itself is readable on the host —
 approved reported beside it; both ``report.md`` and the eval Field section
 count it that way.
 
+Takes are captured at a **looser wake gate** than the shipped detector uses
+(:need:`REQ_FW_FIELD_CAPTURE_GATE`), because a take exists only where
+something fired: at 0.85 the set could contain neither a missed wake nor a
+false trigger. QC's job is to put the production gate back on paper. Every
+field row carries ``wake_prob`` (the device's peak at the fire),
+``would_fire`` (that peak against ``qc.PROD_WAKE_THRESHOLD`` = 0.85, the one
+place the shipped threshold lives on the host side) and ``wake_clip`` (did
+Whisper find the phrase at the head of the take). Cross those two booleans and
+the two interesting cases fall out: a **near-miss** is a wake clip with
+``would_fire=0`` — a real "Hey Bus" the deployed detector would have ignored —
+and a **false alarm** is a take with no wake clip and ``would_fire=1``, i.e.
+something production would have woken on. Both are counted again against the
+capture threshold itself, so the report says what each gate would have done
+rather than only what happened. Whisper, never the device, decides whether the
+phrase is there — the same rule as for the label.
+
 The two evaluation figures
 ---------------------------
 

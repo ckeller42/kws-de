@@ -801,6 +801,42 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    present on both sides of the measurements above; it is named here so the
    guarantee reads as what the firmware actually honours.
 
+.. req:: Field capture records at a looser wake gate than production
+   :id: REQ_FW_FIELD_CAPTURE_GATE
+   :status: implemented
+
+   A field take exists only because the wake word fired, so a set captured at
+   the shipped ``WAKE_THRESHOLD`` (0.85) can contain neither near-misses nor
+   false alarms — the two kinds of clip the wake model is most short of. While
+   capture is on **and** the mode is ``UI_MODE_ASSIST``, the wake gate
+   therefore compares against a lower *capture threshold*:
+   ``FIELD_THRESH_DEFAULT`` 0.60, settable over the serial console
+   (``field thresh <0.30..0.85>``, ``FIELD_THRESH_MIN``/``MAX``) and persisted
+   in NVS beside the toggle (``kws``/``fieldth``, hundredths) by the same owed
+   write. The value is validated at ``field_set_thresh()``, so neither the
+   command nor a stale NVS byte can install a gate that fires on room noise;
+   an out-of-range value leaves the previous one standing.
+
+   **It is the same gate, not a second detector.** ``field_gate_thresh()``
+   (pure C in ``field.c``, host-tested) returns the threshold the one existing
+   gate compares against; ``WAKE_MIN_CONSECUTIVE`` and ``WAKE_REFRACTORY_MS``
+   are untouched, and the function returns the production value everywhere
+   except the capture case — wake mode, Assistent mode with capture off and
+   every other mode are bit-identical to before. It can only ever *lower* the
+   bar: a threshold above the production one is ignored, and a
+   ``static_assert`` in ``wake.cc`` pins ``FIELD_THRESH_MAX`` to
+   ``WAKE_THRESHOLD`` so the range cannot drift.
+
+   The take's ``wake_prob`` is the **peak of the qualifying run that fired**,
+   not the probability of its last step, because it is the number the host side
+   re-reads against 0.85 to decide what production would have done
+   (:need:`REQ_PIPE_FIELD_LABELS`). Both surfaces say which gate is live:
+   ``status`` prints ``field <on|off> thresh <t> takes <N> dropped <N>`` (the
+   threshold whether capture is on or not — it is the setting the next session
+   will run at), and the Assistent screen's badge reads ``REC <t>`` whenever
+   the capture threshold differs from production, plain ``REC`` when it does
+   not.
+
 .. req:: Field takes are labelled by Whisper and the grammar, never by the device
    :id: REQ_PIPE_FIELD_LABELS
    :status: implemented
@@ -849,6 +885,24 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    take short (``ms < FIELD_PREROLL_MS + window_ms``,
    :need:`REQ_FW_FIELD_CAPTURE`), which is the usual reason a take carries no
    device answer at all.
+
+   **What the production gate would have done is reported, never assumed.**
+   Takes are captured at a looser threshold than the shipped detector uses
+   (:need:`REQ_FW_FIELD_CAPTURE_GATE`), so ``qc.csv`` carries three more
+   columns for field rows: ``wake_prob`` (the device's peak at the fire,
+   verbatim), ``would_fire`` (``1``/``0``, that peak against
+   ``qc.PROD_WAKE_THRESHOLD`` — 0.85, which lives in exactly one place on the
+   host side and names ``wake.h`` in its comment) and ``wake_clip``
+   (``1``/``0``, did Whisper find the wake phrase at the head of the take;
+   empty where nothing looked). From those two booleans come the figures the
+   loose gate exists to produce: a **near-miss** is ``wake_clip=1`` with
+   ``would_fire=0`` — a real wake the production gate would have missed — and a
+   **false alarm** is ``wake_clip=0`` with ``would_fire=1`` — production would
+   have fired on something that is not the wake word. Both are also reported
+   against the capture threshold itself (``qc.CAPTURE_WAKE_THRESHOLD``). The
+   ``report.md`` Field line and ``kws-eval --recordings``'s Field section print
+   the same four numbers, the latter recomputed from the columns rather than
+   parsed, so the two reports cannot disagree.
 
    **"Field takes" means one thing:** every ``set=field`` row in the session,
    approved or not. Approved is reported *beside* it, never instead of it, and
