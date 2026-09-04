@@ -84,7 +84,7 @@ sort -u -o "$held" "$held"
 field=$work/field.txt
 : > "$field"
 for stamp in "$rec"/qc/*/; do
-  [ -f "$stamp/qc.csv" ] && [ -f "$stamp/written.txt" ] || continue
+  if ! [ -f "$stamp/qc.csv" ] || ! [ -f "$stamp/written.txt" ]; then continue; fi
   if awk -F, 'NR > 1 && $2 == "field" { found = 1 } END { exit !found }' "$stamp/qc.csv"; then
     grep -E '^(phrases|negatives)/' "$stamp/written.txt" >> "$field" || true
   fi
