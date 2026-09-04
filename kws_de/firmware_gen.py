@@ -292,16 +292,26 @@ def check(committed_dir) -> list[str]:
         return bad + _model_stamp_drift(committed_dir)
 
 
-def _model_stamp_drift(committed_dir) -> list[str]:
-    """Does the embedded model still match the id stamped beside it?
+# (config header, model header, stamp macro) for every model the firmware
+# embeds. The wake pair is checked exactly like the command pair -- and matters
+# more, because CI never sees models/hey_bus.tflite, so this stamp is the only
+# thing tying the committed wake bytes to the model they claim to be.
+_MODEL_STAMPS = (
+    ("model_config.h", "model_data.h", "KWS_MODEL_ID"),
+    ("wake_model_config.h", "wake_model_data.h", "KWS_WAKE_MODEL_ID"),
+)
 
-    model_data.h (the bytes the device runs) and model_config.h (the
-    quantisation constants, plus KWS_MODEL_ID whose sha8 is over exactly those
+
+def _model_stamp_drift(committed_dir) -> list[str]:
+    """Does each embedded model still match the id stamped beside it?
+
+    <m>model_data.h (the bytes the device runs) and <m>model_config.h (the
+    quantisation constants, plus the stamp whose sha8 is over exactly those
     bytes) come out of one `kws-export --firmware` run but are two files. A
     hand-edit or a half-finished regeneration desynchronises them silently, and
     everything downstream -- including the generated inference, which is built
-    from model_data.h -- would then be self-consistently wrong. Needs no data
-    root, so it runs in CI.
+    from the model header -- would then be self-consistently wrong. Needs no
+    data root, so it runs in CI.
 
     The second half only warns: when the .tflite the stamp names is present and
     no longer hashes to the stamp, a retrain has rewritten models/<name>.tflite
@@ -312,26 +322,30 @@ def _model_stamp_drift(committed_dir) -> list[str]:
     from kws_de import codegen
 
     committed_dir = pathlib.Path(committed_dir)
-    # Both files are kws-export --firmware's output, not this module's, so a
-    # directory this module just generated into legitimately has neither.
-    if not all((committed_dir / f).exists() for f in ("model_config.h", "model_data.h")):
-        return []
-    config_h = (committed_dir / "model_config.h").read_text()
-    stamp = re.search(r'KWS_MODEL_ID\s+"([^@"]+)@([0-9a-f]+)', config_h)
-    if not stamp:
-        return ["model_config.h (no KWS_MODEL_ID stamp to check model_data.h against)"]
-    name, sha8 = stamp.group(1), stamp.group(2)
-    embedded = hashlib.sha256(codegen.model_bytes(committed_dir / "model_data.h")).hexdigest()[:8]
-    if embedded != sha8:
-        return [f"model_data.h (embedded model is {embedded}, KWS_MODEL_ID says {sha8})"]
-    source = config.MODELS_DIR / name
-    if source.exists() and hashlib.sha256(source.read_bytes()).hexdigest()[:8] != sha8:
-        print(
-            f"WARNING: {name} has been re-exported since the firmware headers were written "
-            f"(the device still runs {sha8}) -- run kws-export --firmware, then regenerate "
-            "the inference with kws-codegen"
-        )
-    return []
+    bad: list[str] = []
+    for config_name, data_name, macro in _MODEL_STAMPS:
+        # Both files are kws-export --firmware's output, not this module's, so a
+        # directory this module just generated into legitimately has neither.
+        if not all((committed_dir / f).exists() for f in (config_name, data_name)):
+            continue
+        config_h = (committed_dir / config_name).read_text()
+        stamp = re.search(macro + r'\s+"([^@"]+)@([0-9a-f]+)', config_h)
+        if not stamp:
+            bad.append(f"{config_name} (no {macro} stamp to check {data_name} against)")
+            continue
+        name, sha8 = stamp.group(1), stamp.group(2)
+        embedded = hashlib.sha256(codegen.model_bytes(committed_dir / data_name)).hexdigest()[:8]
+        if embedded != sha8:
+            bad.append(f"{data_name} (embedded model is {embedded}, {macro} says {sha8})")
+            continue
+        source = config.MODELS_DIR / name
+        if source.exists() and hashlib.sha256(source.read_bytes()).hexdigest()[:8] != sha8:
+            print(
+                f"WARNING: {name} has been re-exported since the firmware headers were written "
+                f"(the device still runs {sha8}) -- run kws-export --firmware, then regenerate "
+                "the inference with kws-codegen"
+            )
+    return bad
 
 
 def main() -> None:  # pragma: no cover - I/O wrapper

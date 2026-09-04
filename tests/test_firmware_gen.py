@@ -138,3 +138,20 @@ def test_check_catches_an_embedded_model_that_does_not_match_its_stamp(tmp_path)
     first, comma, tail = rest.partition(",")
     (tmp_path / "model_data.h").write_text(f"{head}{sep}{int(first) ^ 1}{comma}{tail}")
     assert any("model_data.h" in name for name in firmware_gen.check(tmp_path))
+
+
+def test_check_catches_a_wake_model_that_does_not_match_its_stamp(tmp_path):
+    """The same guard over the wake pair (final-review S-2), which had none.
+    It matters more here than for the command model: CI has no
+    models/hey_bus.tflite to compare against, so KWS_WAKE_MODEL_ID is the only
+    thing tying the committed wake bytes to the model they claim to be."""
+    gen = pathlib.Path(__file__).resolve().parents[1] / "firmware" / "main" / "gen"
+    firmware_gen.generate(tmp_path)
+    for f in ("wake_model_config.h", "wake_model_data.h"):
+        (tmp_path / f).write_text((gen / f).read_text())
+    assert firmware_gen.check(tmp_path) == []
+    data = (tmp_path / "wake_model_data.h").read_text()
+    head, sep, rest = data.partition("{")
+    first, comma, tail = rest.partition(",")
+    (tmp_path / "wake_model_data.h").write_text(f"{head}{sep}{int(first) ^ 1}{comma}{tail}")
+    assert any("wake_model_data.h" in name for name in firmware_gen.check(tmp_path))
