@@ -44,11 +44,16 @@ test_assist_gate: test_assist_gate.c ../main/assist_gate.c
 test_wakefront: test_wakefront.c ../main/wakefront.c $(MF_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ -x c++ $^ -lm
 
-# esp-nn, pinned. The device gets it through the esp-tflite-micro managed
-# component (esp-tflite-micro 1.4.0 asks for esp-nn >=1.1.1, so the component
-# manager resolves the newest 1.x); the host parity test needs the same sources,
-# so fetch that same tag into an ignored directory rather than vendoring a copy
-# that can drift.
+# esp-nn, pinned to the exact commit the device builds against. The last link
+# in the bit-exactness chain is "esp-nn's ANSI kernels and its S3 kernels agree
+# bit for bit", so both sides of it have to be the same release: firmware/main/
+# idf_component.yml pins espressif/esp-nn to ==1.3.1, and this is the upstream
+# commit that release was cut from (verified byte-identical against
+# firmware/managed_components/espressif__esp-nn). A commit rather than a tag
+# because upstream published 1.3.1 to the component registry without cutting a
+# v1.3.1 git tag — and because a tag can move, which is why every `uses:` in
+# .github/workflows is SHA-pinned too. Fetched into an ignored directory rather
+# than vendored, so it cannot drift silently.
 # NEVER define SKIP_NUDGE / CONFIG_NN_SKIP_NUDGE here: that macro selects
 # esp-nn's faster, NON-bit-exact requantisation and would silently break parity.
 # test_infer_parity.c #errors if either is defined, so the build cannot lie.
@@ -59,7 +64,7 @@ test_wakefront: test_wakefront.c ../main/wakefront.c $(MF_SRCS)
 # different -- their inputs (the committed *_infer.c and *_smoke_vectors.h)
 # need no model or data, only esp-nn itself, so they *are* in $(TESTS) and
 # pull the $(ESP_NN) network clone into the default target.
-ESP_NN_REF ?= v1.3.0
+ESP_NN_REF ?= 52d6de8a6cffd7afb31ed3c850687ca60087fc0b   # esp-nn 1.3.1
 ESP_NN ?= .esp-nn
 ESP_NN_SRCS := $(ESP_NN)/src/convolution/esp_nn_conv_ansi.c \
                $(ESP_NN)/src/convolution/esp_nn_depthwise_conv_ansi.c \
@@ -70,8 +75,11 @@ ESP_NN_SRCS := $(ESP_NN)/src/convolution/esp_nn_conv_ansi.c \
 # (esp-nn's unused-parameter stubs are not ours to police).
 ESP_NN_CFLAGS := -std=c11 -O2 -Wall -I$(ESP_NN)/include -I$(ESP_NN)/src/common
 
+# Not --depth 1 --branch: $(ESP_NN_REF) is a commit, and a shallow clone cannot
+# check one out unless it happens to be the tip.
 $(ESP_NN):
-	git clone --depth 1 --branch $(ESP_NN_REF) https://github.com/espressif/esp-nn $(ESP_NN)
+	git clone --quiet https://github.com/espressif/esp-nn $(ESP_NN)
+	git -C $(ESP_NN) checkout --quiet --detach $(ESP_NN_REF)
 
 # Phony on purpose: the probe source is rewritten per layer by the parity test,
 # and on a 2-second-resolution filesystem make would call a stale binary
