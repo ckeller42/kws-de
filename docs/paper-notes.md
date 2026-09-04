@@ -919,7 +919,7 @@ each, medians over the ~5 s trace lines with the cold first one dropped:
 | free internal at recogniser start | 36,231 B | **59,679 B** | 8,431 B |
 | every app_main task created? | yes | yes | **no** — record's 8 KB stack fails |
 | recognise task stack high-water | 6,368 B of 10,240 | 6,516 B of 10,240 | 6,436 B of 10,240 |
-| app image | 1,165,440 B | **1,001,507 B** | 1,001,523 B |
+| app image | 1,165,696 B | **1,001,616 B** | 1,001,632 B |
 | `selftest int8 out:` (23 bytes, golden vector) | `-128,…,-36,…,0,-94,…,-127,…` | byte-identical | byte-identical |
 | live `parity:` line (PARITY_LOG=y) | — | **`parity: 0/23 output bytes differ`** | build too tight to run |
 
