@@ -37,6 +37,7 @@ done
 # than copied, so QC reads one file for every set.
 for spk in "$mnt"/field/spk*/; do
   spk=${spk%/}; name=$(basename "$spk")
+  mkdir -p "$dest/field/$name"  # rsync creates only the last path component
   rsync -a --exclude field.csv "$spk/" "$dest/field/$name/"
   if [[ -f $spk/field.csv ]]; then
     # field.csv: file,fire_ms,wake_prob,device_intent,device_words,window_ms,ms,peak_dbfs
