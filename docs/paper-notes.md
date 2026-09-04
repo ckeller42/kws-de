@@ -1972,14 +1972,14 @@ clean apart from the local "doxygen XML absent" warning CI's doxygen install wou
 same known-environment gap E15/E18 noted). ESP-IDF v5.5.5 Docker build (default config): OK,
 app image **1,020,048 B** (`0xf9090`, 68% of the 0x300000 partition free).
 
-**Device: pending.** Not flashed and not measured in this session (host-only, per the task).
-Still open before this can be called shipped, not just deployed to `gen/`:
-
-- Boot banner / `status` line reads `wake=hey_bus.tflite@5fcdaf63 2026-09-04`.
-- `mode wake` step time: expect ~1,226–1,287 us per E18's unchanged-wake baseline (arena,
-  state, and scratch are identical, so the step should not move; confirm rather than assume).
-- A real "Hey Bus" fire check on the device, spoken aloud — round 6d's own gate is TTS and
-  held-out-recording based, not a live-microphone confirmation.
+**Device (2026-09-04 22:55, console only).** Flashed on the CoreS3: boot banner and
+`status` read `wake=hey_bus.tflite@5fcdaf63 2026-09-04`; `mode wake` trace
+`step 1256 +/- 111 us (invoke 1226 us)` over 68 steps per 2 s window — identical to E18's
+round-5 baseline, as the unchanged arena/state/scratch predicted; room-noise peak 0.176,
+no false fire. Left in Assistent mode with field capture armed at the production gate
+(0.85) for a soak. Still open: a real "Hey Bus" fire check spoken aloud — round 6d's own
+gate is TTS- and held-out-recording based, not a live-microphone confirmation; the first
+spoken field session on this build supplies it (`kws-qc` Field line, `wake_prob`).
 - `selftest int8 out:` line changes from round 5a's bytes (expected — different weights).
 - A few hours of field-capture soak per E22's recommendation, before treating this as more
   than a host-side candidate swap.
