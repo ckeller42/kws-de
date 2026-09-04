@@ -18,7 +18,8 @@ def _remote_fixture(tmp_path: Path) -> Path:
     (remote / "spk02" / "licht").mkdir(parents=True)
     (remote / "spk02" / "licht" / "001.wav").write_bytes(b"RIFF")
     (remote / "sessions.csv").write_text(
-        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,fire_ms,wake_prob,device_intent,device_words\n"
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,fire_ms,wake_prob,"
+        "device_intent,device_words,window_ms\n"
         'spk02,2026-09-02T00:00:00Z,"Licht",spk02/licht/001.wav,900,-6.0,words,7,1234\n'
     )
     return remote
@@ -29,11 +30,11 @@ def _remote_fixture_with_field(tmp_path: Path) -> Path:
     # count both, since each field wav has exactly one sessions.csv row.
     remote = _remote_fixture(tmp_path)
     (remote / "field" / "spk02").mkdir(parents=True)
-    (remote / "field" / "spk02" / "123456.wav").write_bytes(b"RIFF")
+    (remote / "field" / "spk02" / "1-123456.wav").write_bytes(b"RIFF")
     with (remote / "sessions.csv").open("a") as fh:
         fh.write(
-            "spk02,2026-09-02T00:00:00Z,,field/spk02/123456.wav,3500,-8.4,field,,123456,"
-            "123456,0.910,Licht an,Licht:0.93|an:0.88\n"
+            "spk02,2026-09-02T00:00:00Z,,field/spk02/1-123456.wav,3500,-8.4,field,,123456,"
+            "123456,0.910,Licht an,Licht:0.93|an:0.88,2500\n"
         )
     return remote
 
@@ -169,4 +170,4 @@ def test_ingest_counts_field_takes(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "ingested 2 takes" in r.stdout
     dest = next((tmp_path / "root" / "data" / "recordings" / "incoming").iterdir())
-    assert (dest / "field" / "spk02" / "123456.wav").exists()
+    assert (dest / "field" / "spk02" / "1-123456.wav").exists()
