@@ -16,6 +16,12 @@ if [[ -z $mnt || ! -d $mnt ]]; then
   exit 1
 fi
 
+# Spotlight indexing the freshly-mounted volume is what makes the eject below
+# fail with "resource busy" -- turn it off for this volume right away, before
+# mdworker gets to it.
+if command -v mdutil >/dev/null 2>&1; then mdutil -i off "$mnt" >/dev/null 2>&1 || true; fi
+touch "$mnt/.metadata_never_index" 2>/dev/null || true
+
 mkdir -p "$dest/logs"
 pulled=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 sessions="$dest/sessions.csv"
@@ -57,7 +63,7 @@ if [[ -f $mnt/recognise.log ]]; then
 fi
 
 if [[ -z ${KWSREC_NO_EJECT:-} ]]; then
-  if command -v diskutil >/dev/null; then diskutil eject "$mnt" >/dev/null
+  if command -v diskutil >/dev/null; then diskutil unmount force "$mnt" >/dev/null
   elif command -v udisksctl >/dev/null; then udisksctl unmount -b "$(findmnt -n -o SOURCE "$mnt")" >/dev/null
   fi
 fi
