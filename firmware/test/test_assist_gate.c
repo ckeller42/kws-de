@@ -58,6 +58,13 @@ int main(void)
     assert(!assist_gate_tick(&g, near_wrap + ASSIST_WINDOW_MS));
     assert(g.open_ms_total == ASSIST_WINDOW_MS);
 
+    /* #64: a command fire inside the wake-word tail is dropped, one shortly
+       after is accepted. */
+    assert(assist_gate_in_wake_tail(400));
+    assert(!assist_gate_in_wake_tail(500));
+    assert(assist_gate_in_wake_tail(ASSIST_WAKE_TAIL_MS - 1));
+    assert(!assist_gate_in_wake_tail(ASSIST_WAKE_TAIL_MS));
+
     printf("test_assist_gate OK\n");
     return 0;
 }

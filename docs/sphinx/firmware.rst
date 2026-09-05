@@ -41,7 +41,11 @@ Assistent
 
 The deployment shape (:need:`REQ_FW_ASSIST_GATE`): the wake model runs
 continuously, and a fire opens a 2.5 s window (``ASSIST_WINDOW_MS``) in
-which the command recogniser runs. A fire inside an open window extends it
+which the command recogniser runs. A command fire inside the first
+``ASSIST_WAKE_TAIL_MS`` (450 ms) of that window is dropped rather than
+recognised — the window's first classification reaches back before it opened
+and can still score the tail of "...Bus" itself (issue #64) — but the window
+keeps running the full 2.5 s. A fire inside an open window extends it
 rather than opening a second one — one interaction, not two. One screen with
 two states, so "listening for the wake word" and "listening for a command"
 are never ambiguous from across the van: idle shows the live wake
@@ -58,7 +62,11 @@ wake fire plus the window it opened — is saved to
 recognised, *after* the window closes: the recogniser is already off when
 the file is written, so the capture cannot slow a recognise step. The
 serial console can set the same switch (``field on|off``) and ``status``
-reports it along with the number of takes saved and dropped.
+reports it along with the number of takes saved and dropped. One predicate
+gates every tone (the wake beep in ``wake.cc``, the confirmation pips in
+``recognise.cc``): silent whenever the toggle is on, in *every* mode — not
+only while a take is actually being written — since a tone sounded in Wake
+mode can still land in the pre-roll of the next Assistent take.
 
 **While capture is armed the wake gate is deliberately looser than the
 shipped one** (:need:`REQ_FW_FIELD_CAPTURE_GATE`). A field take exists only

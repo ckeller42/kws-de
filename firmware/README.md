@@ -216,10 +216,18 @@ while this mode is active, so what you see is the wake model alone.
   mode the pips wait until the window has closed, so the speaker cannot be
   heard in the window's own audio; playback runs on a low-priority task, so
   no inference step ever waits on the codec.
-- **Both tones are muted while field capture is armed.** An armed device is a
-  device the user has asked to be quiet, and neither tone may ever end up
-  inside a take. A command still recognised under capture simply passes
-  silently — the owed tone is dropped, not deferred to a later window.
+- **Both tones are muted whenever field capture is enabled — in every mode,
+  not only Assistent.** A device with capture on has asked to be quiet, and a
+  tone played while merely testing in Wake mode sits in the ring right where
+  the next Assistent take's 2.5 s pre-roll reaches back to; gating the mute on
+  Assistent as well as the toggle let exactly that leak into a take. A command
+  still recognised under capture simply passes silently — the owed tone is
+  dropped, not deferred to a later window.
+- **A command fire inside the first `ASSIST_WAKE_TAIL_MS` (450 ms) of a
+  window is dropped, not recognised.** The window's first classification is a
+  ~1 s retrospective slice that reaches back before the window opened, so it
+  can score the tail of "...Bus" itself as a word (issue #64); the window
+  still runs the full 2.5 s either way.
 
 ## Regenerating headers
 
