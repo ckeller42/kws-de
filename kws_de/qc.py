@@ -736,10 +736,14 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 # recognition of it as a false accept (eval.py). Leave it unfiled.
                 n_field_unfiled += 1
                 continue
-            if t.span and t.span[1] - t.span[0] < MIN_MS / 1000:
-                # cutting the wake phrase out left a stub, not a clip
-                n_field_unfiled += 1
-                continue
+            if t.span:
+                # the tail may reach past the take's end: clamp before judging,
+                # or a 0.15 s stub gets filed as a phrase (seen on 2026-09-05)
+                t.span = (t.span[0], min(t.span[1], row.dur_ms / 1000))
+                if t.span[1] - t.span[0] < MIN_MS / 1000:
+                    # cutting the wake phrase out left a stub, not a clip
+                    n_field_unfiled += 1
+                    continue
         if t.set == "words":
             tok = required_tokens(t.prompt, "words")[0]
             lab = label_for_token(tok)
