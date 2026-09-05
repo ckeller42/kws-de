@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include "arena.h"
+#include "assist_gate.h"
 #include "audio.h"
 #include "beep.h"
 #include "esp_heap_caps.h"
@@ -27,6 +28,7 @@
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "ui/ui.h"
+#include "wake.h"
 
 _Static_assert(KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES,
                "label count (fwgen) must match model output classes (export)");
@@ -70,6 +72,7 @@ static bool s_parity_pending;        /* log both paths' output on the next step 
 #endif
 static FILE *s_log;
 static volatile int64_t s_off_at_us;   /* assist window deadline, 0 = run until told otherwise */
+static volatile int64_t s_win_open_us; /* when the current window opened (recognise_listen_for); ASSIST_WAKE_TAIL_MS anchor */
 static volatile bool s_cmd_fired;      /* assist mode: a command fired in this window, tone still owed */
 
 static void log_fire(const char *word, float conf)
@@ -302,6 +305,21 @@ static void recognise_task(void *)
             if (probs[i] > probs[best]) best = i;
         }
         int fired = stream_push(&stream, probs);
+        if (fired >= 0 && s_off_at_us) {
+            /* Windowed (assist) session only — s_off_at_us is 0 outside one.
+               Dropped as if nothing fired: it must not reach window_intent/
+               window_words (field capture's device prediction) or the
+               confirmation tone below, and the run it belonged to stays
+               marked fired (see assist_gate.h) so a genuine later command on
+               a different label still gets its own chance to fire. */
+            int64_t since_open_ms = (esp_timer_get_time() - s_win_open_us) / 1000;
+            if (assist_gate_in_wake_tail(since_open_ms)) {
+                ESP_LOGI(TAG, "assist: dropped tail fire %s %.2f, %lld ms into the window (< %d)",
+                         KWS_LABELS[fired], (double)probs[fired], (long long)since_open_ms,
+                         ASSIST_WAKE_TAIL_MS);
+                fired = -1;
+            }
+        }
         step_us = esp_timer_get_time() - t0;
         uint32_t ms = (uint32_t)(step_us / 1000);
         if ((++steps % 50) == 0)                         /* ~every 5 s: front-end + inference cost */
@@ -356,11 +374,15 @@ static void recognise_task(void *)
            expire while the window is still open (a second wake fire extends the
            gate without re-arming the deadline), and a tone inside the window
            would be captured by the microphone and end up in a field-capture
-           take. Outside assist there is no window, so it plays straight away;
-           beep_double() only posts to the beep task either way. */
+           take. Outside assist there is no window, so it plays straight away —
+           unless field capture is toggled on anyway (left on from testing in
+           this very mode): the toggle outlives a mode switch, and this tone's
+           tail sits in the ring right where the pre-roll of the next Assistent
+           take reaches back to, same leak as wake.cc's own tone, muted the same
+           way. beep_double() only posts to the beep task either way. */
         if (stream_is_command(fired)) {
             if (app_get_mode() == UI_MODE_ASSIST) s_cmd_fired = true;
-            else beep_double();
+            else if (!wake_field_get()) beep_double();
         }
         /* Only when the recognise screen is actually on display. In assist mode
            the wake task owns the screen (ui_assist_refresh) and this screen's
@@ -417,7 +439,9 @@ extern "C" void recognise_listen_for(uint32_t ms)
     s_st.window_words[0] = 0;
     xSemaphoreGive(s_lock);
     s_cmd_fired = false;      /* a new window never inherits the last one's owed tone */
-    s_off_at_us = esp_timer_get_time() + (int64_t)ms * 1000;
+    int64_t now_us = esp_timer_get_time();
+    s_win_open_us = now_us;   /* ASSIST_WAKE_TAIL_MS is measured from here, not from s_off_at_us */
+    s_off_at_us = now_us + (int64_t)ms * 1000;
     s_active = true;
 }
 extern "C" bool recognise_take_command_fired(void)

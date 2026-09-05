@@ -21,9 +21,31 @@
 /** How long the recogniser stays enabled after a wake fire, in ms. */
 #define ASSIST_WINDOW_MS 2500
 
+/** How soon after the window opens a command fire is dropped, in ms (#64).
+ *  The wake fire lands ~0.14 s after "Hey Bus" finishes, and the window's
+ *  first classification is a full KWS_N_FRAMES (~1 s) retrospective slice
+ *  primed from ring audio that reaches back before the window opened — so it
+ *  can score the tail of "...Bus" itself as a command ("aus" was the device's
+ *  first word in 12 of 17 real takes). A fire this soon in is that artefact,
+ *  not a spoken command: drop it before it reaches window_words/device_words
+ *  or the confirmation tone. The window itself is unaffected — it still runs
+ *  the full ASSIST_WINDOW_MS. */
+#define ASSIST_WAKE_TAIL_MS 300
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief Should a command fire this soon after the window opened be dropped (#64)?
+ * @param ms_since_open Milliseconds between the window opening and the fire.
+ * @return true while still inside the wake-word tail (drop it); host-tested
+ *         directly since recognise.cc's own loop needs real hardware.
+ */
+static inline bool assist_gate_in_wake_tail(int64_t ms_since_open)
+{
+    return ms_since_open < ASSIST_WAKE_TAIL_MS;
+}
 
 /** @brief Gate state. Zero-initialise; `open_until_ms` is only meaningful while `open`. */
 typedef struct {

@@ -2079,6 +2079,64 @@ spoken field session on this build supplies it (`kws-qc` Field line, `wake_prob`
 - A few hours of field-capture soak per E22's recommendation, before treating this as more
   than a host-side candidate swap.
 
+### E26 — field-capture beep leak and the "aus" window tail (issue #64, device)
+
+Two field-capture defects fixed together, both found and verified on the CoreS3 (branch
+`fix/assist-window-tail`).
+
+**Defect A — wake beep leaking into field takes.** `wake.cc`'s beep predicate was
+`!(assist && s_field.enabled)` — muted only while field capture was on **and** the mode was
+Assistent — contradicting its own comment ("silent while field capture is on"). `field.enabled`
+is a device-wide toggle that outlives a mode switch, so a fire while merely testing in Wake
+mode still beeps at full volume, and that tone sits in the ring exactly where the next
+Assistent take's 2.5 s pre-roll (`FIELD_PREROLL_MS`) reaches back to. Real evidence:
+`field/spk18/74-46922553.wav` from the session `qc/2026-09-05-1202` cited in the original
+report — a 150 ms burst at 0.53-0.55 s take-relative, dominant frequency 1,060-1,280 Hz, sample
+peak 29,938 (-0.8 dBFS), matching `beep.c`'s wake tone (1,000 Hz/150 ms) to spec; the take's own
+arming fire sits at t = 2.5 s as always, so the burst is not this take's own tone. Fix: one
+predicate for both tone call sites (`wake.cc`'s `beep_play()`, `recognise.cc`'s non-assist
+`beep_double()`) — mute on `s_field.enabled` alone, in every mode.
+
+**Defect B — command window opens on the tail of "Bus" (#64).** Round 6d's wake fire lands
+~0.14 s after the phrase (E24) instead of round 5's ~1.1 s, so the recogniser's first
+classification — a ~1 s retrospective slice primed from ring audio predating the window — can
+still score "...Bus" itself; the field session behind #64 saw `aus` as the first device word in
+12/17 real takes. Fix: `ASSIST_WAKE_TAIL_MS` (300 ms, `assist_gate.h`) — a command fire this
+soon after the window opens is dropped before it reaches `window_words`/`device_words` or the
+confirmation tone; the window still runs the full `ASSIST_WINDOW_MS`. Host-tested directly
+(`assist_gate_in_wake_tail()`, `firmware/test/test_assist_gate.c`): a fire at 100 ms dropped, at
+400 ms accepted.
+
+**Device verification, same replay before/after (assist, field on, thresh 0.85; 3×
+"Hey Bus, Licht an" + 2× "Hey Bus" alone, ~11 s apart).**
+
+| | before (main) | after (this branch) |
+|---|---|---|
+| spurious word on a bare "Hey Bus" (no command spoken) | `Licht` fires 374 ms into the window | `Licht` still fires, 381-386 ms in |
+| first word of a real "Licht an" take | `Kühlschrank` (343-389 ms in) then `Licht an` | `Licht an` — no spurious prefix, in 2/3 replays |
+| `kws-qc` Field line (`--approved approved-tts-staging`) | not run pre-fix (same protocol, see below) | `field_takes: 5, approved: 5, truncated: 0, parsable: 3, agree: 1, near_miss: 0, false_alarm: 0` |
+
+Caveat worth recording: on this rig the bare-"Hey Bus" artefact's own fire lands at 374-386 ms —
+*above* the 300 ms cutoff — so `ASSIST_WAKE_TAIL_MS` as specified does not suppress it here; the
+floor is dominated by the recogniser task's fixed ~150-400 ms scheduling-plus-inference latency
+on window entry (100 ms mandatory poll delay + ~55 ms Invoke + scheduling jitter), not by
+anything about the phrase. Real commands fire much later (531-1,488 ms in this replay), so
+raising the constant would not risk swallowing one — but 300 ms should be re-checked against
+the original #64 session's own timing before calling the tail fully closed. Defect A's specific
+repro path (a Wake-mode fire bleeding into a later Assistent take) was not independently
+re-reproduced live — the console tooling sends all commands before the log-capture window
+opens, so a mode switch cannot be interleaved mid-playback without a second port-open
+resetting the chip — but the fix is a direct, host-test-covered correction of the predicate
+against its own documented intent, and the cited real evidence file's signature is unambiguous.
+
+Also from the original evidence set: `field/spk18/74-40246202.wav` fired at 0.965 on room tone
+(-40 dBFS peak). `wake_set_active(true)` resets the front-end's adaptive noise-floor/PCAN state
+(`wakefront_reset()`) with no burn-in guard before the gate starts comparing against threshold,
+so a fire shortly after (re-)entering Wake/Assistent mode — while that estimate is still
+settling — is architecturally plausible; the pulled `sessions.csv` alone does not carry mode-
+entry timestamps to confirm this specific take was that close to one, so this is flagged as a
+plausible mechanism, not a confirmed root cause.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
