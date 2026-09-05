@@ -2154,7 +2154,57 @@ comment.
 `intent.c` standalone with no warnings. ESP-IDF v5.5.5 Docker build clean, both
 configs, after the rebase.
 
-**Device (2026-09-05, CoreS3, rig per E26).** DEVICE_NOTES_PLACEHOLDER
+**Device (2026-09-05, CoreS3, rig per E26).** Flashed post-rebase; boot confirms
+both models on the generated-inference path (`wake: inference: generated
+(esp-nn) ...`, `recognise: inference: generated (esp-nn) ...`, no
+`AllocateTensors failed`). All checks below with `field on thresh 0.85`, real
+audio played at the mic from `bar`'s speaker — no synthetic `wakefire`, so
+every window here opened on a REAL wake fire (the E26 tail-drop fires
+alongside it for real, not just in a host test):
+
+- **Silence** (real "Hey Bus" alone, no command spoken): `wake: intent: none
+  ()`; card would read "nicht verstanden" with no words underneath.
+- **Wake-tail drop (#68) confirmed live**, not just host-tested: nearly every
+  real "Hey Bus" playback also logged `recognise: assist: dropped tail fire
+  aus 0.4-0.9, 353-365 ms into the window (< 450)` — the exact artefact E26
+  fixed, still present in the raw acoustic signal and still correctly
+  suppressed before this branch's parser ever sees it.
+- **Invalid multi-word captures correctly rejected**, e.g. `wake: intent: none
+  (Licht Kühlschrank)`, `wake: intent: none (Kühlschrank)`, `wake: intent:
+  none (_unknown_)` — the device word (`Licht`/`Kühlschrank`) fired reliably
+  (0.47-0.99) on this rig, but a lone action word played right after it
+  (`an`, `aus`, `leise`, isolated word-set clips) did not clear the command
+  model's threshold in ~10 tries, including alone with no device word
+  competing (`fired _unknown_ 0.55` on "an" by itself) — a real-voice recall
+  gap in the deployed `command_v3_w48_qat` model for this bar-speaker-to-mic
+  acoustic path, not a parsing defect: every one of these was correctly
+  reported as an invalid intent, never a false valid one.
+- **Valid intent, confirmed**: replaying the approved TTS clip
+  `de_heybuslichtan_thorsten_medium_6db.wav` ("Hey Bus, Licht an") gave
+  `recognise: fired Kühlschrank 0.66` then `recognise: fired an 0.02`
+  (model confusion on the device word this one time, but a real two-fire
+  sequence) and **`wake: intent: Kühlschrank → an`** — the full path exercised
+  live: grammar validation, `intent_format()`'s arrow text, and the
+  `field.csv` row (`field: saved /sdcard/field/spk18/116-10776.wav ...,
+  intent "Kühlschrank → an"`) all matching what host parity already proved on
+  19 synthetic cases. The confirmation beep did not sound, as designed
+  (`field on` mutes it — #68's single predicate).
+- Screenshots: not attempted — `-DKWS_UI_SCREENSHOT` only instruments
+  `ui_record.c` (`firmware/main/ui/ui_record.c`); the assist screen has no
+  screenshot hook in this codebase, so the log lines above are the device
+  evidence.
+
+Left in `mode assist`, `field on thresh 0.85` (confirmed via a final `status`).
+
+**Build mishap caught and fixed before any of this:** a `firmware/sdkconfig`
+left over from an earlier `CONFIG_KWS_INFER_GENERATED=n` overlay build was not
+regenerated before the "default" post-rebase build, so that build silently
+carried the interpreter-fallback config into the boot log's PSRAM arena size
+and produced `recognise: AllocateTensors failed` on first flash. Fixed by
+deleting the stale `sdkconfig` and `sdkconfig.defaults` diff and rebuilding
+before any device work — see `firmware/README.md`'s existing note on deleting
+`sdkconfig` after an `sdkconfig.defaults` change, which this branch did not
+follow closely enough the first time.
 
 ### E26 — field-capture beep leak and the "aus" window tail (issue #64, device)
 
