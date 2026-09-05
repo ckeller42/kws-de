@@ -163,6 +163,56 @@ def test_build_dataset_perturbs_synthetic_clips_only():
     assert (y1 != 0).sum() == (y0 != 0).sum()
 
 
+def _write_van_dirs(tmp_path, rng):
+    import soundfile as sf
+
+    noise_dir, rir_dir = tmp_path / "noise", tmp_path / "rir"
+    noise_dir.mkdir()
+    rir_dir.mkdir()
+    sf.write(noise_dir / "n.wav", rng.standard_normal(16000).astype(np.float32), 16000)
+    sf.write(rir_dir / "r.wav", rng.standard_normal(400).astype(np.float32), 16000)
+    return noise_dir, rir_dir
+
+
+def test_build_dataset_van_augments_real_clips_only_when_enabled(monkeypatch, tmp_path):
+    rng = np.random.default_rng(0)
+    noise_dir, rir_dir = _write_van_dirs(tmp_path, rng)
+    clips = {config.COMMANDS[0]: [_clip(rng), _clip(rng)], "_unknown_": [_clip(rng)]}
+    noises = [rng.standard_normal(8000).astype(np.float32)]
+
+    monkeypatch.delenv("KWS_NOISE_DIR", raising=False)
+    monkeypatch.delenv("KWS_RIR_DIR", raising=False)
+    X0, _y0 = build_dataset(clips, noises, np.random.default_rng(1), snrs=(20,))
+
+    monkeypatch.setenv("KWS_NOISE_DIR", str(noise_dir))
+    monkeypatch.setenv("KWS_RIR_DIR", str(rir_dir))
+    X1, _y1 = build_dataset(clips, noises, np.random.default_rng(1), snrs=(20,))
+    # 3 real clips (2 command + 1 unknown) x 3 VAN_SNRS extra rows each
+    assert X1.shape[0] == X0.shape[0] + 3 * 3
+
+
+def test_origin_flags_row_count_matches_build_dataset_with_van_enabled(monkeypatch, tmp_path):
+    rng = np.random.default_rng(4)
+    noise_dir, rir_dir = _write_van_dirs(tmp_path, rng)
+    monkeypatch.setenv("KWS_NOISE_DIR", str(noise_dir))
+    monkeypatch.setenv("KWS_RIR_DIR", str(rir_dir))
+
+    clips_ws = {
+        "Licht": [(np.zeros(1), "tts:Anna:180"), (np.zeros(1), "rec:spk1")],
+        "_unknown_": [(np.zeros(1), "real_speaker_2")],
+    }
+    # Mirrors kws_de.dataset.assemble: synthetic= (per-clip TTS flag) drives build_dataset's
+    # perturb-vs-van branch, the same speaker prefix _origin_flags reads independently.
+    clips = {lbl: [c for c, _ in items] for lbl, items in clips_ws.items()}
+    synthetic = {lbl: [s.startswith("tts:") for _, s in items] for lbl, items in clips_ws.items()}
+    noises = [rng.standard_normal(8000).astype(np.float32)]
+    X, _y = build_dataset(
+        clips, noises, np.random.default_rng(1), snrs=(20, 10, 0), synthetic=synthetic
+    )
+    flags = _origin_flags(clips_ws, (20, 10, 0), perturb_tts=True)
+    assert X.shape[0] == flags.shape[0]
+
+
 def test_origin_flags_doubles_perturbed_tts_rows():
     clips_ws = {
         "Licht": [(np.zeros(1), "tts:say:Anna"), (np.zeros(1), "real_1")],

@@ -14,7 +14,7 @@ from urllib.request import urlopen
 import numpy as np
 
 from kws_de import config, tts
-from kws_de.augment import mix_at_snr, perturb
+from kws_de.augment import mix_at_snr, perturb, van_augment
 from kws_de.features import mfcc
 
 
@@ -261,6 +261,31 @@ def make_transition_windows(clips_by_word, rng, n_pairs, gap_ms=250):
     return unknown_windows, context_positives
 
 
+VAN_SNRS = (0, 5, 10)  # dB — cabin-ish, noisier than the general snrs= default
+
+
+def van_augmentation_enabled() -> bool:
+    """Van-cabin augmentation for REAL clips (rec:/MSWC) is opt-in: set both
+    KWS_NOISE_DIR (recommended: `<mww-train>/data/fma_16k`, or `negative_datasets`)
+    and KWS_RIR_DIR (recommended: `<mww-train>/data/mit_rirs`) to directories of 16kHz
+    wav files. No default — this repo commits no path to that external training data."""
+    return bool(os.environ.get("KWS_NOISE_DIR")) and bool(os.environ.get("KWS_RIR_DIR"))
+
+
+def _van_noise_and_rir(rng):
+    """One random noise clip (KWS_NOISE_DIR) and one random room IR (KWS_RIR_DIR) for
+    this whole build — one of each, reused across every real clip, not one per clip."""
+    import soundfile as sf
+
+    noise_dir, rir_dir = Path(os.environ["KWS_NOISE_DIR"]), Path(os.environ["KWS_RIR_DIR"])
+    noises, rirs = sorted(noise_dir.glob("*.wav")), sorted(rir_dir.glob("*.wav"))
+    if not noises or not rirs:
+        raise FileNotFoundError(f"no .wav files under {noise_dir} or {rir_dir}")
+    noise, _ = sf.read(noises[int(rng.integers(0, len(noises)))], dtype="float32")
+    rir, _ = sf.read(rirs[int(rng.integers(0, len(rirs)))], dtype="float32")
+    return noise, rir
+
+
 def build_dataset(
     clips,
     noises,
@@ -294,9 +319,16 @@ def build_dataset(
     train-split only) are already-cut CLIP_SAMPLES windows with deliberate
     boundary geometry, so they skip `_random_shift` (which would destroy that
     geometry) but still get the same clean+per-snr noise augmentation.
+
+    Van-cabin augmentation (`van_augmentation_enabled()`, opt-in via
+    KWS_NOISE_DIR/KWS_RIR_DIR) adds `len(VAN_SNRS)` extra rows per REAL (non-`perturbed`)
+    clip: one room IR convolved in, mixed with one noise sample at 0/5/10 dB — see
+    `kws_de.augment.van_augment`. Off by default, so `_origin_flags` must be told the
+    same way (`van_augmentation_enabled()`) to keep its row count in sync.
     """
     labels = list(labels) if labels is not None else config.LABELS
     commands = list(commands) if commands is not None else config.COMMANDS
+    van_noise, van_rir = _van_noise_and_rir(rng) if van_augmentation_enabled() else (None, None)
     X, y = [], []
 
     def add(sig, label):
@@ -309,9 +341,19 @@ def build_dataset(
             noise = noises[int(rng.integers(0, len(noises)))]
             add(mix_at_snr(_random_shift(clip, rng), noise, snr, rng), label)
         if perturbed:
+            # A pitch/tempo-perturbed copy gets the SAME clean+per-snr treatment above,
+            # not a recursive add_word_clip call — that would also fall into the van
+            # branch below (a TTS-perturbed copy is not a REAL clip either).
             n_steps = float(rng.uniform(-2.0, 2.0))
             rate = float(rng.uniform(0.85, 1.15))
-            add_word_clip(perturb(clip, n_steps, rate, config.SAMPLE_RATE), label)
+            pclip = perturb(clip, n_steps, rate, config.SAMPLE_RATE)
+            add(_random_shift(pclip, rng), label)
+            for snr in snrs:
+                noise = noises[int(rng.integers(0, len(noises)))]
+                add(mix_at_snr(_random_shift(pclip, rng), noise, snr, rng), label)
+        elif van_noise is not None:  # REAL clip (rec:/MSWC): van-cabin variety
+            for snr in VAN_SNRS:
+                add(van_augment(_random_shift(clip, rng), van_noise, van_rir, snr, rng), label)
 
     def flags_for(label):
         return (synthetic or {}).get(label) or []
@@ -738,14 +780,18 @@ def _origin_flags(clips_ws: dict, snrs, words=None, perturb_tts: bool = False) -
     aligned row-for-row to build_dataset's output for the same clips/snrs — must
     mirror build_dataset's iteration order (commands then unknown, each clip's
     clean copy + one row per snr, then silence, then clean silence) exactly.
-    With `perturb_tts`, TTS clips count twice (build_dataset's perturbed copy)."""
+    With `perturb_tts`, TTS clips count twice (build_dataset's perturbed copy). A REAL
+    clip also picks up `len(VAN_SNRS)` extra (False) rows when van augmentation is
+    enabled (`van_augmentation_enabled()`) — must track build_dataset's own check."""
     words = list(words) if words is not None else config.COMMANDS
     per_clip = 1 + len(snrs)
+    van_rows = len(VAN_SNRS) if van_augmentation_enabled() else 0
     flags = []
 
     def rows(spk):
         is_tts = spk.startswith("tts:")
-        return [is_tts] * (per_clip * (2 if perturb_tts and is_tts else 1))
+        base = [is_tts] * (per_clip * (2 if perturb_tts and is_tts else 1))
+        return base if is_tts else base + [False] * van_rows
 
     for cmd in words:
         for _clip, spk in clips_ws.get(cmd, []):

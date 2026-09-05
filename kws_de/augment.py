@@ -28,6 +28,18 @@ def measure_snr(signal, noisy):
     return 10 * np.log10(p_sig / p_nz)
 
 
+def van_augment(clip, noise, rir, snr_db: float, rng) -> np.ndarray:
+    """One van-cabin-ish copy of a REAL clip: convolve with a room impulse response
+    (cabin reverb), then mix with background noise at `snr_db` (`mix_at_snr`). Length
+    preserved (cropped back to `len(clip)` after convolution). `rir=None` skips the
+    convolution — noise-only. Used by `kws_de.data.build_dataset` for real (rec:/MSWC)
+    clips only; see `kws_de.data.van_augmentation_enabled`."""
+    sig = np.asarray(clip, dtype=np.float32).ravel()
+    if rir is not None and len(np.ravel(rir)):
+        sig = np.convolve(sig, np.asarray(rir, dtype=np.float32).ravel())[: len(sig)]
+    return mix_at_snr(sig, noise, snr_db, rng)
+
+
 def perturb(sig, n_steps: float, rate: float, sr: int = 16000) -> np.ndarray:
     """Pitch-shift by `n_steps` semitones and time-stretch by `rate` (>1 = faster, shorter).
     Length changes with `rate`; callers re-fit to CLIP_SAMPLES (build_dataset's

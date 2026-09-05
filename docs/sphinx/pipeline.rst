@@ -360,6 +360,27 @@ rejected on content is dropped, never repaired. On a seven-clip real sample
 all; both were rejected. That is the right trade — a synthetic clip is cheap,
 a mislabelled one is not.
 
+Van-cabin augmentation
+----------------------
+
+Opt-in (off unless both env vars below are set): every REAL clip (``rec:`` device
+recordings and MSWC — never TTS, which already gets its own perturbed copy) in
+``kws_de.data.build_dataset`` also contributes ``kws_de.augment.van_augment`` copies —
+one room impulse response convolved in, mixed with one noise sample at 0/5/10 dB
+(``kws_de.data.VAN_SNRS``) — meant to stand in for the bus's cabin (engine/road noise,
+short reverb) rather than the general-purpose noise pool ``snrs=`` already mixes every
+clip with. One noise file and one IR are drawn once per build and reused for every
+real clip, not redrawn per clip.
+
+- ``KWS_NOISE_DIR`` — a directory of 16 kHz wav noise clips. Recommended:
+  ``<mww-train>/data/fma_16k`` (or ``negative_datasets``) from this project's wake-word
+  training data, if available locally.
+- ``KWS_RIR_DIR`` — a directory of 16 kHz wav room impulse responses. Recommended:
+  ``<mww-train>/data/mit_rirs``.
+
+Neither has a default pointing at a real path — this repo commits no path to that
+external training data, so the feature is silently off until both are set.
+
 The two evaluation figures
 ---------------------------
 
