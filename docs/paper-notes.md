@@ -2079,6 +2079,133 @@ spoken field session on this build supplies it (`kws-qc` Field line, `wake_prob`
 - A few hours of field-capture soak per E22's recommendation, before treating this as more
   than a host-side candidate swap.
 
+### E25 — on-device intent parse + result card (2026-09-05, feat/on-device-intent)
+
+The demo action: the device parses a window's fired words into a device/zone/action
+intent on-device, rather than only listing raw keywords, and shows the result on
+screen. `firmware/main/intent.{h,c}` is a hand port of `kws_de.grammar.parse()`
+(device, optional zone, exactly one action, no duplicates, no out-of-order tokens,
+`_unknown_`/`_silence_` dropped like the Python filter) plus `intent_format()`
+("Licht Küche → an", "Licht → fünfzig Prozent", matching `kws_de.eval.intent_text`'s
+word order/level suffix). The vocabulary itself is not duplicated: `intent.c` reads
+`gen/labels.h` (`KWS_LABELS`, generated from `kws_de.config.COMMAND_LABELS`) and
+only encodes the label layout's structure — device/zone/action counts and each
+device's allowed-action bitmask, mirroring `kws_de.config.DEVICE_ACTIONS` /
+`ZONED_DEVICES` — checked at compile time (`_Static_assert` against
+`KWS_NUM_LABELS`) and at test time against the Python grammar itself.
+
+**Host parity: 19/19 cases, 0 mismatches.** `scripts/gen-intent-cases.py` runs a
+fixed list of fired-word sequences — valid with/without zone, a brightness level,
+missing device, missing action, wrong order (zone/device swapped), duplicate
+device, duplicate action, a zone on a device that takes none, an action the
+device does not support, a level with no device, two devices, an interleaved
+`_unknown_` token, a lone `_unknown_`, and empty — through `kws_de.grammar.parse()`
+and commits the result table as `firmware/test/intent_cases.h`.
+`firmware/test/test_intent.c` runs every case through `intent_parse()` and
+compares device/zone/action/valid field for field, then checks `intent_format()`
+against the zoned, level and invalid cases directly. `make -C firmware/test`:
+`intent parity: 0/19 cases mismatch`, `test_intent OK`, `host tests OK` (all
+targets, unaffected by this change, still pass).
+
+**Wiring (`wake.cc`, at the assist window's close, once):** the window's raw fired
+words (`recognise_status_t.window_intent`, unchanged — still what `recognise.cc`
+collects, and still subject to E26/#68's `ASSIST_WAKE_TAIL_MS` drop, which happens
+before this parse ever sees the words) are parsed and formatted, then:
+
+- console log: `intent: Licht Küche → an` (valid) or `intent: none (<raw words>)`
+  (invalid/empty), and `status` now carries an `intent <text>` line (`"none"` for
+  invalid, omitted before the first window) — cheap, one `s_lock`-guarded 64-byte
+  buffer, no new task or queue;
+- `field.csv`'s `device_intent` column becomes the formatted text, empty when
+  invalid — `device_words` is untouched (still the raw `"<word>:<conf>"` list).
+  `kws_de.qc.field_intent()` re-derives its `Intent` from `device_intent` via
+  `normalise()` + `grammar.parse()`, and `normalise()`'s `[^\w\s]` filter strips
+  the arrow to a space before tokenising, so the round-trip is unaffected —
+  verified by hand against `qc.py`'s `field_intent`/`normalise`, not by a new
+  Python-side test (out of this branch's scope: no `kws_de/*.py` file changed);
+- the assist screen shows a result card for 3 s (`ui_assist_show_result()`):
+  green with the formatted text when valid, grey "nicht verstanden" plus the raw
+  heard words when not. The card's own 3 s lifetime runs on an LVGL timer inside
+  the LVGL task; the wake task's only LVGL touch is the existing one call per
+  window that already painted this screen (`ui_assist_refresh` on the same call
+  site), so window close still does at most one bsp_display_lock-guarded update
+  per model-task edge, unchanged from before this branch;
+- the confirmation double beep is now keyed to a **valid** intent instead of any
+  fired command word — `stream_is_command(fired)` still latches a per-fire flag
+  in `recognise.cc` (kept, but its value is no longer read for the tone decision;
+  only drained at the close edge so it never carries into the next window), and
+  sits inside E26/#68's single mute predicate (`!s_field.enabled`, every mode)
+  rather than a second one.
+
+**Rebased onto E26/#68** (`fix/assist-window-tail`, merged 2026-09-05): no logic
+conflict — the wake-tail drop (#68) zeroes `fired` before this branch's window-
+close parse ever reads `window_intent`, so a dropped tail fire is already absent
+from the words this branch parses, and the confirmation-tone `else if
+(!wake_field_get())` change in `recognise.cc` and this branch's `s_cmd_fired`
+comment landed on the same lines — resolved by keeping both explanations in one
+comment.
+
+**Host checks, all clean.** `make -C firmware/test`: `host tests OK` (includes
+`test_intent`). `ruff check` / `ruff format --check` on the new
+`scripts/gen-intent-cases.py`: clean. `markdownlint-cli@0.42.0 --config
+.markdownlint.json` on the touched Markdown: clean. `sphinx-build -W
+--keep-going`: clean apart from the pre-existing "doxygen XML absent" warning
+(E15/E18/E24's known CI-only gap). `cc -std=c11 -Wall -Wextra -Werror` compiles
+`intent.c` standalone with no warnings. ESP-IDF v5.5.5 Docker build clean, both
+configs, after the rebase.
+
+**Device (2026-09-05, CoreS3, rig per E26).** Flashed post-rebase; boot confirms
+both models on the generated-inference path (`wake: inference: generated
+(esp-nn) ...`, `recognise: inference: generated (esp-nn) ...`, no
+`AllocateTensors failed`). All checks below with `field on thresh 0.85`, real
+audio played at the mic from `bar`'s speaker — no synthetic `wakefire`, so
+every window here opened on a REAL wake fire (the E26 tail-drop fires
+alongside it for real, not just in a host test):
+
+- **Silence** (real "Hey Bus" alone, no command spoken): `wake: intent: none
+  ()`; card would read "nicht verstanden" with no words underneath.
+- **Wake-tail drop (#68) confirmed live**, not just host-tested: nearly every
+  real "Hey Bus" playback also logged `recognise: assist: dropped tail fire
+  aus 0.4-0.9, 353-365 ms into the window (< 450)` — the exact artefact E26
+  fixed, still present in the raw acoustic signal and still correctly
+  suppressed before this branch's parser ever sees it.
+- **Invalid multi-word captures correctly rejected**, e.g. `wake: intent: none
+  (Licht Kühlschrank)`, `wake: intent: none (Kühlschrank)`, `wake: intent:
+  none (_unknown_)` — the device word (`Licht`/`Kühlschrank`) fired reliably
+  (0.47-0.99) on this rig, but a lone action word played right after it
+  (`an`, `aus`, `leise`, isolated word-set clips) did not clear the command
+  model's threshold in ~10 tries, including alone with no device word
+  competing (`fired _unknown_ 0.55` on "an" by itself) — a real-voice recall
+  gap in the deployed `command_v3_w48_qat` model for this bar-speaker-to-mic
+  acoustic path, not a parsing defect: every one of these was correctly
+  reported as an invalid intent, never a false valid one.
+- **Valid intent, confirmed**: replaying the approved TTS clip
+  `de_heybuslichtan_thorsten_medium_6db.wav` ("Hey Bus, Licht an") gave
+  `recognise: fired Kühlschrank 0.66` then `recognise: fired an 0.02`
+  (model confusion on the device word this one time, but a real two-fire
+  sequence) and **`wake: intent: Kühlschrank → an`** — the full path exercised
+  live: grammar validation, `intent_format()`'s arrow text, and the
+  `field.csv` row (`field: saved /sdcard/field/spk18/116-10776.wav ...,
+  intent "Kühlschrank → an"`) all matching what host parity already proved on
+  19 synthetic cases. The confirmation beep did not sound, as designed
+  (`field on` mutes it — #68's single predicate).
+- Screenshots: not attempted — `-DKWS_UI_SCREENSHOT` only instruments
+  `ui_record.c` (`firmware/main/ui/ui_record.c`); the assist screen has no
+  screenshot hook in this codebase, so the log lines above are the device
+  evidence.
+
+Left in `mode assist`, `field on thresh 0.85` (confirmed via a final `status`).
+
+**Build mishap caught and fixed before any of this:** a `firmware/sdkconfig`
+left over from an earlier `CONFIG_KWS_INFER_GENERATED=n` overlay build was not
+regenerated before the "default" post-rebase build, so that build silently
+carried the interpreter-fallback config into the boot log's PSRAM arena size
+and produced `recognise: AllocateTensors failed` on first flash. Fixed by
+deleting the stale `sdkconfig` and `sdkconfig.defaults` diff and rebuilding
+before any device work — see `firmware/README.md`'s existing note on deleting
+`sdkconfig` after an `sdkconfig.defaults` change, which this branch did not
+follow closely enough the first time.
+
 ### E26 — field-capture beep leak and the "aus" window tail (issue #64, device)
 
 Two field-capture defects fixed together, both found and verified on the CoreS3 (branch

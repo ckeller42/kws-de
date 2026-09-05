@@ -15,11 +15,16 @@
 LV_FONT_DECLARE(font_prompt_28);
 
 static lv_obj_t *scr, *l_state, *l_big, *l_stats, *l_rec, *sw_field;
+static lv_obj_t *card, *l_card_text, *l_card_words;
+static lv_timer_t *s_card_timer;
 static uint32_t s_last_fire;
 static uint32_t s_flash_until;
 static bool s_listening;
 static bool s_field_on;              /* last toggle state painted, see ui_assist_refresh() */
 static float s_field_thresh;         /* last capture threshold painted on the badge */
+
+/** How long the result card stays up before it hides itself again. */
+#define UI_ASSIST_CARD_MS 3000
 
 /* "REC", or "REC 0.60" when capture is running a LOOSER gate than production.
    The takes on the card came from whichever detector was live, so the screen has
@@ -48,6 +53,7 @@ static void on_field(lv_event_t *e)
 void ui_show_assist(void)
 {
     bsp_display_lock(0);
+    if (s_card_timer) { lv_timer_delete(s_card_timer); s_card_timer = NULL; }
     scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_hex(UI_ASSIST_BG), 0);
     lv_obj_set_style_text_color(scr, lv_color_hex(0xe6eaef), 0);
@@ -99,6 +105,30 @@ void ui_show_assist(void)
     lv_obj_t *bl = lv_label_create(b);
     lv_label_set_text(bl, "Menu");
     lv_obj_center(bl);
+
+    /* Result card: shown for UI_ASSIST_CARD_MS by ui_assist_show_result() at
+       each window's close, hidden the rest of the time. */
+    card = lv_obj_create(scr);
+    lv_obj_set_size(card, 280, 140);
+    lv_obj_center(card);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_radius(card, 12, 0);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
+
+    l_card_text = lv_label_create(card);
+    lv_obj_set_style_text_font(l_card_text, &font_prompt_28, 0);
+    lv_obj_set_style_text_color(l_card_text, lv_color_black(), 0);
+    lv_label_set_long_mode(l_card_text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l_card_text, 256);
+    lv_obj_set_style_text_align(l_card_text, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(l_card_text, LV_ALIGN_TOP_MID, 0, 14);
+
+    l_card_words = lv_label_create(card);
+    lv_obj_set_style_text_color(l_card_words, lv_color_hex(0x2a2f36), 0);
+    lv_label_set_long_mode(l_card_words, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l_card_words, 256);
+    lv_obj_set_style_text_align(l_card_words, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(l_card_words, LV_ALIGN_BOTTOM_MID, 0, -10);
 
     lv_screen_load(scr);
     bsp_display_unlock();
@@ -154,5 +184,27 @@ void ui_assist_refresh(const wake_status_t *wst, const recognise_status_t *rst, 
                  (unsigned long)wst->infer_ms);
     }
     lv_label_set_text(l_stats, buf);
+    bsp_display_unlock();
+}
+
+/* Runs on the LVGL task's own timer, not a model task: the card's 3 s
+   lifetime is entirely LVGL-side once ui_assist_show_result() has shown it. */
+static void card_hide_cb(lv_timer_t *t)
+{
+    lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
+    s_card_timer = NULL;
+    lv_timer_delete(t);
+}
+
+void ui_assist_show_result(bool valid, const char *text, const char *heard_words)
+{
+    if (!bsp_display_lock(50)) return;      /* skip a frame rather than block the wake task */
+    lv_obj_set_style_bg_color(card, valid ? lv_palette_main(LV_PALETTE_GREEN) : lv_color_hex(0x8a94a0), 0);
+    lv_label_set_text(l_card_text, valid ? text : "nicht verstanden");
+    lv_label_set_text(l_card_words, valid ? "" : (heard_words && *heard_words ? heard_words : "(nichts gehoert)"));
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_HIDDEN);
+    if (s_card_timer) lv_timer_delete(s_card_timer);
+    s_card_timer = lv_timer_create(card_hide_cb, UI_ASSIST_CARD_MS, NULL);
+    lv_timer_set_repeat_count(s_card_timer, 1);
     bsp_display_unlock();
 }

@@ -270,8 +270,9 @@ status
 - `mode menu|record|recordwake|recognise|wake|assist|usb` — switches the app
   mode, same as tapping the matching menu/back button.
 - `status` — prints the current mode; the model stamps as
-  `models command=<id> wake=<id>`; and in record/record-wake mode also
-  the recorder's phase/index/count/speaker.
+  `models command=<id> wake=<id>`; an `intent <text>` line naming the last
+  closed assist window's parsed result (omitted before the first window);
+  and in record/record-wake mode also the recorder's phase/index/count/speaker.
 - `wakefire` — injects one synthetic wake fire down the same path as a real
   one (gate, beep, log, UI). A measurement hook for the assist-mode duty
   cycle, which cannot be exercised without fires.
@@ -376,6 +377,23 @@ the value survives a reset. With it set, a "Hey Bus" said quietly enough to peak
 below 0.85 must still fire and still produce a take — the near-miss the shipped
 gate would have dropped — while the same phrase in Assistent mode with capture
 **off** must not fire at all.
+
+Intent result card (Assistent mode): say "Hey Bus" then a valid command, e.g.
+"Licht Küche an" → within ~3 s of the window closing the screen shows a green
+card reading "Licht Küche → an"; it clears itself after ~3 s without another
+interaction. The serial log shows `intent: Licht Küche → an` at the same
+close, and `status` echoes `intent Licht Küche → an`. Say "Hey Bus" alone (no
+command word, or `wakefire -l 6` with the mic silent) → the card turns grey
+and reads "nicht verstanden" with no words underneath, and the log shows
+`intent: none ()`. Say "Hey Bus" then something ungrammatical (a device with
+no matching action, e.g. "Kühlschrank auf", or a bare command word with no
+device, e.g. "an") → same grey card, this time with the heard words printed
+underneath it, and the log names them: `intent: none (an)`. In every "nicht
+verstanden" case the confirmation double beep must **not** sound (it fires
+only behind a green card); in the valid case it must, once, after the window
+closes. None of this touches field capture: with "Aufnahme" on, the card and
+log behave identically and the take's `field.csv` row carries the same
+formatted text in `device_intent` (empty for the invalid cases).
 
 Serial commands: with the device connected over USB serial,
 `echo 'mode wake' > /dev/cu.usbmodemNNN` switches the screen to wake mode

@@ -37,6 +37,12 @@ void ui_show_assist(void);
 /** @brief Refresh the assistant screen: wake probability while idle, the recognised
  * word while the gate is open. Called from the wake and recognise tasks; takes bsp_display_lock. */
 void ui_assist_refresh(const wake_status_t *wst, const recognise_status_t *rst, bool listening);
+/** @brief Show the assist screen's result card for ~3 s: a valid intent in
+ * green (@p text, the formatted "Licht Küche → an"), or grey "nicht verstanden"
+ * plus @p heard_words (the raw fired words) when @p valid is false. Called
+ * once per window, from the wake task at the window's close; takes
+ * bsp_display_lock. */
+void ui_assist_show_result(bool valid, const char *text, const char *heard_words);
 
 /** @brief Top-level app mode, one screen/consumer task active at a time.
  * UI_MODE_RECORD_WAKE is the guided-recorder's "Hey Bus"-only session (PROMPT_WAKE);

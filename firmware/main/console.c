@@ -105,6 +105,9 @@ static void handle_line(char *line)
         printf("field %s thresh %.2f takes %lu dropped %lu\n", wake_field_get() ? "on" : "off",
                (double)wake_field_thresh_get(),
                (unsigned long)st.field_takes, (unsigned long)st.field_dropped);
+        char li[64];
+        wake_get_last_intent(li, sizeof li);
+        if (li[0]) printf("intent %s\n", li);
         if (m == UI_MODE_RECORD || m == UI_MODE_RECORD_WAKE)
             printf("phase %s index %d count %d speaker %s\n",
                    phase_name(st.phase), st.index, st.count, st.speaker);

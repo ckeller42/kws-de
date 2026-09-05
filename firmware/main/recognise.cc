@@ -369,17 +369,17 @@ static void recognise_task(void *)
         if (fired >= 0) { ESP_LOGI(TAG, "fired %s %.2f (%lu ms)", KWS_LABELS[fired], (double)probs[fired], (unsigned long)ms); log_fire(KWS_LABELS[fired], probs[fired]); }
         /* Confirmation tone. A fire on _unknown_ is the model saying it heard
            speech it has no command for, so it stays silent (stream_is_command).
-           In assist mode the tone is only *owed* here and played by the wake
-           task when the window closes — the recogniser's own deadline can
-           expire while the window is still open (a second wake fire extends the
-           gate without re-arming the deadline), and a tone inside the window
-           would be captured by the microphone and end up in a field-capture
-           take. Outside assist there is no window, so it plays straight away —
-           unless field capture is toggled on anyway (left on from testing in
-           this very mode): the toggle outlives a mode switch, and this tone's
-           tail sits in the ring right where the pre-roll of the next Assistent
-           take reaches back to, same leak as wake.cc's own tone, muted the same
-           way. beep_double() only posts to the beep task either way. */
+           Outside assist mode there is no window, so a command word beeps
+           straight away — unless field capture is toggled on anyway (left on
+           from testing in this very mode): the toggle outlives a mode switch,
+           and this tone's tail sits in the ring right where the pre-roll of
+           the next Assistent take reaches back to, same leak as wake.cc's own
+           tone, muted by the same single predicate (#64). In assist mode the
+           tone is decided at the window's close instead (wake.cc), keyed to a
+           VALID intent rather than any one fired word (#64) -- s_cmd_fired
+           here is not that decision, only a "some command word fired this
+           window" flag the close edge drains via recognise_take_command_fired()
+           so it never carries a stale value into the next window. */
         if (stream_is_command(fired)) {
             if (app_get_mode() == UI_MODE_ASSIST) s_cmd_fired = true;
             else if (!wake_field_get()) beep_double();

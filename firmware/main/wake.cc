@@ -18,6 +18,7 @@
 #include "gen/wake_model_config.h"
 #include "gen/wake_model_data.h"
 #include "infer_lock.h"
+#include "intent.h"
 #include "nn_timers.h"
 #include "nvs.h"
 #include "recognise.h"
@@ -91,6 +92,7 @@ static field_state_t s_field;        /* assist mode only: opt-in capture of real
 static uint32_t s_fire_ms;           /* ms-since-boot of the fire that armed s_field */
 static float s_fire_prob;            /* wake probability at that fire */
 static volatile bool s_field_persist; /* a capture setting changed mid-window: NVS write still owed */
+static char s_last_intent[64];       /* last window's formatted intent, "none" if invalid; s_lock-guarded, `status` only */
 
 /* Both persisted capture settings in one flash transaction: the toggle and the
    capture threshold. The threshold rides along as hundredths, which is exactly
@@ -121,7 +123,9 @@ static void log_fire(uint32_t ms, float prob)
 /* The window has closed: hand the recorder the span to copy. NOTHING is written
    here — the copy and the FAT write happen on the record task, with the
    recogniser already off, so no I/O can lengthen a recognise step. */
-static void post_field_take(uint32_t close_ms)
+/* @param intent_text The window's parsed, formatted intent ("" if invalid) --
+ * computed once at the window's close, see the assist_gate_tick() branch below. */
+static void post_field_take(uint32_t close_ms, const char *intent_text, const char *words)
 {
     field_take_t t = {};
     bool truncated = false;
@@ -136,10 +140,8 @@ static void post_field_take(uint32_t close_ms)
         /* The prediction may only name fires whose audio is in the WAV. A cut
            take cannot say which those are, so it carries none and travels as an
            unknown-prediction take — a case the QC pipeline already handles. */
-        recognise_status_t rst;
-        recognise_get_status(&rst);
-        strlcpy(t.intent, rst.window_intent, sizeof t.intent);
-        strlcpy(t.words, rst.window_words, sizeof t.words);
+        strlcpy(t.intent, intent_text, sizeof t.intent);
+        strlcpy(t.words, words, sizeof t.words);
     }
     record_post_field_take(&t);
 }
@@ -399,20 +401,37 @@ static void wake_task(void *)
                         recognise_listen_for(ASSIST_WINDOW_MS);
                     } else {
                         recognise_set_active(false);
-                        post_field_take(now_ms);
+                        /* Parse the window's fired words once, here, at the
+                           close edge: the CSV row, the console log, the result
+                           card and the confirmation tone all read the same
+                           verdict instead of each re-deriving it. */
+                        recognise_status_t rst;
+                        recognise_get_status(&rst);
+                        intent_t iv = intent_parse(rst.window_intent);
+                        char text[64];
+                        intent_format(&iv, text, sizeof text);
+                        if (iv.valid) ESP_LOGI(TAG, "intent: %s", text);
+                        else ESP_LOGI(TAG, "intent: none (%s)", rst.window_intent);
+                        xSemaphoreTake(s_lock, portMAX_DELAY);
+                        strlcpy(s_last_intent, iv.valid ? text : "none", sizeof s_last_intent);
+                        xSemaphoreGive(s_lock);
+                        ui_assist_show_result(iv.valid, text, rst.window_intent);
+                        post_field_take(now_ms, text, rst.window_words);
                         /* The window is shut, and the take's span is already
                            handed to the recorder above: the tone the recogniser
                            owes for a recognised command can sound now, where the
                            mic can no longer capture it into the window's audio.
-                           Muted while field capture is on, for the same reason
-                           the wake tone is (below) — with capture armed the user
-                           has chosen a silent device, and a take must never
-                           contain a beep. Taken unconditionally so a muted tone
-                           is dropped rather than left owed and played at some
-                           later window's close. beep_double() posts to the beep
-                           task, so this edge costs nothing (see recognise.h). */
-                        bool tone_owed = recognise_take_command_fired();
-                        if (tone_owed && !s_field.enabled) beep_double();
+                           Keyed to a VALID intent (#64), not merely a command
+                           word firing: a heard-but-ungrammatical window (wrong
+                           order, missing device, ...) is not a confirmed command
+                           and must not sound like one. Muted while field capture
+                           is on, for the same reason the wake tone is (below) —
+                           with capture armed the user has chosen a silent
+                           device, and a take must never contain a beep.
+                           beep_double() posts to the beep task, so this edge
+                           costs nothing (see recognise.h). */
+                        recognise_take_command_fired(); /* clears the window's stale per-fire flag; unused for the tone now */
+                        if (iv.valid && !s_field.enabled) beep_double();
                         /* The window is shut: an NVS write owed by a mid-window
                            toggle (wake_field_set) can be paid now. */
                         if (s_field_persist) { s_field_persist = false; field_persist(); }
@@ -508,6 +527,13 @@ extern "C" void wake_get_status(wake_status_t *out)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *out = s_st;
+    xSemaphoreGive(s_lock);
+}
+
+extern "C" void wake_get_last_intent(char *buf, size_t n)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    strlcpy(buf, s_last_intent, n);
     xSemaphoreGive(s_lock);
 }
 
