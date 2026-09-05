@@ -6,7 +6,7 @@ a whole. This does, and it is the check that would have caught #58 before a wake
 round trained on the result:
 
 * every clip readable, 16 kHz mono PCM_16, and inside its set's duration band
-  (wake 0.4-2.0 s, words ~1 s, phrases 0.5-9.8 s, negatives up to 9.8 s);
+  (wake 0.4-2.6 s, words ~1 s, phrases 0.5-9.8 s, negatives up to 9.8 s);
 * no phrase or negative that still contains the wake phrase — the field-derived
   ones are transcribed and matched against `qc._WAKE_RE`. Guided clips were
   already matched against their prompt at QC time, so they are not re-transcribed;
@@ -40,7 +40,7 @@ SETS = ("words", "phrases", "negatives", "wake")
 # bare word takes are raw ~1 s recordings, so the band is around 1 s rather than at it.
 DURATION_S = {
     "words": (0.5, 2.0),
-    "wake": (0.4, 2.0),
+    "wake": (0.4, 2.6),  # a field-cut clip carries the 2.5 s pre-roll budget in front of the phrase
     "phrases": (0.5, 9.8),
     "negatives": (0.3, 9.8),
 }

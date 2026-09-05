@@ -270,7 +270,7 @@ Auditing the whole tree
    $ uv run --no-sync python scripts/audit-approved.py [--no-transcribe]
 
 It checks that every clip is readable 16 kHz mono PCM_16 and inside its
-set's duration band (wake 0.4-2.0 s, words around 1 s, phrases 0.5-9.8 s,
+set's duration band (wake 0.4-2.6 s, words around 1 s, phrases 0.5-9.8 s,
 negatives up to 9.8 s), that each ``index.csv`` and its directory agree in
 both directions, that speaker directories are named ``spkNN``, and — by
 transcribing the field-derived ``phrases``/``negatives`` clips — that none of
