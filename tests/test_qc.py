@@ -640,6 +640,35 @@ def _field_transcriber(p: Path):
     }
 
 
+def test_run_qc_command_cut_by_the_take_end_is_not_filed_as_a_stub(tmp_path):
+    # Whisper's last words run past the take's end (it transcribes with padding):
+    # "Hey Bus, Licht an. Hey Bus, Licht an." on a 4.0 s take, the second command
+    # cut by the window. The span after the last wake phrase is 0.15 s of real
+    # audio, not 0.65 s — clamp to the take before judging, and file nothing.
+    def transcriber(p: Path):
+        return {
+            "text": "Hey Bus Licht an Hey Bus Licht an",
+            "words": [
+                {"word": "Hey", "start": 0.10, "end": 0.35},
+                {"word": "Bus", "start": 0.36, "end": 0.60},
+                {"word": "Licht", "start": 1.40, "end": 1.70},
+                {"word": "an", "start": 1.75, "end": 1.95},
+                {"word": "Hey", "start": 3.20, "end": 3.50},
+                {"word": "Bus", "start": 3.50, "end": 3.70},
+                {"word": "Licht", "start": 3.78, "end": 3.98},
+                {"word": "an", "start": 3.98, "end": 4.15},
+            ],
+        }
+
+    inc = _field_session(tmp_path, "Licht an")
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["wake_written"] == 1
+    phrases = appr / "phrases" / "spk05"
+    assert not phrases.exists() or not list(phrases.glob("*.wav"))
+    assert counts["field_parsable"] == 1  # the label is right; only the clip is unusable
+
+
 def test_run_qc_field_take_splits_wake_labels_by_grammar_and_scores_agreement(tmp_path):
     inc = _field_session(tmp_path, "Licht Küche an")
     qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
