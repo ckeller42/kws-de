@@ -91,8 +91,8 @@ int intent_format(const intent_t *in, char *buf, int n)
         return 0;
     }
     int k = in->zone
-        ? snprintf(buf, (size_t)n, "%s %s → %s%s", in->device, in->zone, in->action,
+        ? snprintf(buf, (size_t)n, "%s %s -> %s%s", in->device, in->zone, in->action,
                    in->level ? " Prozent" : "")
-        : snprintf(buf, (size_t)n, "%s → %s%s", in->device, in->action, in->level ? " Prozent" : "");
+        : snprintf(buf, (size_t)n, "%s -> %s%s", in->device, in->action, in->level ? " Prozent" : "");
     return k < 0 ? 0 : k;
 }

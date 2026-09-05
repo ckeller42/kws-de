@@ -89,8 +89,8 @@ whether the production gate would have fired at all
 the window's fired words are parsed on-device (``firmware/main/intent.c``, a
 C port of ``kws_de.grammar.parse()``, host-tested against it case for case in
 ``firmware/test/test_intent.c``) into a device/zone/action intent. A valid
-parse shows green with the formatted result, e.g. "Licht Küche → an" or
-"Licht → fünfzig Prozent"; anything else — missing device, wrong order, an
+parse shows green with the formatted result, e.g. "Licht Küche -> an" or
+"Licht -> fünfzig Prozent"; anything else — missing device, wrong order, an
 action the device does not support — shows grey "nicht verstanden" plus the
 words the recogniser actually heard. The confirmation double beep above is
 keyed to this same verdict. The console logs ``intent: <text>`` or
@@ -339,7 +339,7 @@ The console port accepts newline-terminated commands
   ``models command=<id> wake=<id>``, the live recording volume as
   ``storage sd <free>/<total> MB`` or ``storage flash <free>/<total> KB``
   (:need:`REQ_FW_STORAGE_SD`), an ``intent <text>`` line naming the last
-  closed assist window's parsed result (``intent Licht Küche → an`` or
+  closed assist window's parsed result (``intent Licht Küche -> an`` or
   ``intent none``, omitted before the first window), and in record/record-wake
   mode also the recorder's phase/index/count/speaker.
 - ``wakefire`` injects one synthetic wake fire down the same path as a real
