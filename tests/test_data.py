@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 
 from kws_de import config, tts
@@ -6,6 +8,7 @@ from kws_de.data import (
     _tts_combo_plan,
     build_dataset,
     make_transition_windows,
+    passing_voices,
     split_by_speaker,
     split_three_way,
     tts_engines,
@@ -251,6 +254,50 @@ def test_tts_combo_plan_cycles_past_pool_exhaustion_still_balanced(monkeypatch, 
     counts = Counter(e for e, _, _ in combos)
     assert len(combos) == 2000
     assert counts["say"] == counts["piper"] == 1000
+
+
+def test_passing_voices_caches_a_verdict_per_voice(monkeypatch, tmp_path):
+    monkeypatch.setattr("kws_de.data.voice_gate_cache_path", lambda: tmp_path / "cache.json")
+    calls = []
+
+    def fake_voice_gate(engine, voice, transcriber):
+        calls.append(voice)
+        return {
+            "engine": engine,
+            "voice": voice,
+            "ok": voice != "bad",
+            "reason": None,
+            "transcript": "",
+        }
+
+    monkeypatch.setattr("kws_de.qc.voice_gate", fake_voice_gate)
+    voices = ["good", "bad"]
+    first = passing_voices("piper", transcriber=None, voices=voices)
+    assert first == ["good"]
+    assert calls == ["good", "bad"]  # both gated once
+
+    second = passing_voices("piper", transcriber=None, voices=voices)
+    assert second == ["good"]
+    assert calls == ["good", "bad"]  # cache hit: no new gate calls
+
+    cache = json.loads((tmp_path / "cache.json").read_text())
+    assert set(cache) == {"piper:good", "piper:bad"}
+    assert cache["piper:good"]["ok"] is True and "date" in cache["piper:good"]
+
+
+def test_passing_voices_filters_out_a_bad_mls_medium_speaker(monkeypatch, tmp_path):
+    # A multi-speaker Piper voice's speakers (de_DE-mls-medium#N) are separate entries
+    # already, so a bad one is dropped without touching the good ones (E27/E23: most of
+    # that pool is not German).
+    monkeypatch.setattr("kws_de.data.voice_gate_cache_path", lambda: tmp_path / "cache.json")
+
+    def fake_voice_gate(engine, voice, transcriber):
+        ok = not voice.startswith("de_DE-mls-medium")
+        return {"engine": engine, "voice": voice, "ok": ok, "reason": None, "transcript": ""}
+
+    monkeypatch.setattr("kws_de.qc.voice_gate", fake_voice_gate)
+    voices = ["de_DE-thorsten-medium", "de_DE-mls-medium#0", "de_DE-mls-medium#1"]
+    assert passing_voices("piper", transcriber=None, voices=voices) == ["de_DE-thorsten-medium"]
 
 
 def test_split_three_way_is_speaker_disjoint_and_covers_all():

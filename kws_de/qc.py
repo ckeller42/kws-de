@@ -395,17 +395,35 @@ def audio_gate(path: Path, set_name: str) -> tuple[dict, str | None]:
 # ENGLISH voice when the German voice pack is not installed on the generating host, and it
 # says so nowhere: a device test once played "German" clips that were English, and only a
 # human ear caught it. Whisper's own language id is the check that would have caught it.
-TTS_MIN_S = 0.3
+# 0.25s (not the original 0.3s): `say`'s only synthesis of "an" measures 0.28s at every
+# rate tried (E23) and is otherwise a perfectly good clip — the floor existed to catch
+# near-silent junk, not to reject the shortest real command word in the vocabulary.
+TTS_MIN_S = 0.25
 TTS_MAX_S = 10.0
+
+
+def tts_cheap_gate(mono: np.ndarray, sr: int) -> tuple[bool, str | None]:
+    """The no-model checks `tts_gate` runs before ever transcribing: duration in
+    [TTS_MIN_S, TTS_MAX_S], not silent. Exposed standalone for the voice-gated per-clip
+    path (`kws_de.data._tts_fill_word`): once a voice has passed `voice_gate`, every
+    further clip from it only needs its audio to be sane — the voice-level check already
+    answered "is this voice German and does it say what it's told"."""
+    dur = len(mono) / sr if sr else 0.0
+    if not TTS_MIN_S <= dur <= TTS_MAX_S:
+        return False, f"duration:{dur:.2f}s"
+    rms = float(np.sqrt(np.mean(mono**2))) if len(mono) else 0.0
+    if 20 * np.log10(max(rms, 1e-9)) < MIN_RMS_DBFS:
+        return False, "silent"
+    return True, None
 
 
 def tts_gate(path: Path, text: str, transcriber: Transcriber) -> tuple[bool, str | None]:
     """Is the clip at ``path`` really ``text``, really spoken in German?
 
-    Cheap checks first (readable, 0.3-10 s, not silent — no model), then ONE
-    transcription: the detected language must be German, and the transcript must also
-    pass the same content rules a recorded take does: the ``wake`` rule for the wake
-    phrase, the order-tolerant ``sentences`` rule for anything else.
+    Cheap checks first (readable, then `tts_cheap_gate` — duration, not silent — no
+    model), then ONE transcription: the detected language must be German, and the
+    transcript must also pass the same content rules a recorded take does: the ``wake``
+    rule for the wake phrase, the order-tolerant ``sentences`` rule for anything else.
 
     ``transcriber`` must report the DETECTED language, i.e.
     ``whisper_transcriber(language=None)`` — one that forces ``language="de"`` would
@@ -417,13 +435,9 @@ def tts_gate(path: Path, text: str, transcriber: Transcriber) -> tuple[bool, str
         sig, sr = sf.read(path, dtype="float32", always_2d=True)
     except Exception as e:  # corrupt/missing wav -> reject this clip, not the batch
         return False, f"unreadable:{type(e).__name__}"
-    mono = sig[:, 0]
-    dur = len(mono) / sr if sr else 0.0
-    if not TTS_MIN_S <= dur <= TTS_MAX_S:
-        return False, f"duration:{dur:.2f}s"
-    rms = float(np.sqrt(np.mean(mono**2))) if len(mono) else 0.0
-    if 20 * np.log10(max(rms, 1e-9)) < MIN_RMS_DBFS:
-        return False, "silent"
+    ok, reason = tts_cheap_gate(sig[:, 0], sr)
+    if not ok:
+        return False, reason
     tr = transcriber(path)
     lang = str(tr.get("language") or "?").lower()
     if lang != "de":
@@ -431,6 +445,61 @@ def tts_gate(path: Path, text: str, transcriber: Transcriber) -> tuple[bool, str
     set_name = "wake" if _WAKE_RE.fullmatch("".join(normalise(text))) else "sentences"
     _score, reason = content_gate(set_name, text, tr.get("text", ""))
     return reason is None, reason
+
+
+# One fixed German sentence every candidate TTS voice is measured against, not per-clip
+# Whisper checking (round-6d, train/mww/README.md): a voice that gets this sentence
+# right says every command word right too, and a voice that gets it wrong (wrong
+# language, or Whisper can barely make out the words) would fail every short command
+# clip it's asked for anyway — the failure mode is a voice, not a clip.
+VOICE_GATE_SENTENCE = "Bitte schalte das Licht in der Küche an und die Heizung im Bad aus"
+VOICE_GATE_MIN_SCORE = 0.9
+VOICE_GATE_RATE = 160  # wpm; a normal speaking rate, not an augmentation extreme
+
+
+def voice_gate(engine: str, voice: str, transcriber: Transcriber, synth=None) -> dict:
+    """Pass/fail one TTS voice: synthesize `VOICE_GATE_SENTENCE` with it and judge the
+    voice, not a clip. Pass iff the detected language is `de` and at least
+    `VOICE_GATE_MIN_SCORE` of the sentence's tokens are heard, in order (the same
+    order-tolerant match `content_gate` uses for a "sentences" take).
+
+    `synth` defaults to `kws_de.tts.synthesize`; injectable for tests. Returns a plain
+    dict — ``{"engine", "voice", "ok", "reason", "transcript"}`` — the shape
+    `kws_de.data.passing_voices` caches one entry of per voice."""
+    import tempfile
+
+    synth = synth or tts.synthesize
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = Path(tmp) / f"{voice.replace('/', '_')}.wav"
+        audio = synth(VOICE_GATE_SENTENCE, engine, voice, VOICE_GATE_RATE, wav)
+        if audio is None:
+            return {
+                "engine": engine,
+                "voice": voice,
+                "ok": False,
+                "reason": "synth_failed",
+                "transcript": "",
+            }
+        tr = transcriber(wav)
+    transcript = tr.get("text", "").strip()
+    lang = str(tr.get("language") or "?").lower()
+    if lang != "de":
+        return {
+            "engine": engine,
+            "voice": voice,
+            "ok": False,
+            "reason": f"language:{lang}",
+            "transcript": transcript,
+        }
+    score, reason = content_gate("sentences", VOICE_GATE_SENTENCE, transcript)
+    ok = score >= VOICE_GATE_MIN_SCORE
+    return {
+        "engine": engine,
+        "voice": voice,
+        "ok": ok,
+        "reason": None if ok else (reason or f"score:{score:.2f}"),
+        "transcript": transcript,
+    }
 
 
 def judge(take: Take, transcriber: Transcriber) -> tuple[QcRow, Transcript]:

@@ -568,7 +568,9 @@ def tts_engines() -> list[str]:
     return tts.available_engines()
 
 
-def _tts_combo_plan(word: str, n: int, engines: list[str]) -> list[tuple[str, str, int]]:
+def _tts_combo_plan(
+    word: str, n: int, engines: list[str], voices_by_engine: dict[str, list[str]] | None = None
+) -> list[tuple[str, str, int]]:
     """Pure selection logic: `n` (engine, voice, rate) combos to synthesize `word` with,
     drawn round-robin across `engines` (kws_de.tts.voice_combos) so multiple engines
     contribute EQUALLY — plain round-robin alone stops being balanced once the smallest
@@ -577,11 +579,20 @@ def _tts_combo_plan(word: str, n: int, engines: list[str]) -> list[tuple[str, st
     voice/rate combos), CYCLES back through it to reach n — engines whose backend is
     stochastic per call (e.g. Piper's noise_scale) still produce fresh distinct audio on
     a repeat; deterministic ones (macOS `say`) produce an exact repeat, no worse than
-    the redundancy any oversampling scheme adds. No backends touched."""
+    the redundancy any oversampling scheme adds. No backends touched.
+
+    `voices_by_engine`, when given, overrides `kws_de.tts.engine_voices` per engine —
+    the voice-gated build passes only gate-passing voices; an engine with none left is
+    dropped rather than skewing the round-robin with an empty pool."""
+
+    def voices(e: str) -> list[str]:
+        return voices_by_engine[e] if voices_by_engine is not None else tts.engine_voices(e)
+
+    engines = [e for e in engines if voices(e)]
     if not engines:
         return []
-    pool = min(len(tts.engine_voices(e)) * len(tts.RATES) for e in engines)
-    base = tts.voice_combos(len(engines) * pool, engines)
+    pool = min(len(voices(e)) * len(tts.RATES) for e in engines)
+    base = tts.voice_combos(len(engines) * pool, engines, voices_by_engine)
     if not base:
         return []
     reps = -(-max(n, 0) // len(base))  # ceil division
@@ -604,7 +615,55 @@ def tts_gate_transcriber():  # pragma: no cover - loads Whisper
         return None
 
 
-def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=None) -> list:
+VOICE_GATE_CACHE_NAME = "tts_voice_gate.json"
+
+
+def voice_gate_cache_path() -> Path:
+    return config.DATA_DIR / VOICE_GATE_CACHE_NAME
+
+
+def passing_voices(engine: str, transcriber, voices: list[str] | None = None) -> list[str]:
+    """Voices for `engine` that pass `kws_de.qc.voice_gate`, cached by `f"{engine}:{voice}"`
+    in `voice_gate_cache_path()` (default `$KWS_DATA_ROOT/data/tts_voice_gate.json`) so a
+    voice is gated once, ever — its audio doesn't change, so a cached verdict never
+    expires. `voices` overrides `kws_de.tts.engine_voices(engine)` (mainly for tests);
+    a multi-speaker Piper voice's speakers (`de_DE-mls-medium#N`) are already separate
+    entries there, so each is gated and cached independently."""
+    import json
+    from datetime import date
+
+    from kws_de.qc import voice_gate
+
+    path = voice_gate_cache_path()
+    try:
+        cache = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        cache = {}
+    dirty = False
+    out = []
+    for v in voices if voices is not None else tts.engine_voices(engine):
+        key = f"{engine}:{v}"
+        entry = cache.get(key)
+        if entry is None:
+            entry = voice_gate(engine, v, transcriber)
+            entry["date"] = date.today().isoformat()
+            cache[key] = entry
+            dirty = True
+        if entry.get("ok"):
+            out.append(v)
+    if dirty:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache, indent=2, sort_keys=True, ensure_ascii=False))
+    return out
+
+
+def _tts_fill_word(
+    word: str,
+    n: int,
+    tmp_dir: Path,
+    max_workers: int = 4,
+    voices_by_engine: dict[str, list[str]] | None = None,
+) -> list:
     # pragma: no cover - shells out / loads models
     """Synthesize up to n clips of `word` across all engines from `tts_engines()`
     (parallelized — each synthesis call is independent, so this is I/O/compute-bound and
@@ -612,30 +671,31 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=
     [(np.ndarray, speaker_id)] with speaker_id="tts:{engine}:{voice}" — rate is augmentation,
     not identity, so the speaker-disjoint split holds out whole voices.
 
-    With a `gate` transcriber (`tts_gate_transcriber()`), every clip is judged by
-    `kws_de.qc.tts_gate` before it is kept: a clip that is not German, or does not say
-    `word`, is DROPPED and counted, never silently mixed into the training data. Dropped
-    clips are not re-synthesized — the same voice would produce the same clip again."""
+    `voices_by_engine` (from `passing_voices`, one Whisper pass per VOICE, not per clip)
+    restricts synthesis to voices that already passed `kws_de.qc.voice_gate`; every clip
+    then only needs `kws_de.qc.tts_cheap_gate` (duration, not silent — no model) before
+    being kept, since the voice-level gate already answered "is this German and does
+    this voice say what it's told". `voices_by_engine=None` synthesizes from every known
+    voice, ungated — the caller decides."""
     from concurrent.futures import ThreadPoolExecutor
 
-    from kws_de.qc import tts_gate
+    from kws_de.qc import tts_cheap_gate
 
-    combos = _tts_combo_plan(word, n, tts_engines())
+    combos = _tts_combo_plan(word, n, tts_engines(), voices_by_engine)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     def _job(args):
         i, (engine, voice, rate) = args
         wav = tmp_dir / f"{word}_{i}.wav"
         audio = tts.synthesize(word, engine, voice, rate, wav)
-        return None if audio is None else (wav, audio, f"tts:{engine}:{voice}")
+        wav.unlink(missing_ok=True)
+        return None if audio is None else (audio, f"tts:{engine}:{voice}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         results = [r for r in ex.map(_job, enumerate(combos)) if r is not None]
-    # The gate runs here, single-threaded: one Whisper model, not one per worker.
     kept, dropped = [], {}
-    for wav, audio, speaker in results:
-        ok, reason = (True, None) if gate is None else tts_gate(wav, word, gate)
-        wav.unlink(missing_ok=True)
+    for audio, speaker in results:
+        ok, reason = tts_cheap_gate(audio, config.SAMPLE_RATE)
         if ok:
             kept.append((audio, speaker))
         else:
@@ -647,13 +707,18 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=
 
 def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragma: no cover
     """Top up any word (from `words`, default `config.COMMANDS`) under `target`
-    real clips with TTS clips that passed the synthetic-clip gate. Returns
+    real clips with TTS clips from gate-passing voices only. Returns
     {word: n_tts_kept}."""
     import shutil
 
     words = list(words) if words is not None else config.COMMANDS
     tmp_dir = config.DATA_DIR / "tts_tmp"
-    gate = tts_gate_transcriber()
+    transcriber = tts_gate_transcriber()
+    # One voice-gate pass per (engine, voice), cached, up front — not per word: the
+    # voice's German-ness doesn't depend on which command it is about to say.
+    voices_by_engine = (
+        {e: passing_voices(e, transcriber) for e in tts_engines()} if transcriber else None
+    )
     added = {}
     for cmd in words:
         have = len(clips.get(cmd, []))
@@ -661,7 +726,7 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
             continue
         need = target - have
         print(f"[tts] {cmd}: {have} real clips, synthesizing {need} more")
-        new = _tts_fill_word(cmd.lower(), need, tmp_dir, gate=gate)
+        new = _tts_fill_word(cmd.lower(), need, tmp_dir, voices_by_engine=voices_by_engine)
         clips.setdefault(cmd, []).extend(new)
         added[cmd] = len(new)
     shutil.rmtree(tmp_dir, ignore_errors=True)  # clips, and the manifest beside them

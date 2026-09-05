@@ -1136,6 +1136,58 @@ def test_tts_gate_rejects_a_transcript_with_no_language(tmp_path):
     )
 
 
+def test_tts_cheap_gate_accepts_says_0_28s_an_rejects_shorter():
+    # `say`'s only synthesis of "an" measures 0.28s at every rate tried (E23) — the
+    # lowered TTS_MIN_S=0.25 exists specifically so this real clip is not thrown away.
+    ok, reason = qc.tts_cheap_gate(_tone(ms=280), sr=16000)
+    assert ok and reason is None
+    ok, reason = qc.tts_cheap_gate(_tone(ms=200), sr=16000)
+    assert not ok and reason.startswith("duration:")
+
+
+# --- voice-level gate -------------------------------------------------------------
+
+
+def _stub_synth(by_voice: dict):
+    """`kws_de.tts.synthesize`-shaped stand-in: touches `out_wav` (content irrelevant —
+    the injected transcriber below keys off the file name, not real audio) and returns
+    a non-None array iff `voice` is in `by_voice`."""
+
+    def synth(word, engine, voice, rate, out_wav):
+        if voice not in by_voice:
+            return None
+        Path(out_wav).touch()
+        return _tone(ms=900)
+
+    return synth
+
+
+def test_voice_gate_pass(tmp_path):
+    tr = _fake_tts_transcriber({"good.wav": (qc.VOICE_GATE_SENTENCE, "de")})
+    result = qc.voice_gate("piper", "good", tr, synth=_stub_synth({"good": None}))
+    assert result == {
+        "engine": "piper",
+        "voice": "good",
+        "ok": True,
+        "reason": None,
+        "transcript": qc.VOICE_GATE_SENTENCE,
+    }
+
+
+def test_voice_gate_fails_wrong_language():
+    tr = _fake_tts_transcriber({"bad.wav": ("something else entirely", "en")})
+    result = qc.voice_gate("piper", "bad", tr, synth=_stub_synth({"bad": None}))
+    assert result["ok"] is False
+    assert result["reason"] == "language:en"
+
+
+def test_voice_gate_fails_below_90_percent_content_match():
+    # German, but only about half the calibration sentence's tokens are heard.
+    tr = _fake_tts_transcriber({"half.wav": ("Bitte schalte das Licht", "de")})
+    result = qc.voice_gate("piper", "half", tr, synth=_stub_synth({"half": None}))
+    assert result["ok"] is False
+
+
 def _tts_dir(tmp_path):
     """Three synthesised clips with the manifest kws_de.tts.synthesize writes."""
     from kws_de import tts

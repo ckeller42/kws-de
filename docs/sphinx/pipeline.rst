@@ -296,27 +296,42 @@ that were English throughout, and only a listener caught it. Measured on a
 Mac that *does* have the German voice packs, ``say -v Eddy`` and ``say -v
 Flo`` produced the same English audio as ``say -v Samantha`` for German text.
 
-Two mechanisms, and both are needed:
+Three mechanisms, and all three are needed:
 
 - ``kws_de.tts.engine_voices("say")`` asks ``say -v '?'`` which German voices
   are really installed and uses their **full** names ("Eddy (German
   (Germany))"), falling back to the static pool only when discovery comes up
   empty. That prevents the common case.
-- ``kws_de.qc.tts_gate(path, text, transcriber)`` judges an individual clip:
-  readable, 0.3-10 s, not silent (none of which needs a model), then one
-  Whisper transcription in which the **detected** language must be ``de`` —
-  so the transcriber has to be ``whisper_transcriber(language=None)``, since
-  forcing ``language="de"`` answers "de" for an English clip — and the
-  transcript must pass the same content rules a recorded take does: the
-  ``wake`` rule for the wake phrase, the order-tolerant ``sentences`` rule
-  for anything else. A transcript carrying no language at all is rejected,
-  not trusted. That catches everything else, including a clip that came out
-  garbled or truncated.
+- ``kws_de.qc.voice_gate(engine, voice, transcriber)`` judges a whole
+  **voice**, once, not a clip: it synthesizes one fixed German calibration
+  sentence (``VOICE_GATE_SENTENCE``) with that voice and passes iff the
+  detected language is ``de`` and at least 90% of the sentence's tokens are
+  heard, in order. A voice that gets a full sentence right says every short
+  command word right too, and a voice that gets it wrong would fail every
+  clip it's asked for anyway (E27, round-6d) — so a failing voice is dropped
+  entirely rather than judged clip-by-clip. ``kws_de.data.passing_voices``
+  caches one verdict per ``engine:voice`` in
+  ``$KWS_DATA_ROOT/data/tts_voice_gate.json`` (voice, engine, ok, reason,
+  transcript, date) — a voice's audio doesn't change, so a cached verdict
+  never expires. A multi-speaker Piper voice's speakers
+  (``de_DE-mls-medium#N``) are separate voice ids already, so each is gated
+  and cached on its own.
+- ``kws_de.qc.tts_gate(path, text, transcriber)`` judges an individual clip
+  the strict way, still used by ``kws-tts-check`` and device tests: readable,
+  ``TTS_MIN_S``-10 s, not silent (``kws_de.qc.tts_cheap_gate`` — none of which
+  needs a model), then one Whisper transcription in which the **detected**
+  language must be ``de`` — so the transcriber has to be
+  ``whisper_transcriber(language=None)``, since forcing ``language="de"``
+  answers "de" for an English clip — and the transcript must pass the same
+  content rules a recorded take does: the ``wake`` rule for the wake phrase,
+  the order-tolerant ``sentences`` rule for anything else. ``TTS_MIN_S`` is
+  0.25 s, not 0.3 s: ``say``'s only synthesis of "an" measures 0.28 s at
+  every rate tried (E23) and is otherwise a perfectly good clip.
 
 Every synthesis writes a ``manifest.csv`` (``file,text,voice,engine``) next
 to the clips, because a clip whose intended text is recorded nowhere cannot
-be checked at all. ``kws-tts-check <dir-or-manifest>`` runs the gate over a
-whole directory, writes ``tts_check.csv``
+be checked at all. ``kws-tts-check <dir-or-manifest>`` runs ``tts_gate`` over
+a whole directory, writes ``tts_check.csv``
 (``file,voice,engine,ok,reason,language,transcript``), prints an ok/failed
 summary **per engine and voice** — so a whole voice that is not German reads
 as 100 % failed rather than as scattered bad luck — and exits non-zero if any
@@ -325,21 +340,22 @@ rerun of whatever consumes the directory cannot pick them up again.
 
 Where it runs:
 
-- ``kws-dataset build``'s TTS top-up (``kws_de.data._tts_fill_word``) gates
-  every clip it synthesises and drops the failures, printing the count and
-  the reasons per word. A dropped clip is **not** re-synthesised: the same
-  voice would produce the same clip again. ``KWS_TTS_GATE=0`` disables the
-  gate for a deliberately offline build, and without mlx-whisper installed it
-  is disabled too — but it says so, never silently.
-- ``scripts/wake-retrain.sh`` runs ``kws-tts-check`` over the synthetic
-  positive/negative directories (``WAKE_TTS_DIRS``) *before* feature
-  generation, so a bad synthetic set cannot become features.
+- ``kws-dataset build``'s TTS top-up (``kws_de.data._fill_with_tts``) gates
+  every candidate voice once via ``passing_voices`` before synthesizing any
+  command word with it, then ``kws_de.data._tts_fill_word`` synthesizes only
+  from passing voices and drops a clip on ``tts_cheap_gate`` alone — no
+  per-clip Whisper pass. ``KWS_TTS_GATE=0`` disables voice gating for a
+  deliberately offline build, and without mlx-whisper installed it is
+  disabled too — but it says so, never silently.
+- ``scripts/wake-retrain.sh`` runs ``kws-tts-check`` (the strict per-clip
+  gate) over the synthetic positive/negative directories (``WAKE_TTS_DIRS``)
+  *before* feature generation, so a bad synthetic set cannot become features.
 - Device tests: clips played at the device's microphone must pass
   ``kws-tts-check`` first (``firmware/README.md``).
 
-The gate is deliberately conservative: a clip rejected on content is dropped,
-never repaired, and a weak voice loses clips that way. On a seven-clip real
-sample ``de_DE-eva_k-x_low`` said "liegt an" for "Licht an" and
+The per-clip gate is deliberately conservative where it still runs: a clip
+rejected on content is dropped, never repaired. On a seven-clip real sample
+``de_DE-eva_k-x_low`` said "liegt an" for "Licht an" and
 ``de_DE-kerstin-low`` produced 0.37 s that Whisper could not transcribe at
 all; both were rejected. That is the right trade — a synthetic clip is cheap,
 a mislabelled one is not.

@@ -132,13 +132,17 @@ carry the same syllables, all with `truth: false`, in their own feature dir adde
 the existing negative weights rather than paid for out of them.
 
 **Nothing synthesised is used on trust.** A device test once played English `say` voices believed
-to be German. Every generated clip is checked with Whisper before it is kept, at two levels:
+to be German. This round's inline calibration check is now the repo-level
+`kws_de.qc.voice_gate(engine, voice, transcriber)` (E27's `feat/tts-voice-gate`) — use that
+instead of an inline copy. Two levels, same as when this was written here:
 
 - **voice gate, always enforced** — one fixed German calibration sentence per voice must come
   back with detected language `de` and at least 90 % of its tokens (the in-order matcher
   `kws_de.qc.content_gate` uses for sentences). All seven cached `de_DE-*` Piper voices pass;
   both English `say` voices tried as a negative control are rejected at `lang=en`, which is
-  exactly the failure this is for. A voice that fails is dropped entirely.
+  exactly the failure this is for. A voice that fails is dropped entirely —
+  `kws_de.data.passing_voices` caches the verdict in `$KWS_DATA_ROOT/data/tts_voice_gate.json`
+  so a voice is never re-gated.
 - **per-clip check, enforced where Whisper is reliable** — same two conditions, applied as a
   hard filter to clips whose intended text has 5+ tokens, and logged but not enforced below
   that. Measured: for correct German Piper output of a 0.4 s "hey du" or "hallo bus", Whisper
@@ -146,9 +150,10 @@ to be German. Every generated clip is checked with Whisper before it is kept, at
   "Licht Küche" in *every* voice. Enforcing the check there would throw away precisely the
   near-misses the round exists to train on. Log per-voice pass counts in the report either way —
   they are how `de_DE-mls-medium`'s poor short-phrase output was found (1/7 clips pass, against
-  4–5/7 for the other voices, while passing the long calibration sentence).
-
-(If the repo-level `kws-tts-check` CLI has landed, use it instead of an inline copy.)
+  4–5/7 for the other voices, while passing the long calibration sentence). This is why the
+  repo-level `kws-dataset build` path (`kws_de.data._tts_fill_word`) runs voice-gated clips
+  through only the cheap `kws_de.qc.tts_cheap_gate` (duration/silence, no model) rather than a
+  per-clip Whisper pass — the voice already cleared the bar this bullet is working around.
 
 ### 6. Gate the synthetic clips before they become features
 
