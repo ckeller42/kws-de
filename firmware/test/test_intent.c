@@ -40,13 +40,13 @@ int main(void)
     char buf[64];
     intent_t zoned = intent_parse("Licht Küche an");
     int n = intent_format(&zoned, buf, sizeof buf);
-    if (strcmp(buf, "Licht Küche → an") != 0 || n != (int)strlen(buf)) {
+    if (strcmp(buf, "Licht Küche -> an") != 0 || n != (int)strlen(buf)) {
         printf("format(zoned) = \"%s\"\n", buf);
         return 1;
     }
     intent_t level = intent_parse("Licht fünfzig");
     intent_format(&level, buf, sizeof buf);
-    if (strcmp(buf, "Licht → fünfzig Prozent") != 0) {
+    if (strcmp(buf, "Licht -> fünfzig Prozent") != 0) {
         printf("format(level) = \"%s\"\n", buf);
         return 1;
     }

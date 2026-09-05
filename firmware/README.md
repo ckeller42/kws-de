@@ -16,8 +16,8 @@ selection screen" below).
   but it prompts `WAKE_PROMPT_REPEATS` (5) single-take reads of the wake
   word and finishes straight to the success screen — no sentence/negative
   sets chained on. Collects real wake-word positives for `models/hey_bus.tflite`.
-- **Recognise mode** — an on-device keyword recogniser: mic → MFCC → the
-  int8 TFLite Micro model → the same streaming detector logic as
+- **Recognise mode** — an on-device keyword recogniser: mic -> MFCC -> the
+  int8 TFLite Micro model -> the same streaming detector logic as
   `kws_de.stream`, shown live on the LCD and logged to the recording
   volume.
 - **Wake mode** — a "Hey Bus" wake-word test mode. It runs *only* the
@@ -192,9 +192,9 @@ Tap **Hey Bus** on the menu. The screen shows "Hey Bus?", the live wake
 probability, and a fire counter; the command recogniser is switched off
 while this mode is active, so what you see is the wake model alone.
 
-- Audio path: mic → the TFLite-Micro audio front-end vendored under
-  `firmware/main/microfrontend/` (`wakefront.c`) → 40 int8 features per
-  10 ms → `models/hey_bus.tflite`, a *streaming* model invoked once per 3
+- Audio path: mic -> the TFLite-Micro audio front-end vendored under
+  `firmware/main/microfrontend/` (`wakefront.c`) -> 40 int8 features per
+  10 ms -> `models/hey_bus.tflite`, a *streaming* model invoked once per 3
   feature rows (every 30 ms) with its state kept alive between calls.
 - The front-end parameters and the int8 requantisation are microWakeWord's
   own; `firmware/test/test_wakefront.c` asserts the C rows are bit-identical
@@ -320,48 +320,48 @@ ambiguous, silently, and a test driven by English "German" clips measures
 nothing while looking like a result; it has happened (paper notes E23).
 `kws_de.tts` writes the `manifest.csv` the check reads, beside the clips.
 
-Storage: boot with the microSD slot **empty** → the boot log reports no
+Storage: boot with the microSD slot **empty** -> the boot log reports no
 usable card and mounts the flash partition, `status` answers `storage
 flash <free>/<total> KB`, a session writes `spkNN/session.csv` and its
 WAVs under `/rec`, and `mode usb` mounts `KWSREC` on the host with those
-files on it. Boot with a **card inserted** → the log prints the card's
+files on it. Boot with a **card inserted** -> the log prints the card's
 name, type and size (a blank or unformatted card is formatted FAT once
 first), `status` answers `storage sd <free>/<total> MB`, a session writes
 under the card root, `mode usb` mounts `KWSREC` showing the card, and
 `scripts/ingest.sh -H <device-host>` pulls from the card. **Pull the card
-while the device runs** → the next mode entry logs that the volume stopped
+while the device runs** -> the next mode entry logs that the volume stopped
 responding and takes are refused (REC_FULL), with no crash.
 
-On-device manual checklist: from the menu, tap **Record** → the session
+On-device manual checklist: from the menu, tap **Record** -> the session
 starts at a new speaker id and the sentence set; complete it (or let it
-run) → it auto-chains into the negative set with no button press →
+run) -> it auto-chains into the negative set with no button press →
 completing that shows "Fertig - danke!" with the speaker id and a
-saved-take count; tap **Menu** → back at the selection screen. Aborting
+saved-take count; tap **Menu** -> back at the selection screen. Aborting
 mid-session with **Abbrechen** instead returns straight to the menu with
-no success screen. Tap **USB** → pull → `column -s, -t <
+no success screen. Tap **USB** -> pull -> `column -s, -t <
 data/recordings/sessions.csv` lists the session; tap **Recognition** →
-say "Licht" → word appears, inference < 30 ms; `recognise.log` replays
+say "Licht" -> word appears, inference < 30 ms; `recognise.log` replays
 through `stream.KeywordStream` with the same events.
 
-Wake mode: tap **Hey Bus** → the probability updates live and stays low
-on silence; say "Hey Bus" → the screen flashes green, the speaker beeps
+Wake mode: tap **Hey Bus** -> the probability updates live and stays low
+on silence; say "Hey Bus" -> the screen flashes green, the speaker beeps
 once, and the fire count rises by exactly one per utterance; say "Licht"
-and a few other words → no fire (nothing but the wake model is running);
-tap **Menu** → `wake.log` on the recording volume has one
+and a few other words -> no fire (nothing but the wake model is running);
+tap **Menu** -> `wake.log` on the recording volume has one
 `[Wake] <ms> <prob>` line per fire.
 
-Field capture (Assistent mode): after a fresh flash, tap **Assistent** → the
+Field capture (Assistent mode): after a fresh flash, tap **Assistent** -> the
 "Aufnahme" switch is off and no "REC" badge is shown; `status` over the console
-answers `field off thresh 0.60 takes 0 dropped 0`. Turn the switch on → the badge appears;
-reset the device and re-open Assistent → the switch is still on (the toggle is
+answers `field off thresh 0.60 takes 0 dropped 0`. Turn the switch on -> the badge appears;
+reset the device and re-open Assistent -> the switch is still on (the toggle is
 in NVS; `takes` re-zeroes, it counts since boot). Send `field off` / `field on`
-over the console instead → the badge follows that too, so the screen can never
+over the console instead -> the badge follows that too, so the screen can never
 disagree with what is actually being recorded. Say "Hey Bus" and then a command:
 the screen behaves exactly as before (green flash, recognised word) — but
 silently, since capture is armed and both tones are muted.
 `status` now reports `field on thresh 0.60 takes 1 dropped 0`, and in USB-drive mode the
 drive holds `field/<spkNN>/<boot>-<ms>.wav` plus a `field.csv` row for it. Say
-"Hey Bus" a **second** time while the window is still open → still exactly one
+"Hey Bus" a **second** time while the window is still open -> still exactly one
 take, named after the *first* fire, with a larger `window_ms` and a longer WAV
 than a single-window take. In the serial log, each `field: saved` line lands
 after its window's `assist: recogniser off`, and the `recognise` step times
@@ -379,15 +379,15 @@ gate would have dropped — while the same phrase in Assistent mode with capture
 **off** must not fire at all.
 
 Intent result card (Assistent mode): say "Hey Bus" then a valid command, e.g.
-"Licht Küche an" → within ~3 s of the window closing the screen shows a green
-card reading "Licht Küche → an"; it clears itself after ~3 s without another
-interaction. The serial log shows `intent: Licht Küche → an` at the same
-close, and `status` echoes `intent Licht Küche → an`. Say "Hey Bus" alone (no
-command word, or `wakefire -l 6` with the mic silent) → the card turns grey
+"Licht Küche an" -> within ~3 s of the window closing the screen shows a green
+card reading "Licht Küche -> an"; it clears itself after ~3 s without another
+interaction. The serial log shows `intent: Licht Küche -> an` at the same
+close, and `status` echoes `intent Licht Küche -> an`. Say "Hey Bus" alone (no
+command word, or `wakefire -l 6` with the mic silent) -> the card turns grey
 and reads "nicht verstanden" with no words underneath, and the log shows
 `intent: none ()`. Say "Hey Bus" then something ungrammatical (a device with
 no matching action, e.g. "Kühlschrank auf", or a bare command word with no
-device, e.g. "an") → same grey card, this time with the heard words printed
+device, e.g. "an") -> same grey card, this time with the heard words printed
 underneath it, and the log names them: `intent: none (an)`. In every "nicht
 verstanden" case the confirmation double beep must **not** sound (it fires
 only behind a green card); in the valid case it must, once, after the window
@@ -401,7 +401,7 @@ and `echo 'status' > /dev/cu.usbmodemNNN` reports `mode wake` followed by
 `ok`; `echo 'mode record' > ...` then `status` reports the recorder's
 phase/index/speaker.
 
-USB mode's CDC console: tap **USB** on the menu (or send `mode usb`) → the
+USB mode's CDC console: tap **USB** on the menu (or send `mode usb`) -> the
 `KWSREC` drive mounts on the host and a new `/dev/cu.usbmodemNNN` appears
 alongside (or in place of) the original console port; `echo 'status' >
 <the new port>` answers `mode usb` / `ok`; `echo 'mode menu' > <the new
