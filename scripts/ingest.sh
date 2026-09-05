@@ -93,24 +93,37 @@ run ssh "$host" "bash ~/pull-recordings.sh $hostdir"
 # 3. bring it here, never deleting anything on either side
 mkdir -p "$dest"
 run rsync -a --ignore-existing "$host:$hostdir/" "$dest/"
-# 4. verify the local copy actually matches what's on the host before trusting it
+# 4. verify the local copy actually matches what's on the host before trusting it.
+# The host stage always survives a failure here (step 2 never wipes it), so every
+# exit below prints the manual-copy recovery: the host stage is still there even
+# though the local copy is missing or short.
+recover() {
+  echo "host copy kept at $host:$hostdir — recover by hand: rsync -a '$host:$hostdir/' '$dest/'" >&2
+}
 local_wavs=$(find "$dest" -name '*.wav' | wc -l | tr -d ' ')
 ssh_probe "find $hostdir -name '*.wav' 2>/dev/null | wc -l"
 remote_wavs=$(printf '%s' "$reply" | tr -d ' ')
 if [[ $local_wavs != "$remote_wavs" ]]; then
-  echo "wav count mismatch: local=$local_wavs remote=$remote_wavs — host copy kept at $host:$hostdir" >&2
+  echo "wav count mismatch: local=$local_wavs remote=$remote_wavs" >&2
+  recover
   exit 1
 fi
 [[ -f "$dest/sessions.csv" ]] || {
-  echo "no sessions.csv in $dest — host copy kept at $host:$hostdir" >&2
+  echo "no sessions.csv in $dest" >&2
+  recover
   exit 1
 }
 session_rows=$(($(wc -l < "$dest/sessions.csv") - 1))
 if [[ $session_rows != "$local_wavs" ]]; then
-  echo "sessions.csv has $session_rows rows but $local_wavs wavs — host copy kept at $host:$hostdir" >&2
+  echo "sessions.csv has $session_rows rows but $local_wavs wavs" >&2
+  recover
   exit 1
 fi
-(( local_wavs > 0 )) || { echo "nothing pulled into $dest" >&2; exit 1; }
+if (( local_wavs == 0 )); then
+  echo "nothing pulled into $dest" >&2
+  recover
+  exit 1
+fi
 # 5. device back to the selection screen (port is back once the drive is ejected)
 if wait_for 'ls /dev/cu.usbmodem* 2>/dev/null | head -1'; then
   port=$reply

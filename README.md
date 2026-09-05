@@ -169,8 +169,24 @@ uv run pytest -q
 
 `setup-hooks.sh` points `core.hooksPath` at `.githooks/`: **pre-commit** runs ruff +
 markdownlint (+ gitleaks if installed), **pre-push** runs the tests — the same gates as CI,
-so a break is caught locally. Bypass a hook with `--no-verify`. Claude Code sessions also lint
-each edited file via a `.claude/` PostToolUse hook.
+so a break is caught locally. Bypass a hook with `--no-verify`.
+
+### Claude Code automation
+
+`.claude/hooks/` (all PreToolUse unless noted):
+
+- `lint-edited.sh` (PostToolUse) — lints the file an Edit/Write/MultiEdit just touched.
+- `paper-gate.sh` — blocks `gh pr create` until the branch's paper update passes `scripts/check-paper.sh`.
+- `protect-generated.sh` — blocks edits to `firmware/main/gen/*` and `firmware/test/intent_cases.h`; names the regenerate command.
+- `guard-git.sh` — blocks `git add -A/.`/`--all`, `--no-verify` commits/pushes, `--force` pushes without `--force-with-lease`, and `gh pr create` without `--base main`.
+- `audio-gate.sh` — blocks `afplay`/`say` on an unchecked or failed TTS clip (no `tts_check.csv` `ok=1` row) and non-German `say -v` voices.
+
+`.claude/skills/`:
+
+- `session-pull` (user-only) — the ingest → stage → QC → audit → eval sequence for a new recording session.
+- `pr-watch` (user-only) — polls a PR to merge, refusing a non-`main` base and stopping on conflicts or red CI.
+- `flash-device` — flashing and talking to the CoreS3 over the remote host's serial console.
+- `data-audit` — when to run `audit-approved.py` vs `kws-tts-check`, and what its findings mean.
 
 `main` is protected: every change goes through a PR, and the branch must be
 up to date with `main` before merging. Required checks are the CI jobs —
