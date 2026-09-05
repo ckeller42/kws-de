@@ -2276,6 +2276,129 @@ settling — is architecturally plausible; the pulled `sessions.csv` alone does 
 entry timestamps to confirm this specific take was that close to one, so this is flagged as a
 plausible mechanism, not a confirmed root cause.
 
+### E27 — regenerating the v3 TTS cache through the quality gate (2026-09-05, host-only)
+
+E23 found that `raw_clips_v3.pkl`'s TTS clips predate the synthetic-clip gate (PR #61):
+every one uses the legacy `kws_de.data._say_one` speaker id (`tts:<voice>:<rate>`, no
+engine field — `say` was the only engine when it was written), so none of them was ever
+checked to be German or to say its intended word. This entry regenerates the cache
+through the gate and asks whether the result is worth training on.
+
+**Cache characterisation and drop.** `raw_clips_v3.pkl`: 29 words, 9,000 clips, 6,622
+`tts:` (all legacy `say`-format) / 2,378 real (MSWC hashes; device recordings are merged
+live on every build, never baked into the cache). New `scripts/drop-tts-clips.py`
+(committed, with `tests/test_drop_tts_clips.py`) drops a cache clip whose speaker id
+resolves to engine `say` — the legacy 3-part id ending in a digit rate (all 6,622 here)
+or an explicit `tts:say:<voice>`; other engines are kept by default, `--all-engines`
+drops every `tts:` clip regardless. Backed up as `raw_clips_v3.pre-regen.pkl`, then
+dropped: 9,000 -> 2,378 clips. 21 of 23 command words lost every TTS clip they had
+(0 real clips left); `Außen` and `Heizung` kept a partial real base (158/300, 120/300).
+
+**Build 1 — strict gate (default).** `kws-dataset build --cache raw_clips_v3.pkl
+--prefix features_v3` regenerates through `kws_de.qc.tts_gate` unchanged: German
+language detection (Whisper, `whisper_transcriber(language=None)`) plus a full
+content match on every clip regardless of length. Predicted ETA was useless (the
+`dataset-build` ledger had one degenerate `size=1.0` row from an earlier fallback path,
+predicting "~76,663,481 min"); actual wall time ~4 h (12:43-16:40). **Aggregate gate
+drop: 3,224/4,822 = 66.9%.** Four words lost every single attempt (`an`, `zu`, `heller`,
+`kälter`, all 300/300); the rest ran 48-88%. `[dataset] built seed=0: train=17268,
+val=3918, test=1767`.
+
+Reading the per-word drop dicts live during the build turned up two distinct failure
+modes, only one of which the gate's content match is responsible for:
+
+- **Language misdetection on short/common German words**, independent of engine —
+  `heller` failed 12x per `say` voice with `language:en` on a correctly-resolved German
+  voice saying a real German word; `zu`/`kälter` failed repeatedly with `language:zh`/
+  `ko`. This is a Whisper reliability limit on short audio, not a voice-resolution bug.
+- **A large, noisy `piper` voice pool.** `data/piper-voices/` carries a multi-speaker
+  `de_DE-mls-medium#N` model with speakers numbered into the 100s, most of which are
+  simply not German (`language:` values seen across the build: en, zh, fr, ja, ko, da,
+  cy, ru, ar, nl, tr, sv, pl, cs, hu, fi, es, pt, it, he, lv, yi — the gate is doing its
+  job here, not misbehaving).
+- **A duration floor** (`TTS_MIN_S=0.3s`) rejects `say`'s synthesis of `an` outright
+  (`duration:0.28s` at every rate tried) before Whisper ever runs — no content or
+  language check can rescue this one.
+
+**Course correction: `KWS_TTS_GATE=lenient`.** The coordinator flagged mid-build that a
+strict content match on a 1-2 token transcript is expected to reject good German audio
+(round-6d's field report already has Whisper mishearing "Küche" as "Kirche")
+more than it catches bad audio, on a build that is almost entirely single-word clips.
+Added `min_tokens_for_content` to `kws_de.qc.tts_gate` (default 0, i.e. unchanged
+strict behaviour): below that many heard tokens, German language detection alone
+gates; at or above it, the full content match still runs. An empty transcript is never
+treated as "short" — it still hits the content gate and is rejected. Wired through
+`kws_de.data.tts_gate_min_tokens_for_content()` (`KWS_TTS_GATE=lenient` -> 3, anything
+else -> 0) and `_tts_fill_word`. Four new tests (`tests/test_qc.py`,
+`tests/test_data.py`), 100/100 passing, ruff clean.
+
+**Build 2 — lenient gate.** Same procedure, cache reset to the clean 2,378-clip
+baseline first (`cp raw_clips_v3.pre-regen.pkl raw_clips_v3.pkl && python
+scripts/drop-tts-clips.py raw_clips_v3.pkl` — deterministic, reproduces the identical
+baseline). **Aggregate drop: 3,122/4,822 = 64.7%** — barely better than strict's 66.9%,
+confirming the per-word read above: `an` (300/300, unchanged — duration floor, gate
+mode is irrelevant), `zu` (299/300, was 300/300), `heller` (299/300, was 300/300) are
+essentially untouched by relaxing content matching, because their failures are
+language/duration gates that `min_tokens_for_content` never reaches. `kälter` is the
+one clear win (256/300, was 300/300 — 44 clips rescued; its failures included more
+actual content-order mismatches than the other three). Every other word moved by low
+single digits either way (noise). `[dataset] built seed=0: train=18442, val=2473,
+test=2853`.
+
+**ETA ledger.** `train`: predicted ~2.3 min (7 runs) for the strict build, actual
+6m42s; predicted ~2.7 min (9 runs) for the lenient build, actual 4m44s — both overshoot
+the prediction, the same gap E16 recorded (the ledger's `size` = epochs x rows carries
+no width term, and its history is mostly width-32 runs).
+
+**Real-voice comparison.** All three models scored with `eval_recordings` +
+`make_command_predict_fn` on the same 197 word / 101 phrase / 29 negative approved
+clips (`compare_command_models.py`, a throwaway driver in the E16 vein — `kws-eval` has
+no `--model` flag) plus a fourth speaker, `spk18`, that has joined the approved tree
+since E15-E18 (36 words, 17 phrases, 3 negatives, held-out):
+
+| | deployed w48 | strict-regen w48 | lenient-regen w48 |
+|---|---|---|---|
+| bytes / sha256 | 25,832 / `8fa81d08` | 25,832 / `94144f90` | 25,832 / `1449b619` |
+| INT8 test acc (own-era test set, not cross-comparable) | 93.59% | 76.34% | 84.23% |
+| spk01 words (n=13, in-training) | 0.923 | 0.846 | 0.846 |
+| spk02 words (n=38, in-training) | 0.895 | 0.895 | 0.789 |
+| spk10 words (n=146, held-out) | 0.856 | 0.815 | 0.849 |
+| spk18 words (n=36, held-out) | 0.333 | **0.667** | **0.667** |
+| **aggregate words (n=233)** | 0.785 | **0.807** | **0.811** |
+| false accepts, spk02 (n=10) | 0/10 | 0/10 | 0/10 |
+| false accepts, spk10 (n=19) | 0/19 | 1/19 | 1/19 |
+| false accepts, spk18 (n=3) | 0/3 | 0/3 | **1/3** |
+| **false accepts total (n=32)** | **0/32** | 1/32 | 2/32 |
+| phrase intent | unchanged (spk10 0.082, rest 0.000) | unchanged | unchanged |
+
+**Decision.** Per the pre-agreed rule (deploy a candidate iff real-voice aggregate
+words >= deployed's 0.785 AND false accepts no worse than deployed's 0/32 AND spk18
+words > deployed's 0.333): both regenerated candidates clear the aggregate-words and
+spk18 bars comfortably, driven by the same mechanism — capacity/coverage on a speaker
+the deployed model never saw enough of — but **both regress the false-accept rate**
+(1/32 strict, 2/32 lenient, against 0/32 deployed), which the original task brief
+already named as the metric that must not get worse. **No candidate satisfies all
+three conditions -> the deployed w32/w48 export stays; `firmware/main/gen/` and
+`models/command_v3_w48_qat.tflite` (the actual checked-in deploy path) are untouched by
+this session** — the strict/lenient exports written during evaluation went through
+`kws-export` without `--firmware`, so they never touched the firmware headers, and
+`models/` is gitignored regenerable build output, not a committed artefact.
+
+**Reading.** The TTS regeneration is not wasted work — it fixes a real, silent defect
+(most training-time TTS was English) and both regenerated models generalise better to
+a held-out speaker the deployed model handles worst — but it is not sufficient by
+itself to ship, because the new false accepts land on exactly the safety-side metric
+the recipe protects hardest. The root cause is upstream of both gate settings tried
+here: Whisper's language-detection reliability on short/common German words (`heller`,
+`zu`, `kälter` all fail primarily on `language:`, not content) and a noisy `piper`
+voice pool (`de_DE-mls-medium#N`, mostly non-German) that neither strict nor lenient
+content-matching touches, plus a hard duration floor that rejects `an` outright before
+any transcription runs. Fixing those — filtering `piper`'s `mls-medium` pool to its
+verified-German subset, and/or a lower `TTS_MIN_S` for very short words with a
+duration-aware augmentation check — is the next lever, not another gate-strictness
+knob. Device flashing/measurement of either candidate was out of scope for this
+host-only session and was not performed.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
