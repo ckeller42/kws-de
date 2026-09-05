@@ -85,6 +85,21 @@ the peak of the run that fired, which is what lets ``kws-qc`` say per take
 whether the production gate would have fired at all
 (:need:`REQ_PIPE_FIELD_LABELS`).
 
+**A result card shows for ~3 s at every window's close** (:need:`REQ_FW_ASSIST_GATE`):
+the window's fired words are parsed on-device (``firmware/main/intent.c``, a
+C port of ``kws_de.grammar.parse()``, host-tested against it case for case in
+``firmware/test/test_intent.c``) into a device/zone/action intent. A valid
+parse shows green with the formatted result, e.g. "Licht Küche → an" or
+"Licht → fünfzig Prozent"; anything else — missing device, wrong order, an
+action the device does not support — shows grey "nicht verstanden" plus the
+words the recogniser actually heard. The confirmation double beep above is
+keyed to this same verdict. The console logs ``intent: <text>`` or
+``intent: none (<words>)`` at the same edge, and the field-capture CSV's
+``device_intent`` column (:need:`REQ_FW_FIELD_CAPTURE`) carries the formatted
+text too — empty when the window's intent was invalid, so
+``kws_de.qc``'s device/label agreement check has nothing to compare rather
+than a false disagreement.
+
 Measured on the CoreS3 over 13 capturing windows, the recognise step time
 *inside* a capturing window was 38-42 ms (5 trace samples; the trace prints
 every 50 recogniser steps and a window is only ~25), against 38-45 ms over
@@ -323,16 +338,20 @@ The console port accepts newline-terminated commands
 - ``status`` prints the current mode, the model stamps as
   ``models command=<id> wake=<id>``, the live recording volume as
   ``storage sd <free>/<total> MB`` or ``storage flash <free>/<total> KB``
-  (:need:`REQ_FW_STORAGE_SD`), and in record/record-wake mode also the
-  recorder's phase/index/count/speaker.
+  (:need:`REQ_FW_STORAGE_SD`), an ``intent <text>`` line naming the last
+  closed assist window's parsed result (``intent Licht Küche → an`` or
+  ``intent none``, omitted before the first window), and in record/record-wake
+  mode also the recorder's phase/index/count/speaker.
 - ``wakefire`` injects one synthetic wake fire down the same path as a real
   one — a measurement hook for the assist-mode duty cycle
   (:need:`REQ_FW_ASSIST_GATE`), not a feature.
-- ``beep`` plays the command-confirmation tone — two 80 ms 1.5 kHz pips,
-  sounded whenever the recogniser fires on a real command word (in assist
-  mode only once the window has closed, so the speaker never reaches the
-  window's own audio, and not at all while field capture is armed — see
-  :need:`REQ_FW_FIELD_CAPTURE`). A speaker check that needs nobody to speak.
+- ``beep`` plays the command-confirmation tone — two 80 ms 1.5 kHz pips. In
+  assist mode it sounds once the window has closed, keyed to a **valid**
+  parsed intent rather than any one fired command word (so the speaker never
+  reaches the window's own audio, and a heard-but-ungrammatical window stays
+  silent), and not at all while field capture is armed — see
+  :need:`REQ_FW_FIELD_CAPTURE`. Outside assist mode it still sounds on every
+  fired command word. A speaker check that needs nobody to speak.
 
 A **model stamp** is ``<file name>@<first 8 hex of the tflite's sha256>
 <date>``, for example ``command_v3_qat.tflite@fc36da9f 2026-09-03``.

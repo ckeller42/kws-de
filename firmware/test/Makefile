@@ -1,7 +1,7 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -I../main
 TESTS := test_mfcc test_stream test_wav test_prompts test_vad test_wakefront test_assist_gate \
-         test_wake_smoke test_command_smoke test_field
+         test_wake_smoke test_command_smoke test_field test_intent
 
 # Where the generated inference C and its vector headers live. Defaults to
 # the committed firmware/main/gen; tests/test_codegen_parity.py's whole-model
@@ -43,6 +43,8 @@ test_assist_gate: test_assist_gate.c ../main/assist_gate.c
 	$(CC) $(CFLAGS) -o $@ $^
 test_field: test_field.c ../main/field.c
 	$(CC) $(CFLAGS) -o $@ $^
+test_intent: test_intent.c ../main/intent.c intent_cases.h
+	$(CC) $(CFLAGS) -o $@ test_intent.c ../main/intent.c
 test_wakefront: test_wakefront.c ../main/wakefront.c $(MF_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ -x c++ $^ -lm
 

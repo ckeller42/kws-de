@@ -18,6 +18,7 @@
  */
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /** @name Detector tunables
@@ -64,6 +65,9 @@ void wake_set_active(bool on);
 void wake_inject_fire(void);
 /** @brief Copy the current wake status under mutex. */
 void wake_get_status(wake_status_t *out);
+/** @brief Copy the last closed window's formatted intent ("" before the first
+ *  window, "none" if it was invalid). Serial console `status` only. */
+void wake_get_last_intent(char *buf, size_t n);
 /**
  * @brief Is an assist window open right now (i.e. is the command recogniser
  *        running)?

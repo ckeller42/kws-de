@@ -99,8 +99,9 @@ typedef struct {
                              time minus `fire_ms`. ASSIST_WINDOW_MS for a lone
                              fire, longer for every fire that extended it. */
     float wake_prob;    /**< Wake probability at that fire. */
-    char intent[64];    /**< Ordered fired command words, space-joined; "" if none. */
-    char words[96];     /**< The same fires as "<word>:<conf>", joined by '|'. */
+    char intent[64];    /**< The window's parsed intent, formatted ("Licht Küche → an");
+                             "" if grammar-invalid, unknown, or nothing fired. See intent.h. */
+    char words[96];     /**< The window's raw fires as "<word>:<conf>", joined by '|'. */
 } field_take_t;
 
 /**
