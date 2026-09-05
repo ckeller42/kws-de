@@ -399,13 +399,24 @@ TTS_MIN_S = 0.3
 TTS_MAX_S = 10.0
 
 
-def tts_gate(path: Path, text: str, transcriber: Transcriber) -> tuple[bool, str | None]:
+def tts_gate(
+    path: Path, text: str, transcriber: Transcriber, min_tokens_for_content: int = 0
+) -> tuple[bool, str | None]:
     """Is the clip at ``path`` really ``text``, really spoken in German?
 
     Cheap checks first (readable, 0.3-10 s, not silent — no model), then ONE
-    transcription: the detected language must be German, and the transcript must pass
-    the same content rules a recorded take does — the ``wake`` rule for the wake phrase,
-    the order-tolerant ``sentences`` rule for anything else.
+    transcription: the detected language must be German, and — for a heard transcript
+    of at least ``min_tokens_for_content`` tokens — the transcript must also pass the
+    same content rules a recorded take does: the ``wake`` rule for the wake phrase, the
+    order-tolerant ``sentences`` rule for anything else.
+
+    ``min_tokens_for_content`` (default 0: always content-match, the original strict
+    gate) exists because Whisper mishears short/single-word clips far more than it
+    mishears their language — round-6d's field report has it transcribing "Küche" as
+    "Kirche" — so a strict content match on a 1-2 token transcript rejects good German
+    audio more often than it catches bad audio. Below the threshold, German language
+    detection alone gates; an EMPTY transcript still falls through to the content gate
+    (which rejects it), since "nothing was heard" is not "a short thing was heard".
 
     ``transcriber`` must report the DETECTED language, i.e.
     ``whisper_transcriber(language=None)`` — one that forces ``language="de"`` would
@@ -428,6 +439,9 @@ def tts_gate(path: Path, text: str, transcriber: Transcriber) -> tuple[bool, str
     lang = str(tr.get("language") or "?").lower()
     if lang != "de":
         return False, f"language:{lang}"
+    heard = normalise(tr.get("text", ""))
+    if heard and len(heard) < min_tokens_for_content:
+        return True, None
     set_name = "wake" if _WAKE_RE.fullmatch("".join(normalise(text))) else "sentences"
     _score, reason = content_gate(set_name, text, tr.get("text", ""))
     return reason is None, reason

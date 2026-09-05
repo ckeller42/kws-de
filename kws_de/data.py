@@ -604,6 +604,17 @@ def tts_gate_transcriber():  # pragma: no cover - loads Whisper
         return None
 
 
+def tts_gate_min_tokens_for_content() -> int:
+    """Below this many heard tokens, `kws_de.qc.tts_gate` trusts German language
+    detection alone instead of also content-matching the transcript. Whisper mishears
+    short/single-word clips ("Küche" -> "Kirche") far more than it mishears their
+    language, so a strict content match on 1-2 tokens rejects good audio more often
+    than it catches bad audio — that matters most for exactly the single-word command
+    clips this build synthesizes most of. ``KWS_TTS_GATE=lenient`` opts in; unset,
+    ``0`` or any other value keeps the original strict content match at every length."""
+    return 3 if os.environ.get("KWS_TTS_GATE") == "lenient" else 0
+
+
 def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=None) -> list:
     # pragma: no cover - shells out / loads models
     """Synthesize up to n clips of `word` across all engines from `tts_engines()`
@@ -615,13 +626,15 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=
     With a `gate` transcriber (`tts_gate_transcriber()`), every clip is judged by
     `kws_de.qc.tts_gate` before it is kept: a clip that is not German, or does not say
     `word`, is DROPPED and counted, never silently mixed into the training data. Dropped
-    clips are not re-synthesized — the same voice would produce the same clip again."""
+    clips are not re-synthesized — the same voice would produce the same clip again.
+    See `tts_gate_min_tokens_for_content` for the `KWS_TTS_GATE=lenient` relaxation."""
     from concurrent.futures import ThreadPoolExecutor
 
     from kws_de.qc import tts_gate
 
     combos = _tts_combo_plan(word, n, tts_engines())
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    min_tokens_for_content = tts_gate_min_tokens_for_content()
 
     def _job(args):
         i, (engine, voice, rate) = args
@@ -637,7 +650,9 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=
     # failure mode this exists for is a voice, not a clip.
     kept, dropped = [], {}
     for wav, audio, speaker in results:
-        ok, reason = (True, None) if gate is None else tts_gate(wav, word, gate)
+        ok, reason = (
+            (True, None) if gate is None else tts_gate(wav, word, gate, min_tokens_for_content)
+        )
         wav.unlink(missing_ok=True)
         if ok:
             kept.append((audio, speaker))
