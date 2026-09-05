@@ -9,6 +9,7 @@ from kws_de.data import (
     split_by_speaker,
     split_three_way,
     tts_engines,
+    tts_gate_min_tokens_for_content,
 )
 
 
@@ -217,6 +218,15 @@ def test_tts_engines_reads_env_override(monkeypatch):
 def test_tts_engines_defaults_to_available(monkeypatch):
     monkeypatch.delenv("KWS_TTS_ENGINES", raising=False)
     assert tts_engines() == tts.available_engines()
+
+
+def test_tts_gate_min_tokens_for_content_opts_in_via_env(monkeypatch):
+    monkeypatch.delenv("KWS_TTS_GATE", raising=False)
+    assert tts_gate_min_tokens_for_content() == 0  # strict by default
+    monkeypatch.setenv("KWS_TTS_GATE", "lenient")
+    assert tts_gate_min_tokens_for_content() == 3
+    monkeypatch.setenv("KWS_TTS_GATE", "0")  # gate disabled entirely: not "lenient"
+    assert tts_gate_min_tokens_for_content() == 0
 
 
 def test_tts_combo_plan_single_engine_matches_voice_combos():

@@ -1136,6 +1136,34 @@ def test_tts_gate_rejects_a_transcript_with_no_language(tmp_path):
     )
 
 
+def test_tts_gate_lenient_mode_skips_content_match_on_a_short_mishearing(tmp_path):
+    # round-6d: Whisper mishears short/single-word clips ("Küche" -> "Kirche") more
+    # than it mishears their language, so below min_tokens_for_content German language
+    # detection alone gates — the mismatched single-word transcript is not rejected.
+    wav = _wav(tmp_path / "a.wav", _tone(ms=900))
+    tr = _fake_tts_transcriber({"a.wav": ("Kirche", "de")})
+    ok, reason = qc.tts_gate(wav, "Küche", tr, min_tokens_for_content=0)  # strict: unchanged
+    assert not ok and reason.startswith("missing:")
+    assert qc.tts_gate(wav, "Küche", tr, min_tokens_for_content=2) == (True, None)
+    assert qc.tts_gate(wav, "Küche", tr, min_tokens_for_content=3) == (True, None)
+
+
+def test_tts_gate_lenient_mode_still_content_matches_long_transcripts(tmp_path):
+    # 4 heard tokens >= min_tokens_for_content=3, so the full content match still runs
+    # and still rejects a transcript that doesn't say the required words.
+    wav = _wav(tmp_path / "a.wav", _tone(ms=900))
+    tr = _fake_tts_transcriber({"a.wav": ("Heizung ist jetzt aus", "de")})
+    ok, reason = qc.tts_gate(wav, "Licht Küche an", tr, min_tokens_for_content=3)
+    assert not ok and reason.startswith("missing:")
+
+
+def test_tts_gate_lenient_mode_still_rejects_an_empty_transcript(tmp_path):
+    wav = _wav(tmp_path / "a.wav", _tone(ms=900))
+    tr = _fake_tts_transcriber({"a.wav": ("", "de")})
+    ok, reason = qc.tts_gate(wav, "licht", tr, min_tokens_for_content=3)
+    assert not ok and reason.startswith("missing:")
+
+
 def _tts_dir(tmp_path):
     """Three synthesised clips with the manifest kws_de.tts.synthesize writes."""
     from kws_de import tts
