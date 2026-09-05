@@ -223,7 +223,7 @@ while this mode is active, so what you see is the wake model alone.
   Assistent as well as the toggle let exactly that leak into a take. A command
   still recognised under capture simply passes silently — the owed tone is
   dropped, not deferred to a later window.
-- **A command fire inside the first `ASSIST_WAKE_TAIL_MS` (300 ms) of a
+- **A command fire inside the first `ASSIST_WAKE_TAIL_MS` (450 ms) of a
   window is dropped, not recognised.** The window's first classification is a
   ~1 s retrospective slice that reaches back before the window opened, so it
   can score the tail of "...Bus" itself as a word (issue #64); the window

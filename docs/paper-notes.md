@@ -2101,33 +2101,45 @@ predicate for both tone call sites (`wake.cc`'s `beep_play()`, `recognise.cc`'s 
 ~0.14 s after the phrase (E24) instead of round 5's ~1.1 s, so the recogniser's first
 classification — a ~1 s retrospective slice primed from ring audio predating the window — can
 still score "...Bus" itself; the field session behind #64 saw `aus` as the first device word in
-12/17 real takes. Fix: `ASSIST_WAKE_TAIL_MS` (300 ms, `assist_gate.h`) — a command fire this
-soon after the window opens is dropped before it reaches `window_words`/`device_words` or the
-confirmation tone; the window still runs the full `ASSIST_WINDOW_MS`. Host-tested directly
-(`assist_gate_in_wake_tail()`, `firmware/test/test_assist_gate.c`): a fire at 100 ms dropped, at
-400 ms accepted.
+12/17 real takes. Fix: `ASSIST_WAKE_TAIL_MS` (`assist_gate.h`) — a command fire this soon after
+the window opens is dropped before it reaches `window_words`/`device_words` or the confirmation
+tone; the window still runs the full `ASSIST_WINDOW_MS`. Host-tested directly
+(`assist_gate_in_wake_tail()`, `firmware/test/test_assist_gate.c`).
 
-**Device verification, same replay before/after (assist, field on, thresh 0.85; 3×
-"Hey Bus, Licht an" + 2× "Hey Bus" alone, ~11 s apart).**
+**First device pass landed the constant at 300 ms** (a fire at 100 ms dropped, at 400 ms
+accepted) and verified it with a same-clip before/after replay (assist, field on, thresh 0.85;
+3x "Hey Bus, Licht an" + 2x "Hey Bus" alone, ~11 s apart):
 
-| | before (main) | after (this branch) |
+| | before (main) | after (300 ms) |
 |---|---|---|
 | spurious word on a bare "Hey Bus" (no command spoken) | `Licht` fires 374 ms into the window | `Licht` still fires, 381-386 ms in |
 | first word of a real "Licht an" take | `Kühlschrank` (343-389 ms in) then `Licht an` | `Licht an` — no spurious prefix, in 2/3 replays |
-| `kws-qc` Field line (`--approved approved-tts-staging`) | not run pre-fix (same protocol, see below) | `field_takes: 5, approved: 5, truncated: 0, parsable: 3, agree: 1, near_miss: 0, false_alarm: 0` |
 
-Caveat worth recording: on this rig the bare-"Hey Bus" artefact's own fire lands at 374-386 ms —
-*above* the 300 ms cutoff — so `ASSIST_WAKE_TAIL_MS` as specified does not suppress it here; the
-floor is dominated by the recogniser task's fixed ~150-400 ms scheduling-plus-inference latency
-on window entry (100 ms mandatory poll delay + ~55 ms Invoke + scheduling jitter), not by
-anything about the phrase. Real commands fire much later (531-1,488 ms in this replay), so
-raising the constant would not risk swallowing one — but 300 ms should be re-checked against
-the original #64 session's own timing before calling the tail fully closed. Defect A's specific
-repro path (a Wake-mode fire bleeding into a later Assistent take) was not independently
-re-reproduced live — the console tooling sends all commands before the log-capture window
-opens, so a mode switch cannot be interleaved mid-playback without a second port-open
-resetting the chip — but the fix is a direct, host-test-covered correction of the predicate
-against its own documented intent, and the cited real evidence file's signature is unambiguous.
+On this rig the bare-"Hey Bus" artefact's own fire lands at 374-386 ms — *above* the 300 ms
+cutoff — so that value did not suppress it. The floor is the recogniser task's fixed
+~150-400 ms scheduling-plus-inference latency on window entry (100 ms mandatory poll delay +
+~55 ms Invoke + scheduling jitter), not the phrase itself. Real commands in the same replay
+fired no earlier than 531 ms.
+
+**Raised to 450 ms** (real commands fire >= 531 ms on this rig, so the artefact at 374-386 ms
+must be inside the skip; host boundaries moved to 400 ms dropped / 500 ms accepted) and
+re-verified with the identical replay:
+
+| | before (main) | after (450 ms) |
+|---|---|---|
+| bare "Hey Bus" that fired (1 of 2 attempts; the other never reached `WAKE_THRESHOLD`) | `Licht` fires 374 ms in, intent `Licht` | `assist: dropped tail fire Licht 0.68, 379 ms into the window (< 450)` — intent empty, **no command word** |
+| "Hey Bus, Licht an" (window 1) | `Kühlschrank` @ 389 ms, then `Licht an` | `Licht` @ 707 ms, `an` @ 1,506 ms — intent `Licht an`, no spurious prefix |
+| "Hey Bus, Licht an" (window 2) | `Kühlschrank` @ 343 ms only | `Licht` @ 654 ms — intent `Licht`, no spurious prefix |
+| "Hey Bus, Licht an" (window 3) | no fire | no fire (unchanged — model variance, not the gate) |
+
+450 ms clears the observed artefact with margin on both sides (374-386 ms artefact, >=531 ms
+real commands) on this rig; it should still be re-checked against the original #64 session's
+own timing before calling the tail fully closed elsewhere. Defect A's specific repro path (a
+Wake-mode fire bleeding into a later Assistent take) was not independently re-reproduced live —
+the console tooling sends all commands before the log-capture window opens, so a mode switch
+cannot be interleaved mid-playback without a second port-open resetting the chip — but the fix
+is a direct, host-test-covered correction of the predicate against its own documented intent,
+and the cited real evidence file's signature is unambiguous.
 
 Also from the original evidence set: `field/spk18/74-40246202.wav` fired at 0.965 on room tone
 (-40 dBFS peak). `wake_set_active(true)` resets the front-end's adaptive noise-floor/PCAN state

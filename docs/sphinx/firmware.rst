@@ -42,7 +42,7 @@ Assistent
 The deployment shape (:need:`REQ_FW_ASSIST_GATE`): the wake model runs
 continuously, and a fire opens a 2.5 s window (``ASSIST_WINDOW_MS``) in
 which the command recogniser runs. A command fire inside the first
-``ASSIST_WAKE_TAIL_MS`` (300 ms) of that window is dropped rather than
+``ASSIST_WAKE_TAIL_MS`` (450 ms) of that window is dropped rather than
 recognised — the window's first classification reaches back before it opened
 and can still score the tail of "...Bus" itself (issue #64) — but the window
 keeps running the full 2.5 s. A fire inside an open window extends it

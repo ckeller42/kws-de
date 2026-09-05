@@ -29,8 +29,13 @@
  *  first word in 12 of 17 real takes). A fire this soon in is that artefact,
  *  not a spoken command: drop it before it reaches window_words/device_words
  *  or the confirmation tone. The window itself is unaffected — it still runs
- *  the full ASSIST_WINDOW_MS. */
-#define ASSIST_WAKE_TAIL_MS 300
+ *  the full ASSIST_WINDOW_MS.
+ *  450, not 300: on the CoreS3 the artefact's own fire (the recogniser's
+ *  fixed ~150-400 ms scheduling-plus-inference latency on window entry, not
+ *  phrase content) lands at 374-386 ms, so 300 ms let it through; real
+ *  commands in the same replay fired no earlier than 531 ms, so 450 clears
+ *  the artefact with margin on both sides. */
+#define ASSIST_WAKE_TAIL_MS 450
 
 #ifdef __cplusplus
 extern "C" {
