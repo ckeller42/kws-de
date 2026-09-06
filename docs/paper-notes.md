@@ -2873,6 +2873,71 @@ Not implemented here — this entry is measurement only. `docs/sphinx/firmware.r
 default and the device was rebuilt and reflashed to the default (flag-off) configuration
 before ending the session (Assistent mode, `field on`, `field thresh 0.85`).
 
+### E34 — deploying round 7 (2026-09-06, host-only)
+
+Round 7 (E33, `HEYBUS-R7-REPORT.md` in the training directory) trains on the deployed
+round 6d model's own real-environment false fires — the first evidence a device soak
+(E21/E24) has produced — and recommends deploy. This entry does the deploy, host-side
+only — no device work, no audio played to any device or speaker.
+
+| | round 6d (was deployed) | round 7 (deployed) |
+|---|---|---|
+| `KWS_WAKE_MODEL_ID` | `hey_bus.tflite@5fcdaf63 2026-09-04` | `hey_bus.tflite@4aaa2f98 2026-09-06` |
+| size / MACs | 58,080 B / 24,736 | 58,080 B / 24,736 (unchanged) |
+| held-out session fires (3) | 3/3 @ 0.996 | 3/3 @ 0.996 |
+| new real positives, held out (13) | 12/13 | **13/13** |
+| held-out / in-training real non-wake, worst peak | 0/9 (0.402) / 0/5 (0.598) | 0/9 (**0.285**) / 0/5 (**0.285**) |
+| real false-fire speech, held out | 5/5 @ 0.992 | **1/5** @ 0.969 |
+| near-silence fires, held out | 3/3 @ 0.996 | **1/3** @ 0.996 (residual: a clipped clip) |
+| TTS non-wake, seen (46) / unseen (36) | 4/46 / 2/36 | 5/46 / 4/36 (small, honest regression) |
+| fire latency, held-out (median) | 0.14 s | **0.02 s** |
+
+Full acceptance table and recipe: `HEYBUS-R7-REPORT.md` (training directory);
+recommendation there is unconditional ("Deploy round 7").
+
+Same procedure as E24's round-6d deploy. Since PR #48 the firmware embeds generated
+esp-nn C rather than the TFLM interpreter, so "deploy" means regenerating
+`gen/wake_model_{data,config}.h` from the new `.tflite` and `gen/wake_infer.{c,h}` +
+`gen/wake_smoke_vectors.h` from that, not touching the command model. As E15/E18/E24
+warn, `kws-export --firmware` unconditionally rewrites the wake pair from the fixed
+`models/hey_bus.tflite` path alongside a full command re-export, so this deploy called
+`kws_de.export.write_wake_headers` directly instead — after promoting the candidate to
+the canonical filename (round 6d's bytes kept on disk as `hey_bus.v6d.tflite`,
+following the `hey_bus.v1.tflite` / `hey_bus.v4.tflite` / `hey_bus.v5.tflite`
+precedent) — then `kws-codegen --name wake`.
+
+**Command model untouched.** `gen/model_data.h`, `gen/model_config.h`,
+`gen/command_infer.c`, `gen/command_infer.h` are sha256-identical before and after
+this deploy.
+
+**Architecture unchanged, confirmed in `gen/wake_infer.h`:**
+
+| | round 6d | round 7 |
+|---|---|---|
+| `WAKE_INFER_ARENA_BYTES` | 128 B | 128 B |
+| `WAKE_INFER_STATE_BYTES` | 4,200 B | 4,200 B |
+| `WAKE_INFER_SCRATCH_BYTES` | 15,552 B | 15,552 B |
+
+**Host checks, all clean.** `kws-fwgen --check firmware/main/gen` and both
+`kws-codegen --check` runs (wake and command) exit 0 (the pre-existing
+`command_v3_w48_qat.tflite` re-export warning from `kws-fwgen --check` is unrelated to
+this deploy and predates it). `make -C firmware/test`: `wake smoke: 0/64 steps
+differ`, `command smoke: 0/368 bytes differ`, `host tests OK`. `pytest -q`: 367
+passed, 1 skipped, 1 xfailed — includes
+`test_whole_wake_model_matches_the_interpreter_on_every_step` (`wake parity: 0/635
+steps differ (11 clips, 4200 B state)`) and the wake-op layer parity cases. `ruff
+check` / `ruff format --check`: clean, 104 files formatted. `markdownlint-cli@0.42.0
+--config .markdownlint.json`: clean. `sphinx-build -W --keep-going`: clean apart from
+the local "doxygen XML absent" warning (the same known-environment gap E15/E18/E24
+noted). ESP-IDF v5.5.5 Docker build (default config): OK, app image **1,025,952 B**
+(`0xfa7a0`, 67% of the 0x300000 partition free; E24's 1,020,048 B included none of
+E25-E32's intervening firmware work, so the +5,904 B is unrelated to this deploy — the
+wake weights are the only `gen/` bytes that moved, confirmed above).
+
+**Device: pending.** Not flashed, not measured. As with E24, a real "Hey Bus" fire
+check and a field-capture soak per E22/E24's recommendation remain open before this is
+more than a host-side candidate swap.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
