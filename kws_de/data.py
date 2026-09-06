@@ -14,7 +14,7 @@ from urllib.request import urlopen
 import numpy as np
 
 from kws_de import config, tts
-from kws_de.augment import mix_at_snr, perturb
+from kws_de.augment import mix_at_snr, perturb, van_augment
 from kws_de.features import mfcc
 
 
@@ -261,6 +261,31 @@ def make_transition_windows(clips_by_word, rng, n_pairs, gap_ms=250):
     return unknown_windows, context_positives
 
 
+VAN_SNRS = (0, 5, 10)  # dB — cabin-ish, noisier than the general snrs= default
+
+
+def van_augmentation_enabled() -> bool:
+    """Van-cabin augmentation for REAL clips (rec:/MSWC) is opt-in: set both
+    KWS_NOISE_DIR (recommended: `<mww-train>/data/fma_16k`, or `negative_datasets`)
+    and KWS_RIR_DIR (recommended: `<mww-train>/data/mit_rirs`) to directories of 16kHz
+    wav files. No default — this repo commits no path to that external training data."""
+    return bool(os.environ.get("KWS_NOISE_DIR")) and bool(os.environ.get("KWS_RIR_DIR"))
+
+
+def _van_noise_and_rir(rng):
+    """One random noise clip (KWS_NOISE_DIR) and one random room IR (KWS_RIR_DIR) for
+    this whole build — one of each, reused across every real clip, not one per clip."""
+    import soundfile as sf
+
+    noise_dir, rir_dir = Path(os.environ["KWS_NOISE_DIR"]), Path(os.environ["KWS_RIR_DIR"])
+    noises, rirs = sorted(noise_dir.glob("*.wav")), sorted(rir_dir.glob("*.wav"))
+    if not noises or not rirs:
+        raise FileNotFoundError(f"no .wav files under {noise_dir} or {rir_dir}")
+    noise, _ = sf.read(noises[int(rng.integers(0, len(noises)))], dtype="float32")
+    rir, _ = sf.read(rirs[int(rng.integers(0, len(rirs)))], dtype="float32")
+    return noise, rir
+
+
 def build_dataset(
     clips,
     noises,
@@ -294,9 +319,16 @@ def build_dataset(
     train-split only) are already-cut CLIP_SAMPLES windows with deliberate
     boundary geometry, so they skip `_random_shift` (which would destroy that
     geometry) but still get the same clean+per-snr noise augmentation.
+
+    Van-cabin augmentation (`van_augmentation_enabled()`, opt-in via
+    KWS_NOISE_DIR/KWS_RIR_DIR) adds `len(VAN_SNRS)` extra rows per REAL (non-`perturbed`)
+    clip: one room IR convolved in, mixed with one noise sample at 0/5/10 dB — see
+    `kws_de.augment.van_augment`. Off by default, so `_origin_flags` must be told the
+    same way (`van_augmentation_enabled()`) to keep its row count in sync.
     """
     labels = list(labels) if labels is not None else config.LABELS
     commands = list(commands) if commands is not None else config.COMMANDS
+    van_noise, van_rir = _van_noise_and_rir(rng) if van_augmentation_enabled() else (None, None)
     X, y = [], []
 
     def add(sig, label):
@@ -309,9 +341,19 @@ def build_dataset(
             noise = noises[int(rng.integers(0, len(noises)))]
             add(mix_at_snr(_random_shift(clip, rng), noise, snr, rng), label)
         if perturbed:
+            # A pitch/tempo-perturbed copy gets the SAME clean+per-snr treatment above,
+            # not a recursive add_word_clip call — that would also fall into the van
+            # branch below (a TTS-perturbed copy is not a REAL clip either).
             n_steps = float(rng.uniform(-2.0, 2.0))
             rate = float(rng.uniform(0.85, 1.15))
-            add_word_clip(perturb(clip, n_steps, rate, config.SAMPLE_RATE), label)
+            pclip = perturb(clip, n_steps, rate, config.SAMPLE_RATE)
+            add(_random_shift(pclip, rng), label)
+            for snr in snrs:
+                noise = noises[int(rng.integers(0, len(noises)))]
+                add(mix_at_snr(_random_shift(pclip, rng), noise, snr, rng), label)
+        elif van_noise is not None:  # REAL clip (rec:/MSWC): van-cabin variety
+            for snr in VAN_SNRS:
+                add(van_augment(_random_shift(clip, rng), van_noise, van_rir, snr, rng), label)
 
     def flags_for(label):
         return (synthetic or {}).get(label) or []
@@ -568,7 +610,9 @@ def tts_engines() -> list[str]:
     return tts.available_engines()
 
 
-def _tts_combo_plan(word: str, n: int, engines: list[str]) -> list[tuple[str, str, int]]:
+def _tts_combo_plan(
+    word: str, n: int, engines: list[str], voices_by_engine: dict[str, list[str]] | None = None
+) -> list[tuple[str, str, int]]:
     """Pure selection logic: `n` (engine, voice, rate) combos to synthesize `word` with,
     drawn round-robin across `engines` (kws_de.tts.voice_combos) so multiple engines
     contribute EQUALLY — plain round-robin alone stops being balanced once the smallest
@@ -577,11 +621,20 @@ def _tts_combo_plan(word: str, n: int, engines: list[str]) -> list[tuple[str, st
     voice/rate combos), CYCLES back through it to reach n — engines whose backend is
     stochastic per call (e.g. Piper's noise_scale) still produce fresh distinct audio on
     a repeat; deterministic ones (macOS `say`) produce an exact repeat, no worse than
-    the redundancy any oversampling scheme adds. No backends touched."""
+    the redundancy any oversampling scheme adds. No backends touched.
+
+    `voices_by_engine`, when given, overrides `kws_de.tts.engine_voices` per engine —
+    the voice-gated build passes only gate-passing voices; an engine with none left is
+    dropped rather than skewing the round-robin with an empty pool."""
+
+    def voices(e: str) -> list[str]:
+        return voices_by_engine[e] if voices_by_engine is not None else tts.engine_voices(e)
+
+    engines = [e for e in engines if voices(e)]
     if not engines:
         return []
-    pool = min(len(tts.engine_voices(e)) * len(tts.RATES) for e in engines)
-    base = tts.voice_combos(len(engines) * pool, engines)
+    pool = min(len(voices(e)) * len(tts.RATES) for e in engines)
+    base = tts.voice_combos(len(engines) * pool, engines, voices_by_engine)
     if not base:
         return []
     reps = -(-max(n, 0) // len(base))  # ceil division
@@ -604,18 +657,55 @@ def tts_gate_transcriber():  # pragma: no cover - loads Whisper
         return None
 
 
-def tts_gate_min_tokens_for_content() -> int:
-    """Below this many heard tokens, `kws_de.qc.tts_gate` trusts German language
-    detection alone instead of also content-matching the transcript. Whisper mishears
-    short/single-word clips ("Küche" -> "Kirche") far more than it mishears their
-    language, so a strict content match on 1-2 tokens rejects good audio more often
-    than it catches bad audio — that matters most for exactly the single-word command
-    clips this build synthesizes most of. ``KWS_TTS_GATE=lenient`` opts in; unset,
-    ``0`` or any other value keeps the original strict content match at every length."""
-    return 3 if os.environ.get("KWS_TTS_GATE") == "lenient" else 0
+VOICE_GATE_CACHE_NAME = "tts_voice_gate.json"
 
 
-def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=None) -> list:
+def voice_gate_cache_path() -> Path:
+    return config.DATA_DIR / VOICE_GATE_CACHE_NAME
+
+
+def passing_voices(engine: str, transcriber, voices: list[str] | None = None) -> list[str]:
+    """Voices for `engine` that pass `kws_de.qc.voice_gate`, cached by `f"{engine}:{voice}"`
+    in `voice_gate_cache_path()` (default `$KWS_DATA_ROOT/data/tts_voice_gate.json`) so a
+    voice is gated once, ever — its audio doesn't change, so a cached verdict never
+    expires. `voices` overrides `kws_de.tts.engine_voices(engine)` (mainly for tests);
+    a multi-speaker Piper voice's speakers (`de_DE-mls-medium#N`) are already separate
+    entries there, so each is gated and cached independently."""
+    import json
+    from datetime import date
+
+    from kws_de.qc import voice_gate
+
+    path = voice_gate_cache_path()
+    try:
+        cache = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        cache = {}
+    dirty = False
+    out = []
+    for v in voices if voices is not None else tts.engine_voices(engine):
+        key = f"{engine}:{v}"
+        entry = cache.get(key)
+        if entry is None:
+            entry = voice_gate(engine, v, transcriber)
+            entry["date"] = date.today().isoformat()
+            cache[key] = entry
+            dirty = True
+        if entry.get("ok"):
+            out.append(v)
+    if dirty:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache, indent=2, sort_keys=True, ensure_ascii=False))
+    return out
+
+
+def _tts_fill_word(
+    word: str,
+    n: int,
+    tmp_dir: Path,
+    max_workers: int = 4,
+    voices_by_engine: dict[str, list[str]] | None = None,
+) -> list:
     # pragma: no cover - shells out / loads models
     """Synthesize up to n clips of `word` across all engines from `tts_engines()`
     (parallelized — each synthesis call is independent, so this is I/O/compute-bound and
@@ -623,37 +713,31 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=
     [(np.ndarray, speaker_id)] with speaker_id="tts:{engine}:{voice}" — rate is augmentation,
     not identity, so the speaker-disjoint split holds out whole voices.
 
-    With a `gate` transcriber (`tts_gate_transcriber()`), every clip is judged by
-    `kws_de.qc.tts_gate` before it is kept: a clip that is not German, or does not say
-    `word`, is DROPPED and counted, never silently mixed into the training data. Dropped
-    clips are not re-synthesized — the same voice would produce the same clip again.
-    See `tts_gate_min_tokens_for_content` for the `KWS_TTS_GATE=lenient` relaxation."""
+    `voices_by_engine` (from `passing_voices`, one Whisper pass per VOICE, not per clip)
+    restricts synthesis to voices that already passed `kws_de.qc.voice_gate`; every clip
+    then only needs `kws_de.qc.tts_cheap_gate` (duration, not silent — no model) before
+    being kept, since the voice-level gate already answered "is this German and does
+    this voice say what it's told". `voices_by_engine=None` synthesizes from every known
+    voice, ungated — the caller decides."""
     from concurrent.futures import ThreadPoolExecutor
 
-    from kws_de.qc import tts_gate
+    from kws_de.qc import tts_cheap_gate
 
-    combos = _tts_combo_plan(word, n, tts_engines())
+    combos = _tts_combo_plan(word, n, tts_engines(), voices_by_engine)
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    min_tokens_for_content = tts_gate_min_tokens_for_content()
 
     def _job(args):
         i, (engine, voice, rate) = args
         wav = tmp_dir / f"{word}_{i}.wav"
         audio = tts.synthesize(word, engine, voice, rate, wav)
-        return None if audio is None else (wav, audio, f"tts:{engine}:{voice}")
+        wav.unlink(missing_ok=True)
+        return None if audio is None else (audio, f"tts:{engine}:{voice}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         results = [r for r in ex.map(_job, enumerate(combos)) if r is not None]
-    # The gate runs here, single-threaded: one Whisper model, not one per worker.
-    # ponytail: one Whisper pass per clip. If the TTS stage ever dominates a build,
-    # gate a sample per (engine, voice) and drop the whole voice on a failure — the
-    # failure mode this exists for is a voice, not a clip.
     kept, dropped = [], {}
-    for wav, audio, speaker in results:
-        ok, reason = (
-            (True, None) if gate is None else tts_gate(wav, word, gate, min_tokens_for_content)
-        )
-        wav.unlink(missing_ok=True)
+    for audio, speaker in results:
+        ok, reason = tts_cheap_gate(audio, config.SAMPLE_RATE)
         if ok:
             kept.append((audio, speaker))
         else:
@@ -665,13 +749,18 @@ def _tts_fill_word(word: str, n: int, tmp_dir: Path, max_workers: int = 4, gate=
 
 def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragma: no cover
     """Top up any word (from `words`, default `config.COMMANDS`) under `target`
-    real clips with TTS clips that passed the synthetic-clip gate. Returns
+    real clips with TTS clips from gate-passing voices only. Returns
     {word: n_tts_kept}."""
     import shutil
 
     words = list(words) if words is not None else config.COMMANDS
     tmp_dir = config.DATA_DIR / "tts_tmp"
-    gate = tts_gate_transcriber()
+    transcriber = tts_gate_transcriber()
+    # One voice-gate pass per (engine, voice), cached, up front — not per word: the
+    # voice's German-ness doesn't depend on which command it is about to say.
+    voices_by_engine = (
+        {e: passing_voices(e, transcriber) for e in tts_engines()} if transcriber else None
+    )
     added = {}
     for cmd in words:
         have = len(clips.get(cmd, []))
@@ -679,7 +768,7 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
             continue
         need = target - have
         print(f"[tts] {cmd}: {have} real clips, synthesizing {need} more")
-        new = _tts_fill_word(cmd.lower(), need, tmp_dir, gate=gate)
+        new = _tts_fill_word(cmd.lower(), need, tmp_dir, voices_by_engine=voices_by_engine)
         clips.setdefault(cmd, []).extend(new)
         added[cmd] = len(new)
     shutil.rmtree(tmp_dir, ignore_errors=True)  # clips, and the manifest beside them
@@ -691,14 +780,18 @@ def _origin_flags(clips_ws: dict, snrs, words=None, perturb_tts: bool = False) -
     aligned row-for-row to build_dataset's output for the same clips/snrs — must
     mirror build_dataset's iteration order (commands then unknown, each clip's
     clean copy + one row per snr, then silence, then clean silence) exactly.
-    With `perturb_tts`, TTS clips count twice (build_dataset's perturbed copy)."""
+    With `perturb_tts`, TTS clips count twice (build_dataset's perturbed copy). A REAL
+    clip also picks up `len(VAN_SNRS)` extra (False) rows when van augmentation is
+    enabled (`van_augmentation_enabled()`) — must track build_dataset's own check."""
     words = list(words) if words is not None else config.COMMANDS
     per_clip = 1 + len(snrs)
+    van_rows = len(VAN_SNRS) if van_augmentation_enabled() else 0
     flags = []
 
     def rows(spk):
         is_tts = spk.startswith("tts:")
-        return [is_tts] * (per_clip * (2 if perturb_tts and is_tts else 1))
+        base = [is_tts] * (per_clip * (2 if perturb_tts and is_tts else 1))
+        return base if is_tts else base + [False] * van_rows
 
     for cmd in words:
         for _clip, spk in clips_ws.get(cmd, []):

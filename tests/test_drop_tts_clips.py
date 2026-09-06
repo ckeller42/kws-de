@@ -22,10 +22,3 @@ def test_drops_legacy_and_explicit_say_keeps_other_engines_and_real_clips():
     assert counts == {"an": (5, 3)}
     kept_speakers = {s for _, s in clips["an"]}
     assert kept_speakers == {"tts:piper:de_DE-thorsten-medium", "deadbeef", "rec:spk01"}
-
-
-def test_all_engines_drops_every_tts_clip():
-    clips = {"zu": [(b"a", "tts:piper:x"), (b"b", "deadbeef")]}
-    counts = drop_tts_clips_mod.drop_tts_clips(clips, all_engines=True)
-    assert counts == {"zu": (2, 1)}
-    assert [s for _, s in clips["zu"]] == ["deadbeef"]

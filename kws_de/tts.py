@@ -134,15 +134,18 @@ def available_engines() -> list[str]:  # pragma: no cover - probes optional back
     return engines
 
 
-def voice_combos(n: int, engines: list[str]) -> list[tuple[str, str, int]]:
+def voice_combos(
+    n: int, engines: list[str], voices_by_engine: dict[str, list[str]] | None = None
+) -> list[tuple[str, str, int]]:
     """Build up to ``n`` diverse ``(engine, voice, rate)`` combos, ROUND-ROBIN across the
     given engines so the set spans as many engines/voices as possible before repeating. No
     synthesis backend is touched, but for ``"piper"`` this reads the Piper voice cache under
     ``config.DATA_DIR`` (via ``engine_voices``), so its result depends on what is cached
-    locally."""
+    locally. ``voices_by_engine``, when given, overrides ``engine_voices`` per engine —
+    e.g. only voices that passed ``kws_de.qc.voice_gate``."""
     per_engine = []
     for e in engines:
-        voices = engine_voices(e)
+        voices = voices_by_engine[e] if voices_by_engine is not None else engine_voices(e)
         per_engine.append([(e, v, r) for r, v in itertools.product(RATES, voices)])
     combos: list[tuple[str, str, int]] = []
     # interleave engines: take one from each in turn until we have n

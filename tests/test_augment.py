@@ -1,6 +1,6 @@
 import numpy as np
 
-from kws_de.augment import measure_snr, mix_at_snr, perturb
+from kws_de.augment import measure_snr, mix_at_snr, perturb, van_augment
 
 
 def test_mix_hits_target_snr():
@@ -24,6 +24,27 @@ def test_zero_signal_is_safe():
 def _peak_hz(sig, sr=16000):
     spec = np.abs(np.fft.rfft(sig * np.hanning(len(sig))))
     return float(np.fft.rfftfreq(len(sig), 1 / sr)[np.argmax(spec)])
+
+
+def test_van_augment_preserves_length_and_hits_target_snr():
+    rng = np.random.default_rng(2)
+    sig = rng.standard_normal(16000).astype(np.float32)
+    noise = rng.standard_normal(16000).astype(np.float32)
+    rir = np.zeros(400, dtype=np.float32)
+    rir[0] = 1.0  # identity impulse: convolution doesn't alter the signal's content
+    for target in (0.0, 5.0, 10.0):  # VAN_SNRS
+        out = van_augment(sig, noise, rir, target, rng)
+        assert out.shape == sig.shape
+        assert abs(measure_snr(sig, out) - target) < 1.0
+
+
+def test_van_augment_without_rir_is_noise_only():
+    rng = np.random.default_rng(3)
+    sig = rng.standard_normal(16000).astype(np.float32)
+    noise = rng.standard_normal(16000).astype(np.float32)
+    out = van_augment(sig, noise, None, 5.0, rng)
+    assert out.shape == sig.shape
+    assert abs(measure_snr(sig, out) - 5.0) < 1.0
 
 
 def test_perturb_shifts_pitch_and_stretches_time():
