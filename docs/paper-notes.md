@@ -2939,6 +2939,101 @@ lands on voices the project would trade for real-device accuracy regardless. Not
 promoted: `hey_bus.tflite` and `firmware/main/gen/` are untouched, no firmware was built or
 flashed, and no audio was played to any device or speaker in this round.
 
+### E36 — hyper-recipe grid: width x real-clip weight x QAT epochs (2026-09-06, host-only)
+
+E27/E28/E31 each tried a *dataset*-side fix (regenerating the TTS cache, then a voice-level
+gate, then fixing the gate's own false negative + van augmentation) on top of the *same*
+training recipe (`--width 48 --qat --qat-epochs 10`, epochs=40) and each time cleared the
+false-accept and spk18 bars but missed the aggregate-words bar by a few points (E27
+strict/lenient did clear it, but regressed false accepts instead). This entry holds the
+E31 dataset fixed — `features_v3`, train=35,261, the voice-gated + van-augmented build —
+and sweeps the *recipe* instead: width, a new real-clip upweighting knob, and QAT epoch
+count, 8 runs total, asking whether a recipe change alone (no further data work) can
+clear the deploy bar.
+
+**New: `kws-train --real-weight N`.** No existing knob controlled the real-vs-TTS mix
+seen during training (`class_weight` balances *label* frequency, not *origin*). The
+feature-cache npz keeps only an `is_tts` row flag, not the original `rec:`/MSWC speaker
+id, so `kws_de.train.upweight_real(X, y, is_tts, weight)` repeats every `~is_tts` row
+(device recordings *and* MSWC — the same "real" population `kws_de.eval`'s
+`headline_mask` already uses) `weight`-1 extra times before `class_weight` is computed;
+`weight<=1` is a no-op. Wired through `--real-weight` (default 1) in both the float and
+QAT-fine-tune calls. Three new tests in `tests/test_train.py` (no-op cases, real-only
+repetition, no-real-rows no-op).
+
+**Grid.** `scripts/recipe-grid.py` (committed, resumable — skips any run whose id already
+has a row in `scripts/recipe-grid.csv`): width in {32, 48} x `--real-weight` in {1, 3} x
+`--qat-epochs` in {10, 20}, float epochs fixed at 40 (the established recipe, E16/E28),
+seed 0, all 8 runs on the identical `features_v3` train/val/test split — the only
+variables are the three recipe knobs. Each candidate trains + exports into its own
+`models/grid/<run>/` directory; `command_v3_w48_qat.*` and `firmware/main/gen/` are
+never written by this script. Scoring reuses `scripts/compare_command_models.py`'s code
+path (`eval_recordings` + `make_command_predict_fn`) over the same fixed real-voice
+scoreboard prior entries used — **233 words / 32 negatives, speakers spk01/spk02/spk10/
+spk18** — deliberately excluding two speakers (`spk19`, `spk20`) added to `approved/`
+since E28/E31, for exact comparability with the historical table. `deployed_w48`
+(`firmware/main/gen/model_data.h`, `8fa81d08`) and `run2_w48` (E31's candidate,
+`d49093a4`, the currently-checked-out `models/command_v3_w48_qat.tflite`) are included
+as reference rows, rescored the same way for a consistent baseline (their INT8 test
+accuracy below is against the *current* `features_v3_test.npz`, not their own-era split
+— not cross-comparable to earlier tables' accuracy column, same caveat E27/E28 noted).
+`w48_rw1_qe10` reproduces `run2_w48` bit-for-bit (identical sha256 `d49093a4`) — training
+is deterministic given the same seed/recipe/data, a useful sanity check that the grid
+driver's invocation matches E31's manual one exactly.
+
+Deploy rule, unchanged since E27 (aggregate words >= deployed's 0.785, false accepts no
+worse than 0/32, spk18 words > deployed's 0.333), applied as two hard filters (false
+accepts, spk18) plus the aggregate as the ranking objective. Sorted, passing rows first:
+
+| run | width | real_weight | qat_epochs | aggregate words (n=233) | spk01 (n=13) | spk02 (n=38) | spk10 (n=146) | spk18 (n=36) | false accepts (n=32) | MACs | bytes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **w48_rw3_qe20** | 48 | 3 | 20 | **0.9185** | 1.000 | 0.974 | 0.932 | 0.778 | **0/32** | 4,234,704 | 25,832 |
+| w32_rw3_qe10 | 32 | 3 | 10 | 0.7897 | 0.538 | 0.921 | 0.815 | 0.639 | 0/32 | 2,070,496 | 17,912 |
+| run2_w48 (E31) | 48 | 1 (n/a) | 10 (n/a) | 0.7768 | 0.769 | 0.684 | 0.829 | 0.667 | 0/32 | 4,234,704 | 25,832 |
+| w48_rw1_qe10 | 48 | 1 | 10 | 0.7768 | 0.769 | 0.684 | 0.829 | 0.667 | 0/32 | 4,234,704 | 25,832 |
+| w48_rw3_qe10 | 48 | 3 | 10 | 0.9227 | 1.000 | 0.974 | 0.932 | 0.806 | 1/32 | 4,234,704 | 25,832 |
+| w32_rw3_qe20 | 32 | 3 | 20 | 0.8026 | 0.692 | 0.921 | 0.822 | 0.639 | 1/32 | 2,070,496 | 17,912 |
+| deployed_w48 | 48 | n/a | n/a | 0.7854 | 0.923 | 0.895 | 0.856 | 0.333 | 0/32 | 4,234,704 | 25,832 |
+| w48_rw1_qe20 | 48 | 1 | 20 | 0.7854 | 0.692 | 0.763 | 0.842 | 0.611 | 1/32 | 4,234,704 | 25,832 |
+| w32_rw1_qe20 | 32 | 1 | 20 | 0.6137 | 0.462 | 0.632 | 0.651 | 0.500 | 2/32 | 2,070,496 | 17,912 |
+| w32_rw1_qe10 | 32 | 1 | 10 | 0.6052 | 0.385 | 0.711 | 0.630 | 0.472 | 1/32 | 2,070,496 | 17,912 |
+
+(`deployed_w48`'s spk18 is exactly the 0.333 baseline, not `>` it, so it fails its own
+gate by definition — listed as the reference row it is, not a candidate. Rows below it
+in the table fail on false accepts.)
+
+**Real-clip weighting is the dominant lever, not width.** Every `real_weight=3` row beats
+its `real_weight=1` counterpart at the same width by 0.15-0.32 aggregate points; width
+alone (E16's finding) still matters but far less over this range — w48 beats w32 by
+~0.1-0.15 at matched `real_weight`/`qat_epochs`. `w48_rw3_qe10` has the single highest
+aggregate in the grid (0.9227, spk01 goes to a clean 13/13) but is disqualified by
+exactly one false accept — `eval_recordings` traces it to `spk10` (1/19, 0.0526); the
+otherwise-identical `qe20` run (10 more QAT fine-tune epochs, same float weights, same
+data) removes that one false accept at a cost of only 0.0042 aggregate and 0.028 spk18 —
+QAT epoch count reads here as a small false-accept/aggregate trade knob layered on top of
+`real_weight`'s much bigger effect, not an independent lever. Both `w48_rw3` rows come at
+**zero extra device cost** over the currently deployed w48 — same 4,234,704 MACs, same
+25,832 B — this is a training-recipe change only, no architecture change.
+
+**ETA ledger caveat.** `train_seconds_actual` (full `kws_de.train` subprocess wall time —
+float train + QAT reload/fine-tune/save) is not the same quantity `kws-eta predict train`
+estimates (the float-training phase alone, per `Timed("train", ...)` inside
+`kws_de.train`); the ratios range 0.75x-2.9x with no clean pattern by width or
+real_weight, consistent with E16/E28's standing note that the ledger's `size` (epochs x
+rows) carries no width term and mixes recipes across its history. Not fixed here — a
+predictor covering the QAT phase and width jointly is future work, not blocking this
+grid.
+
+**Recommendation: `w48_rw3_qe20`** (`--width 48 --qat --qat-epochs 20 --real-weight 3`,
+epochs=40) is the only run that clears all three deploy-rule conditions with a
+comfortable margin — aggregate 0.9185 against the 0.785 bar, spk18 0.778 against 0.333,
+0/32 false accepts tied with deployed — at identical MACs/bytes to the currently deployed
+model. **Not promoted**: this was a host-only recipe search per the task brief;
+`firmware/main/gen/` and `models/command_v3_w48_qat.tflite` are untouched, and a device
+measurement (the recognise-step latency is architecture-bound, so E16/E18's ~55.8 ms
+estimate should still hold, but this was not verified on hardware) is the natural
+follow-up before any deploy decision.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
