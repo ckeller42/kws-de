@@ -34,6 +34,26 @@ def _class_weights(y) -> dict:
     return {i: (n / (k * c) if c else 0.0) for i, c in enumerate(counts)}
 
 
+def upweight_real(X, y, is_tts, weight: int):
+    """Repeat every real (``~is_tts`` -- device ``rec:`` recordings and MSWC
+    clips; the feature-cache npz keeps only the ``is_tts`` flag, not the
+    original ``rec:``/MSWC speaker id, so "real" here is that same population)
+    training row `weight`-1 extra times, so real speech gets `weight`x
+    representation relative to TTS synthetic clips before class weighting.
+    `weight <= 1` is a no-op returning `X, y` unchanged (same arrays, not copies)."""
+    X = np.asarray(X)
+    y = np.asarray(y)
+    if weight <= 1:
+        return X, y
+    is_tts = np.asarray(is_tts, bool)
+    real_idx = np.flatnonzero(~is_tts)
+    if real_idx.size == 0:
+        return X, y
+    extra = np.tile(real_idx, weight - 1)
+    idx = np.concatenate([np.arange(len(y)), extra])
+    return X[idx], y[idx]
+
+
 def train(
     X,
     y,
@@ -143,6 +163,15 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     ap.add_argument(
         "--width", type=int, default=32, help="conv/depthwise-separable channel count (default 32)"
     )
+    ap.add_argument(
+        "--real-weight",
+        type=int,
+        default=1,
+        dest="real_weight",
+        help="repeat every real (non-TTS, `~is_tts`) train row this many times before "
+        "class weighting, so real speech is over-represented relative to synthetic TTS "
+        "clips (default 1, no-op)",
+    )
     args = ap.parse_args()
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     prefix = args.prefix or ("features_v2" if args.v2 else "features")
@@ -150,11 +179,13 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     out_name = args.out or ("command.keras" if args.v2 else "kws.keras")
     float_path = config.MODELS_DIR / out_name
     data = np.load(config.DATA_DIR / f"{prefix}_train.npz")
-    size = args.epochs * data["X"].shape[0]
+    # Older/toy feature caches (e.g. tests/test_train_qat.py's fixture) predate the
+    # `is_tts` row flag; --real-weight is a no-op without it (real_idx empty below).
+    is_tts = data["is_tts"] if "is_tts" in data.files else np.ones(data["X"].shape[0], dtype=bool)
+    X, y = upweight_real(data["X"], data["y"], is_tts, args.real_weight)
+    size = args.epochs * X.shape[0]
     with Timed("train", size=size, note=prefix):
-        model, history = train(
-            data["X"], data["y"], epochs=args.epochs, num_classes=num_classes, width=args.width
-        )
+        model, history = train(X, y, epochs=args.epochs, num_classes=num_classes, width=args.width)
     model.save(config.MODELS_DIR / out_name)
     print(f"final train accuracy: {history['accuracy'][-1]:.4f}")
 
@@ -168,14 +199,12 @@ def main() -> None:  # pragma: no cover - I/O wrapper
         model.load_weights(float_path)
         print(f"loaded existing float model weights from {out_name} for QAT fine-tune")
     else:
-        model, history = train(
-            data["X"], data["y"], epochs=args.epochs, num_classes=num_classes, width=args.width
-        )
+        model, history = train(X, y, epochs=args.epochs, num_classes=num_classes, width=args.width)
         model.save(float_path)
         print(f"final train accuracy: {history['accuracy'][-1]:.4f}")
 
     if args.qat:
-        qmodel, qhistory = train_qat(model, data["X"], data["y"], epochs=args.qat_epochs)
+        qmodel, qhistory = train_qat(model, X, y, epochs=args.qat_epochs)
         # SavedModel dir, not `.keras`: tfmot's QuantizeWrapperV2 layers fail to
         # reload from the `.keras` zip format (variable-name mismatch on
         # reload, a known tfmot/Keras-3-format interaction) but round-trip
