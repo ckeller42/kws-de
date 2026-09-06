@@ -12,6 +12,7 @@ static bool s_inited;
 static int8_t s_rows[WAKEFRONT_MAX_ROWS][WAKEFRONT_FEATURES];
 static int s_head;   /* next slot to write */
 static int s_fresh;  /* rows produced since the last take(), capped at MAX_ROWS */
+static int s_steps;  /* wakefront_take() calls since the last reset -- see wakefront_warm() */
 
 static void fill_config(struct FrontendConfig *c)
 {
@@ -54,6 +55,7 @@ void wakefront_init(void)
     s_inited = true;
     s_head = 0;
     s_fresh = 0;
+    s_steps = 0;
 }
 
 void wakefront_reset(void)
@@ -62,6 +64,7 @@ void wakefront_reset(void)
     FrontendReset(&s_state);
     s_head = 0;
     s_fresh = 0;
+    s_steps = 0;
 }
 
 int wakefront_push(const int16_t *pcm, int n_samples)
@@ -93,4 +96,7 @@ void wakefront_take(int frames, int8_t *dst)
         memcpy(dst + (size_t)f * WAKEFRONT_FEATURES, s_rows[(start + f) % WAKEFRONT_MAX_ROWS],
                WAKEFRONT_FEATURES);
     s_fresh = 0;
+    if (s_steps < WAKEFRONT_BURN_IN_STEPS) s_steps++;
 }
+
+bool wakefront_warm(void) { return s_steps >= WAKEFRONT_BURN_IN_STEPS; }

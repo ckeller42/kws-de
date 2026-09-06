@@ -47,6 +47,21 @@ int main(void)
     }
     assert(rows == WT_ROWS);
 
+    /* wakefront_warm(): false for the first WAKEFRONT_BURN_IN_STEPS takes
+       after a reset, true from then on -- the wake gate's burn-in predicate
+       (#E29). Content doesn't matter here, only the step count, so silence is
+       fine. */
+    wakefront_reset();
+    assert(!wakefront_warm());
+    int16_t silence[WAKEFRONT_STRIDE] = {0};
+    int8_t dump[3 * WAKEFRONT_FEATURES];
+    for (int step = 0; step < WAKEFRONT_BURN_IN_STEPS; step++) {
+        while (!wakefront_ready(3)) wakefront_push(silence, WAKEFRONT_STRIDE);
+        assert(!wakefront_warm()); /* still cold going into this step's take() */
+        wakefront_take(3, dump);
+    }
+    assert(wakefront_warm());
+
     puts("test_wakefront OK");
     return 0;
 }

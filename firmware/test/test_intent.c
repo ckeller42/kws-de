@@ -57,6 +57,47 @@ int main(void)
         return 1;
     }
 
+    /* intent_rescore(): one substitution at an "_unknown_" slot, from the
+       stream decoder's second-best word for that step, completes an
+       otherwise-invalid parse. */
+    const char *from = NULL, *to = NULL;
+    intent_t r = intent_rescore("Licht _unknown_", "Licht:0.90|an:0.83", INTENT_RESCORE_FLOOR, &from, &to);
+    if (!r.valid || !streq(r.device, "Licht") || !streq(r.action, "an") ||
+        !streq(from, "_unknown_") || !streq(to, "an")) {
+        printf("rescore(missing action) failed: valid=%d device=%s action=%s from=%s to=%s\n",
+               r.valid, r.device ? r.device : "-", r.action ? r.action : "-",
+               from ? from : "-", to ? to : "-");
+        return 1;
+    }
+    from = to = NULL;
+    r = intent_rescore("_unknown_ an", "Licht:0.90|an:0.83", INTENT_RESCORE_FLOOR, &from, &to);
+    if (!r.valid || !streq(r.device, "Licht") || !streq(r.action, "an")) {
+        printf("rescore(missing device) failed: valid=%d device=%s action=%s\n",
+               r.valid, r.device ? r.device : "-", r.action ? r.action : "-");
+        return 1;
+    }
+    /* Below the floor: left as the plain (invalid) parse. */
+    from = to = NULL;
+    r = intent_rescore("Licht _unknown_", "Licht:0.90|an:0.10", INTENT_RESCORE_FLOOR, &from, &to);
+    if (r.valid || from || to) {
+        printf("rescore(below floor) unexpectedly valid or set from/to\n");
+        return 1;
+    }
+    /* Two "_unknown_" slots both clearing the floor: one substitution cannot
+       fix both, so the whole retry is refused. */
+    from = to = NULL;
+    r = intent_rescore("_unknown_ _unknown_", "Licht:0.90|an:0.83", INTENT_RESCORE_FLOOR, &from, &to);
+    if (r.valid || from || to) {
+        printf("rescore(two unknowns) unexpectedly valid or set from/to\n");
+        return 1;
+    }
+    /* Already valid: rescore is a no-op (no seconds needed). */
+    r = intent_rescore("Licht an", NULL, INTENT_RESCORE_FLOOR, &from, &to);
+    if (!r.valid) {
+        puts("rescore(already valid) broke a valid parse");
+        return 1;
+    }
+
     puts("test_intent OK");
     return 0;
 }

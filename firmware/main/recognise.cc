@@ -363,6 +363,19 @@ static void recognise_task(void *)
             k = snprintf(e, sizeof e, "%s%s:%.2f", n ? "|" : "", w, (double)probs[fired]);
             if (k > 0 && (size_t)k < sizeof e && n + (size_t)k < sizeof s_st.window_words)
                 memcpy(s_st.window_words + n, e, (size_t)k + 1);
+            /* Runner-up command word of this step, from the stream decoder's
+               own smoothed probabilities (not the raw `probs` above) -- what
+               wake.cc's intent_rescore() substitutes at an "_unknown_" slot. */
+            int second = -1; float second_p = -1.f;
+            for (int i = 0; i < KWS_NUM_LABELS; i++) {
+                if (i == fired || i == KWS_UNKNOWN_INDEX || i == KWS_SILENCE_INDEX) continue;
+                if (stream.last_smoothed[i] > second_p) { second_p = stream.last_smoothed[i]; second = i; }
+            }
+            n = strlen(s_st.window_seconds);
+            k = snprintf(e, sizeof e, "%s%s:%.2f", n ? "|" : "",
+                         second >= 0 ? KWS_LABELS[second] : "_unknown_", second >= 0 ? (double)second_p : 0.0);
+            if (k > 0 && (size_t)k < sizeof e && n + (size_t)k < sizeof s_st.window_seconds)
+                memcpy(s_st.window_seconds + n, e, (size_t)k + 1);
         }
         recognise_status_t copy = s_st;
         xSemaphoreGive(s_lock);
@@ -437,6 +450,7 @@ extern "C" void recognise_listen_for(uint32_t ms)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_st.window_intent[0] = 0;
     s_st.window_words[0] = 0;
+    s_st.window_seconds[0] = 0;
     xSemaphoreGive(s_lock);
     s_cmd_fired = false;      /* a new window never inherits the last one's owed tone */
     int64_t now_us = esp_timer_get_time();

@@ -1,5 +1,6 @@
 #include "intent.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "gen/labels.h"
 
@@ -81,6 +82,51 @@ intent_t intent_parse(const char *words)
         .action = KWS_LABELS[action_idx],
         .level = (action_idx - (N_DEVICES + N_ZONES)) >= (N_ACTIONS - N_LEVELS),
     };
+    return r;
+}
+
+intent_t intent_rescore(const char *words, const char *seconds, float floor,
+                        const char **from, const char **to)
+{
+    intent_t base = intent_parse(words);
+    if (base.valid || !words || !seconds) return base;
+
+    char wbuf[64], sbuf[96];
+    strncpy(wbuf, words, sizeof wbuf - 1); wbuf[sizeof wbuf - 1] = 0;
+    strncpy(sbuf, seconds, sizeof sbuf - 1); sbuf[sizeof sbuf - 1] = 0;
+
+    char *wtok[16]; int nw = 0;
+    for (char *t = strtok(wbuf, " "); t && nw < 16; t = strtok(NULL, " ")) wtok[nw++] = t;
+    char *stok[16]; int ns = 0;
+    for (char *t = strtok(sbuf, "|"); t && ns < 16; t = strtok(NULL, "|")) stok[ns++] = t;
+    if (nw != ns) return base; /* seconds not aligned 1:1 with words: nothing safe to substitute */
+
+    int sub = -1;
+    int sub_idx = -1;
+    for (int i = 0; i < nw; i++) {
+        if (strcmp(wtok[i], "_unknown_") != 0) continue;
+        char *colon = strchr(stok[i], ':');
+        if (!colon) continue;
+        float p = strtof(colon + 1, NULL);
+        if (p < floor) continue;
+        if (sub >= 0) return base; /* a second fixable slot: one substitution cannot cover both */
+        *colon = 0;
+        sub_idx = label_index(stok[i]);
+        if (sub_idx < 0 || sub_idx == KWS_UNKNOWN_INDEX || sub_idx == KWS_SILENCE_INDEX)
+            continue; /* not a real command word: no usable candidate */
+        sub = i;
+    }
+    if (sub < 0) return base;
+
+    char merged[64] = {0};
+    for (int i = 0; i < nw; i++) {
+        strcat(merged, i == sub ? KWS_LABELS[sub_idx] : wtok[i]);
+        if (i + 1 < nw) strcat(merged, " ");
+    }
+    intent_t r = intent_parse(merged);
+    if (!r.valid) return base;
+    *from = "_unknown_";
+    *to = KWS_LABELS[sub_idx];
     return r;
 }
 
