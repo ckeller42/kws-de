@@ -195,7 +195,11 @@ static void wake_task(void *)
         ESP_LOGE(TAG, "falling back to the TFLite Micro interpreter");
     }
     ESP_LOGI(TAG, "inference: %s, %u B arena + %u B state + %u B shared scratch, "
-                  "esp-nn scratch %d B queried / %u B reserved; TFLM %s; free internal %u",
+                  "esp-nn scratch %d B queried / %u B reserved; TFLM %s; free internal %u"
+#if defined(CONFIG_KWS_INFER_PROFILE)
+                  ", profile on"
+#endif
+             ,
              use_generated ? "generated (esp-nn)" : "TFLite Micro interpreter (generated path refused)",
              (unsigned)wake_infer_arena_bytes(), (unsigned)wake_infer_state_bytes(),
              (unsigned)KWS_INFER_SCRATCH_BYTES,
@@ -355,6 +359,10 @@ static void wake_task(void *)
                higher mean, so a single sample cannot tell the two apart. */
             static float peak = 0; static uint32_t nsteps = 0, last_trace = 0;
             static int64_t sum_us = 0, sumsq_us = 0;
+#if defined(CONFIG_KWS_INFER_PROFILE)
+            static int64_t s_profile_invoke_us;    /* since the last dump, reset there */
+            s_profile_invoke_us += invoke_us;
+#endif
             if (prob > peak) peak = prob;
             nsteps++;
             sum_us += step_us; sumsq_us += step_us * step_us;
@@ -364,6 +372,20 @@ static void wake_task(void *)
                 ESP_LOGI(TAG, "peak %.3f over %lu steps, step %lld +/- %lld us (invoke %lld us: " NN_TIMERS_FMT ")",
                          (double)peak, (unsigned long)nsteps, mean, (int64_t)std::sqrt((double)(var > 0 ? var : 0)),
                          invoke_us, NN_TIMERS_ARGS(invoke_us));
+#if defined(CONFIG_KWS_INFER_PROFILE)
+                if (use_generated) {
+                    /* Both sides are per-step averages: profile_dump() already
+                       divides by its own call count, so the invoke accumulator
+                       has to divide by the same nsteps to compare apples to
+                       apples (it started as a sum, not an average). */
+                    int64_t invoke_avg_us = nsteps ? s_profile_invoke_us / (int64_t)nsteps : 0;
+                    uint32_t profiled_us = wake_infer_profile_dump();
+                    ESP_LOGI(TAG, "profile wake residual %lld us/step (invoke avg %lld, profiled %lu)",
+                             (long long)(invoke_avg_us - profiled_us), (long long)invoke_avg_us,
+                             (unsigned long)profiled_us);
+                }
+                s_profile_invoke_us = 0;
+#endif
                 peak = 0; nsteps = 0; last_trace = now_ms; sum_us = sumsq_us = 0;
             }
             xSemaphoreTake(s_lock, portMAX_DELAY);

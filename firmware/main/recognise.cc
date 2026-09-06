@@ -169,7 +169,11 @@ static void recognise_task(void *)
        wake task (priority 3) can preempt this one mid-inference, so the two
        evaluations are serialised on kws_infer_lock() — see infer_lock.h. */
     ESP_LOGI(TAG, "inference: %s, %u B arena (%s) + %u B state + %u B shared scratch, "
-                  "esp-nn scratch %d B queried / %u B reserved; TFLM %s; free internal %u",
+                  "esp-nn scratch %d B queried / %u B reserved; TFLM %s; free internal %u"
+#if defined(CONFIG_KWS_INFER_PROFILE)
+                  ", profile on"
+#endif
+             ,
              use_generated ? "generated (esp-nn)" : "TFLite Micro interpreter (generated path refused)",
              (unsigned)command_infer_arena_bytes(), KWS_CMD_ARENA_WHERE,
              (unsigned)command_infer_state_bytes(), (unsigned)KWS_INFER_SCRATCH_BYTES,
@@ -322,7 +326,11 @@ static void recognise_task(void *)
         }
         step_us = esp_timer_get_time() - t0;
         uint32_t ms = (uint32_t)(step_us / 1000);
-        if ((++steps % 50) == 0)                         /* ~every 5 s: front-end + inference cost */
+#if defined(CONFIG_KWS_INFER_PROFILE)
+        static int64_t s_profile_invoke_us;    /* since the last dump, reset there */
+        s_profile_invoke_us += invoke_us;
+#endif
+        if ((++steps % 50) == 0) {               /* ~every 5 s: front-end + inference cost */
             /* The stack headroom is in the trace because RECOGNISE_STACK was
                cut to fit internal RAM (see below): the number stays checkable
                on any build instead of being a one-off measurement. */
@@ -331,6 +339,21 @@ static void recognise_task(void *)
                      (unsigned long)ms, pushed ? fe_us / pushed : (int64_t)0, pushed,
                      invoke_us, NN_TIMERS_ARGS(invoke_us),
                      (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+#if defined(CONFIG_KWS_INFER_PROFILE)
+            if (use_generated) {
+                /* Both sides are per-step averages: profile_dump() already
+                   divides by its own call count, so the invoke accumulator
+                   has to divide by the same 50 steps to compare apples to
+                   apples (it started as a sum, not an average). */
+                int64_t invoke_avg_us = s_profile_invoke_us / 50;
+                uint32_t profiled_us = command_infer_profile_dump();
+                ESP_LOGI(TAG, "profile command residual %lld us/step (invoke avg %lld, profiled %lu)",
+                         (long long)(invoke_avg_us - profiled_us), (long long)invoke_avg_us,
+                         (unsigned long)profiled_us);
+            }
+            s_profile_invoke_us = 0;
+#endif
+        }
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_st.infer_ms = ms;

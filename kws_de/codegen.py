@@ -560,6 +560,57 @@ NUDGE_GUARD = (
 )
 
 
+@dataclasses.dataclass(frozen=True)
+class ProfileSlot:
+    """One row of the per-layer profiling table: what CONFIG_KWS_INFER_PROFILE
+    reports for one emitted kernel call, in emission order (the array index
+    the generated code accumulates into is this tuple's position in
+    Emitter.profile)."""
+
+    op_index: int
+    type: str  # "conv" / "dw" / "fc" / "mean" / "softmax" / "logistic" / "quantize" / "avgpool"
+    width: int
+    height: int
+    channels: int
+    macs: int  # static MAC count from the planner; 0 where a MAC count is not meaningful
+
+
+def _profile_slot(graph: tflite_graph.Graph, op) -> ProfileSlot:
+    """Static (type, output shape, MACs) for op's profiling row. Cycle counts
+    and call counts are runtime data the generated code fills in; everything
+    else here the planner already knows, so it is emitted as a constant."""
+    if op.name in ("CONV_2D", "DEPTHWISE_CONV_2D"):
+        (in_h, in_w, in_c), (out_h, out_w, out_c), (k_h, k_w, _), *_ = _conv_geometry(graph, op)
+        out_macs = out_h * out_w * out_c * k_h * k_w
+        if op.name == "CONV_2D":
+            return ProfileSlot(op.index, "conv", out_w, out_h, out_c, out_macs * in_c)
+        return ProfileSlot(op.index, "dw", out_w, out_h, out_c, out_macs)
+    if op.name == "FULLY_CONNECTED":
+        w = graph.tensors[op.inputs[1]]
+        out_depth = graph.tensors[op.outputs[0]].shape[-1]
+        accum_depth = w.shape[-1]
+        return ProfileSlot(op.index, "fc", 1, 1, out_depth, out_depth * accum_depth)
+    if op.name == "MEAN":
+        in_h, in_w, in_c = _nhwc(graph.tensors[op.inputs[0]].shape)
+        out_c = graph.tensors[op.outputs[0]].shape[-1]
+        return ProfileSlot(op.index, "mean", 1, 1, out_c, in_h * in_w * in_c)
+    if op.name == "AVERAGE_POOL_2D":
+        out_h, out_w, out_c = _nhwc(graph.tensors[op.outputs[0]].shape)
+        k_h, k_w = int(op.options["filter_height"]), int(op.options["filter_width"])
+        macs = out_h * out_w * out_c * k_h * k_w
+        return ProfileSlot(op.index, "avgpool", out_w, out_h, out_c, macs)
+    if op.name == "SOFTMAX":
+        depth = graph.tensors[op.inputs[0]].shape[-1]
+        return ProfileSlot(op.index, "softmax", 1, 1, depth, 0)
+    if op.name == "LOGISTIC":
+        out_size = math.prod(graph.tensors[op.outputs[0]].shape)
+        return ProfileSlot(op.index, "logistic", 1, 1, out_size, 0)
+    if op.name == "QUANTIZE":
+        out_size = math.prod(graph.tensors[op.outputs[0]].shape)
+        return ProfileSlot(op.index, "quantize", 1, 1, out_size, 0)
+    raise UnsupportedGraph(f"op {op.index} {op.name}: no profiling metadata")
+
+
 @dataclasses.dataclass
 class Emitter:
     """Accumulates the pieces of one generated .c file."""
@@ -573,6 +624,30 @@ class Emitter:
     # esp-nn kernel families this model actually calls, so init sets exactly
     # the scratch pointers it uses ("conv", "depthwise", "softmax").
     families: set[str] = dataclasses.field(default_factory=set)
+    # CONFIG_KWS_INFER_PROFILE table, one row per profiled kernel call, in
+    # emission order -- the row's index is the runtime array slot begin/end
+    # accumulate into (see begin_profile/end_profile).
+    profile: list[ProfileSlot] = dataclasses.field(default_factory=list)
+
+    def begin_profile(self, op) -> int:
+        """Open a CONFIG_KWS_INFER_PROFILE-guarded timing scope around the
+        code `op`'s emitter is about to append to self.body. With the flag
+        off the preprocessor removes both this and end_profile()'s lines
+        entirely, so the two calls add nothing to a flag-off build beyond the
+        guarded lines themselves (regenerated once, see codegen.py's module
+        docstring update / firmware.rst Profiling section)."""
+        slot = len(self.profile)
+        self.profile.append(_profile_slot(self.plan.graph, op))
+        self.emit("#if defined(CONFIG_KWS_INFER_PROFILE)")
+        self.emit("{ uint32_t _kws_pt = kws_infer_ticks();")
+        self.emit("#endif")
+        return slot
+
+    def end_profile(self, slot: int) -> None:
+        self.emit("#if defined(CONFIG_KWS_INFER_PROFILE)")
+        self.emit(f"{self.prefix}_infer_profile[{slot}].cycles += kws_infer_ticks() - _kws_pt;")
+        self.emit(f"{self.prefix}_infer_profile[{slot}].calls++; }}")
+        self.emit("#endif")
 
     def const_i8(self, name: str, values) -> str:
         flat = ", ".join(str(int(v)) for v in np.ravel(values))
@@ -1089,28 +1164,121 @@ def generate(tflite: bytes, name: str) -> dict[str, str]:
         _fill(tensor)
     for op in plan.ops:
         if op.name == "RESHAPE":
-            pass  # an alias, no code
-        elif op.name == "CONV_2D":
-            emit_conv(ctx, op)
-        elif op.name == "DEPTHWISE_CONV_2D":
-            emit_depthwise(ctx, op)
-        elif op.name == "FULLY_CONNECTED":
-            emit_fully_connected(ctx, op)
-        elif op.name == "AVERAGE_POOL_2D":
-            emit_average_pool(ctx, op)
-        elif op.name == "MEAN":
-            emit_mean(ctx, op)
-        elif op.name == "SOFTMAX":
-            emit_softmax(ctx, op)
-        elif op.name == "LOGISTIC":
-            emit_logistic(ctx, op, logistic_lut(tflite, op))
-        elif op.name == "QUANTIZE":
-            emit_quantize(ctx, op)
+            pass  # an alias, no code, nothing to profile
         else:
-            raise UnsupportedGraph(f"op {op.index} {op.name}: no emitter")
+            slot = ctx.begin_profile(op)
+            if op.name == "CONV_2D":
+                emit_conv(ctx, op)
+            elif op.name == "DEPTHWISE_CONV_2D":
+                emit_depthwise(ctx, op)
+            elif op.name == "FULLY_CONNECTED":
+                emit_fully_connected(ctx, op)
+            elif op.name == "AVERAGE_POOL_2D":
+                emit_average_pool(ctx, op)
+            elif op.name == "MEAN":
+                emit_mean(ctx, op)
+            elif op.name == "SOFTMAX":
+                emit_softmax(ctx, op)
+            elif op.name == "LOGISTIC":
+                emit_logistic(ctx, op, logistic_lut(tflite, op))
+            elif op.name == "QUANTIZE":
+                emit_quantize(ctx, op)
+            else:
+                raise UnsupportedGraph(f"op {op.index} {op.name}: no emitter")
+            ctx.end_profile(slot)
         for t in op.outputs:
             _fill(t)
     return _render(ctx, name, initial_states(tflite, graph))
+
+
+def _profile_lines(ctx: Emitter, name: str) -> list[str]:
+    """CONFIG_KWS_INFER_PROFILE scaffolding: a per-op cycle/call counter table
+    (ctx.profile, filled by begin_profile/end_profile around every kernel
+    call in the function body below) and <name>_infer_profile_dump(), which
+    prints one line per op -- index, type, output shape, static MACs, and the
+    measured microseconds and MAC/us this run -- then a total and resets the
+    counters. `kws_infer_ticks()` is esp_cpu_get_cycle_count() on the device
+    and a clock_gettime() nanosecond counter on the host harness (see
+    firmware/test/Makefile's test_profile target), with ticks_per_us picked
+    to match either unit -- the dump function itself does not care which.
+
+    Absent when the model has no profiled ops (never happens for wake/command
+    today, but write_probe_vectors's one-op probe never calls begin_profile,
+    so its ctx.profile is empty and this returns nothing for it)."""
+    if not ctx.profile:
+        return []
+    n = len(ctx.profile)
+    meta_rows = ",\n".join(
+        f'    {{ {p.op_index}, "{p.type}", {p.width}, {p.height}, {p.channels}, {p.macs}u }}'
+        for p in ctx.profile
+    )
+    return [
+        "#if defined(CONFIG_KWS_INFER_PROFILE)",
+        "#ifdef ESP_PLATFORM",
+        '#include "esp_cpu.h"',
+        '#include "esp_rom_sys.h"',
+        "static inline uint32_t kws_infer_ticks(void) { return esp_cpu_get_cycle_count(); }",
+        "static inline uint32_t kws_infer_ticks_per_us(void)",
+        "{",
+        "    return esp_rom_get_cpu_ticks_per_us();",
+        "}",
+        "#else",
+        "#include <time.h>",
+        "static inline uint32_t kws_infer_ticks(void)",
+        "{",
+        "    struct timespec ts;",
+        "    clock_gettime(CLOCK_MONOTONIC, &ts);",
+        "    return (uint32_t)((uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec);",
+        "}",
+        "static inline uint32_t kws_infer_ticks_per_us(void) { return 1000; }  /* ns -> us */",
+        "#endif",
+        "",
+        "typedef struct { int op_index; const char *type; uint16_t w, h, c; uint32_t macs; } "
+        f"{name}_infer_profile_meta_t;",
+        f"static const {name}_infer_profile_meta_t {name}_infer_profile_meta[{n}] = {{",
+        meta_rows,
+        "};",
+        # Not static: firmware/test/test_profile.c (built with
+        # -DCONFIG_KWS_INFER_PROFILE=1, see firmware/test/Makefile) reads this
+        # array directly to assert the wiring -- every op's call count equals
+        # the number of invocations -- without depending on profile_dump()'s
+        # printf format. The header declares it `extern` (with a matching
+        # local typedef of its own -- this .c does not include its header).
+        f"typedef struct {{ uint32_t cycles; uint32_t calls; }} {name}_infer_profile_slot_t;",
+        f"{name}_infer_profile_slot_t {name}_infer_profile[{n}];",
+        "",
+        "#include <stdio.h>",
+        f"uint32_t {name}_infer_profile_dump(void)",
+        "{",
+        "    uint32_t tpus = kws_infer_ticks_per_us();",
+        "    if (tpus == 0) tpus = 1;",
+        "    uint32_t total_us = 0;",
+        f"    for (int i = 0; i < {n}; i++) {{",
+        f"        uint32_t calls = {name}_infer_profile[i].calls;",
+        # Per-call average, not the cumulative total over the window: macs is
+        # a per-call count (one call's worth of multiply-accumulates), so
+        # dividing it by anything other than one call's worth of microseconds
+        # would scale mac_per_us by the call count for no reason.
+        f"        uint32_t us = calls ? {name}_infer_profile[i].cycles / tpus / calls : 0;",
+        "        total_us += us;",
+        f"        uint32_t mac_per_us = us ? {name}_infer_profile_meta[i].macs / us : 0;",
+        f'        printf("profile {name} op%-3d %-8s %3ux%3ux%4u macs=%10lu us=%6lu '
+        'calls=%4lu mac_per_us=%6lu\\n",',
+        f"               {name}_infer_profile_meta[i].op_index, {name}_infer_profile_meta[i].type,",
+        f"               (unsigned){name}_infer_profile_meta[i].w, "
+        f"(unsigned){name}_infer_profile_meta[i].h, (unsigned){name}_infer_profile_meta[i].c,",
+        f"               (unsigned long){name}_infer_profile_meta[i].macs, (unsigned long)us,",
+        "               (unsigned long)calls, (unsigned long)mac_per_us);",
+        f"        {name}_infer_profile[i].cycles = 0;",
+        f"        {name}_infer_profile[i].calls = 0;",
+        "    }",
+        f'    printf("profile {name} total us=%lu (per call, summed over {n} ops)\\n", '
+        "(unsigned long)total_us);",
+        "    return total_us;",
+        "}",
+        "#endif",
+        "",
+    ]
 
 
 def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
@@ -1163,6 +1331,7 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
     if any("kws_requantize" in line for line in ctx.body):
         lines.append(_REQUANTIZE)
     lines += ["\n".join(statics), "", "\n".join(ctx.consts), ""]
+    lines.append("\n".join(_profile_lines(ctx, name)))
 
     # One name, one number: ARENA_BYTES/arena_bytes() is the transient planner
     # arena (the activations), reused every call; SCRATCH_BYTES is this model's
@@ -1292,6 +1461,21 @@ def _render(ctx: Emitter, name: str, fill: dict[int, int]) -> dict[str, str]:
         "wants more, this module's port under-reserved and the kernels would "
         "write past the shared scratch region. */\n"
         f"int {name}_infer_scratch_query(void);\n"
+        "/* CONFIG_KWS_INFER_PROFILE only: prints one line per kernel call in "
+        f"{name}_infer{'_step' if rings else ''}() -- op index, type, output "
+        "shape, static MACs, measured microseconds and MAC/us -- then a "
+        "total line, and resets the counters. Returns the summed per-op "
+        "microseconds, so the caller can print invoke_time - this as the "
+        "residual (dispatch, requantisation, front-end work the table does "
+        "not see). The per-op array behind it is exposed too (not just the "
+        "printed table), so firmware/test/test_profile.c can assert every "
+        "op's call count without depending on profile_dump()'s printf "
+        "format. */\n"
+        f"#if defined(CONFIG_KWS_INFER_PROFILE)\n"
+        f"typedef struct {{ uint32_t cycles; uint32_t calls; }} {name}_infer_profile_slot_t;\n"
+        f"extern {name}_infer_profile_slot_t {name}_infer_profile[{len(ctx.profile)}];\n"
+        f"uint32_t {name}_infer_profile_dump(void);\n"
+        "#endif\n"
         "\n#ifdef __cplusplus\n}\n#endif\n"
     )
     return {f"{name}_infer.c": "\n".join(lines) + "\n", f"{name}_infer.h": header}

@@ -2766,6 +2766,113 @@ real-voice eval is simply too high to reliably tell a real regression from noise
 `kws-benchmark --folds` (open question, below). Device flashing/measurement was out of
 scope for this host-only session and was not performed.
 
+### E32 — per-layer profiling of the generated inference (2026-09-06, measured on the CoreS3)
+
+E18/E29's device numbers are model-level: a 42 ms command invoke, a ~1.3 ms wake step. The
+generated path calls esp-nn kernels directly (no TFLM dispatch), so `nn_timers.h`'s
+per-kernel-family globals — filled only by TFLM's op wrappers — read blind on it (`conv 0, dw
+0, fc 0, sm 0, pool 0, rest 42125 us`). This entry adds a per-*op* table instead of a
+per-kernel-family one: `CONFIG_KWS_INFER_PROFILE` (`firmware/main/Kconfig.projbuild`) wraps
+every esp-nn call `kws-codegen` emits in `gen/{wake,command}_infer.c` with a cycle-count timer
+that accumulates into a per-op `{cycles, calls}` array, plus a `<name>_infer_profile_dump()`
+that logs one line per op — index, type, output shape, static MACs (from the same planner
+`kws-model-graph` reads), measured microseconds and MAC/us, averaged per call since the last
+reset — then a total. The guard is `#if defined(CONFIG_KWS_INFER_PROFILE)`, so it is always
+*emitted* (the committed `gen/` files changed once, by regeneration) and only ever *compiled*
+in when the Kconfig flag is on; `kws-codegen --check` and the flag-off host suite
+(`firmware/test`, 0 differing bytes on both smoke tests) are unaffected. `recognise.cc`/
+`wake.cc` dump both models' tables automatically every ~50/~100 steps next to the existing
+`NN_TIMERS` trace, printing a *residual* line (`invoke time − profiled total`, both sides
+averaged over the same window) for whatever the table does not see; a new console command,
+`profile`, dumps on demand. A host-only `test_profile` target (`firmware/test/Makefile`)
+builds both generated files a second time with `-DCONFIG_KWS_INFER_PROFILE=1` and asserts
+every op's call count equals the step count and resets to 0 after a dump — it pins the
+wiring, not the numbers (its "microseconds" are a host `clock_gettime()` count, not the
+device's cycles).
+
+**Device tables**, `mode recognise` / `mode wake` + the `profile` console command, PSRAM
+command arena (the shipped default), steady state:
+
+```text
+profile command op0   conv     10x49x48  macs=  211680  us=15118  calls=50  mac_per_us= 14
+profile command op1   dw       10x49x48  macs=  211680  us= 4624  calls=50  mac_per_us= 45
+profile command op2   conv     10x49x48  macs= 1128960  us= 4434  calls=50  mac_per_us=254
+profile command op3   dw       10x49x48  macs=  211680  us= 4224  calls=50  mac_per_us= 50
+profile command op4   conv     10x49x48  macs= 1128960  us= 4303  calls=50  mac_per_us=262
+profile command op5   dw       10x49x48  macs=  211680  us= 4219  calls=50  mac_per_us= 50
+profile command op6   conv     10x49x48  macs= 1128960  us= 4392  calls=50  mac_per_us=257
+profile command op7   mean      1x 1x48  macs=   23520  us=  769  calls=50  mac_per_us= 30
+profile command op8   fc        1x 1x23  macs=    1104  us=   99  calls=50  mac_per_us= 11
+profile command op9   softmax   1x 1x23  macs=       0  us=  135  calls=50  mac_per_us=  0
+profile command total us=42317 (per call, summed over 10 ops)
+profile command residual 38 us/step (invoke avg 42355, profiled 42317)
+
+profile wake   op14  conv      1x 1x32  macs=   6400  us= 558  calls=67  mac_per_us=11
+profile wake   op17  dw        1x 1x32  macs=    160  us=  95  calls=67  mac_per_us= 1
+profile wake   op18  conv      1x 1x64  macs=   2048  us=  75  calls=67  mac_per_us=27
+profile wake   op23  dw        1x 1x64  macs=    576  us=  34  calls=67  mac_per_us=17
+profile wake   op24  conv      1x 1x64  macs=   4096  us=  64  calls=67  mac_per_us=64
+profile wake   op29  dw        1x 1x64  macs=    832  us=  50  calls=67  mac_per_us=17
+profile wake   op30  conv      1x 1x64  macs=   4096  us=  67  calls=67  mac_per_us=61
+profile wake   op32  dw        1x 1x64  macs=   1344  us=  58  calls=67  mac_per_us=23
+profile wake   op33  conv      1x 1x64  macs=   4096  us=  67  calls=67  mac_per_us=61
+profile wake   op36  fc        1x 1x 1  macs=   1088  us=  47  calls=67  mac_per_us=23
+profile wake   op37  logistic  1x 1x 1  macs=      0  us=   1  calls=67  mac_per_us= 0
+profile wake   op44  quantize  1x 1x 1  macs=      0  us=   0  calls=67  mac_per_us= 0
+profile wake total us=1115 (per call, summed over 12 ops)
+profile wake residual 236 us/step (invoke avg 1351, profiled 1115)
+```
+
+Command's residual is 0–2 % of its invoke (38–1,725 us measured across several dumps, against
+a ~42,300–42,370 us average) — the table accounts for essentially all of it. Wake's residual
+is 17–18 % (230–236 us of 1,309–1,351 us) — small in absolute terms but proportionally the
+opposite of command's, because wake's per-op payloads are a few hundred to a few thousand
+MACs each, so the fixed per-call cost (the `data_dims_t`/params setup between kernel calls,
+the esp-nn scratch-pointer re-pointing, the ring memmove/memcpy bookkeeping) is a much larger
+share of a much smaller total.
+
+**The internal-SRAM command arena does not boot with the current (w48) model, on main,
+independent of this change.** Building `KWS_INFER_COMMAND_ARENA_INTERNAL` — with
+`CONFIG_KWS_INFER_PROFILE` on *and* off — crash-loops before any mode task runs:
+`ESP_ERR_NO_MEM at ... console.c:186 ... usb_serial_jtag_driver_install`, logged free
+internal RAM 807 B (largest block 768 B) at the point of failure. The Kconfig help text for
+this choice already named the risk ("if tasks ever do stop being created, this is the first
+thing to look at") from a measurement taken against a smaller arena than the deployed w48 one
+(E18: internal placement now costs 15 KB more than that E16-era measurement did) — this
+confirms the margin is gone, not a regression from profiling's few hundred bytes of `.bss`.
+No command-model table exists for the internal placement as a result: the device cannot
+reach `mode recognise` in that configuration to produce one. Filed as a concern below rather
+than worked around here (out of scope for a profiling change to also fix arena sizing).
+
+**Three levers the tables support**, ranked by expected payoff:
+
+1. **Command op0 (the first conv, in_c=1, on the raw 10×49 MFCC window) is 5–20x less
+   efficient than later same-model convs with far more MACs**: 14 MAC/us against 254–262
+   MAC/us for op2/op4/op6, despite all four sharing the same 48-output-channel width. op0 is
+   ~35 % of command's total invoke time on <5 % of its MACs. A single input channel cannot
+   fill esp-nn's channel-packed vector path the way in_c=48 does two layers later — a stride
+   change on this layer, or restructuring it (e.g. a wider first stride, or folding it into
+   the depthwise that follows) is the highest-payoff lever in either table.
+2. **Wake's residual (17–18 % of its invoke) is well above command's (0–2 %)** — the
+   dispatch/requantisation/bookkeeping overhead the table does not see is proportionally the
+   dominant cost on the wake path, because wake's per-op MAC counts are tiny (160–6,400)
+   relative to the fixed per-call setup cost. Cutting call-site overhead (fusing adjacent
+   small conv/dw pairs, or moving the ring memmove out of the hot path) would move wake's
+   needle more than any single kernel optimisation would.
+3. **Depthwise layers sit well below their paired pointwise convs' MAC/us on both models**
+   (wake dw: 1–23 MAC/us vs its conv neighbours' 27–64; command dw: 45–50 vs its conv
+   neighbours' 254–262) — expected in part (no channel-reduction MACs to amortise memory
+   movement against) but the size of the gap suggests esp-nn's depthwise kernel is not always
+   on its fastest branch for these channel widths (48 for command, 32/64 for wake). Checking
+   channel counts against esp-nn's `%16==0` + 3×3 fast-path condition (`_depthwise_scratch` in
+   `kws_de/codegen.py` already documents the branch) and padding to the next boundary where
+   it misses is the second-highest-payoff lever.
+
+Not implemented here — this entry is measurement only. `docs/sphinx/firmware.rst` gets a
+"Profiling" subsection (how to enable/read it, what the columns mean); the flag stays off by
+default and the device was rebuilt and reflashed to the default (flag-off) configuration
+before ending the session (Assistent mode, `field on`, `field thresh 0.85`).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

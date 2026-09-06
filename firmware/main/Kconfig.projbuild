@@ -76,4 +76,26 @@ config KWS_INFER_PARITY_LOG
       because verifying parity needs only wake and recognise. If a task is
       missing, that log line says so.
 
+config KWS_INFER_PROFILE
+    bool "Per-layer profiling of the generated inference"
+    depends on KWS_INFER_GENERATED
+    default n
+    help
+      Wrap every esp-nn kernel call in gen/wake_infer.c and gen/command_infer.c
+      with a cycle-count timer (esp_cpu_get_cycle_count()) that accumulates
+      into a per-op array, plus a <name>_infer_profile_dump() that logs one
+      line per op — index, type (conv/dw/fc/mean/softmax/logistic/quantize),
+      output shape, static MACs, measured microseconds and MAC/us — then a
+      total. recognise.cc and wake.cc call it once every ~50 / ~100 steps
+      alongside their existing NN_TIMERS trace, printing the residual
+      (invoke time minus the profiled total: dispatch, requantisation and
+      front-end work the table does not see); the console "profile" command
+      dumps both tables on demand.
+
+      Off by default: the timer reads cost a few cycles per op, and with the
+      flag off the guarded lines are removed by the preprocessor, so this
+      does not change the shipped build's generated *behaviour* — only
+      kws-codegen's source output, once, by regeneration (kws-codegen --check
+      stays clean either way, since the guarded lines are always emitted).
+
 endmenu

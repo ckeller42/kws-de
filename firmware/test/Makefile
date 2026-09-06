@@ -124,10 +124,29 @@ test_command_smoke: test_command_smoke.c $(GEN_DIR)/command_infer.c $(GEN_DIR)/c
 	$(CC) $(CFLAGS) -I$(ESP_NN)/include -c $(GEN_DIR)/command_infer.c -o command_infer_smoke.o
 	$(CC) $(ESP_NN_CFLAGS) -o $@ test_command_smoke.o command_infer_smoke.o $(ESP_NN_SRCS) -lm
 
+# CONFIG_KWS_INFER_PROFILE wiring check: the same committed *_infer.c and
+# *_smoke_vectors.h as the two *_smoke targets above, rebuilt with the flag on
+# instead of the flag-off objects those targets produce -- hence the
+# _profile.o suffix rather than reusing command_infer.o/wake_infer.o. Stays
+# out of $(TESTS)/`all` so the default `make -C firmware/test` keeps proving
+# the flag-off path unchanged (what ships); see test_profile.c for what this
+# one actually checks (wiring, not timing numbers).
+test_profile: test_profile.c $(GEN_DIR)/command_infer.c $(GEN_DIR)/wake_infer.c \
+              $(GEN_DIR)/command_smoke_vectors.h $(GEN_DIR)/wake_smoke_vectors.h | $(ESP_NN)
+	$(CC) $(CFLAGS) -DCONFIG_KWS_INFER_PROFILE=1 -I$(GEN_DIR) -I$(ESP_NN)/include \
+	    -c test_profile.c -o test_profile.o
+	$(CC) $(CFLAGS) -DCONFIG_KWS_INFER_PROFILE=1 -I$(ESP_NN)/include \
+	    -c $(GEN_DIR)/command_infer.c -o command_infer_profile.o
+	$(CC) $(CFLAGS) -DCONFIG_KWS_INFER_PROFILE=1 -I$(ESP_NN)/include \
+	    -c $(GEN_DIR)/wake_infer.c -o wake_infer_profile.o
+	$(CC) $(ESP_NN_CFLAGS) -o $@ test_profile.o command_infer_profile.o wake_infer_profile.o \
+	    $(ESP_NN_SRCS) -lm
+	./$@
+
 # Also the generated vector headers: they are produced from whatever model the
 # generator was last pointed at, and a stale one silently fails a hand-run
 # parity target against perfectly good committed C.
 clean:
-	rm -f $(TESTS) test_infer_parity test_wake_parity test_command_parity *.o
+	rm -f $(TESTS) test_infer_parity test_wake_parity test_command_parity test_profile *.o
 	rm -f $(GEN_DIR)/*_infer_vectors.h $(GEN_DIR)/conv_probe.c $(GEN_DIR)/conv_probe_vectors.h
-.PHONY: all clean test_infer_parity test_wake_parity test_command_parity
+.PHONY: all clean test_infer_parity test_wake_parity test_command_parity test_profile

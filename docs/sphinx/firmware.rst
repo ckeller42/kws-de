@@ -469,6 +469,76 @@ As of main commit ``a6c584d`` (2026-09-03), measured on a real CoreS3:
      - 0 LSB (exact, 98x40 values)
      - :need:`REQ_FW_WAKE_FRONTEND_PARITY`
 
+Profiling
+------------
+
+``CONFIG_KWS_INFER_PROFILE`` (off by default) adds a per-layer timing table to
+the generated inference path (``gen/wake_infer.c``, ``gen/command_infer.c``),
+underneath the model-level numbers in the table above. ``NN_TIMERS`` there
+answers "how much of an ``Invoke`` is conv/dw/fc/softmax/pool assembly" —
+useful for the TFLM fallback, but blind on the generated path, since nothing
+fills those globals when the esp-nn kernels are called directly instead of
+through TFLM's op wrappers. This flag answers the same question one layer
+down: which *op* the time actually went to, not just which kernel family.
+
+**Enabling it.** ``echo CONFIG_KWS_INFER_PROFILE=y >> firmware/sdkconfig.defaults``
+(or set it interactively with ``idf.py menuconfig``, under "kws-de
+inference"), then rebuild and reflash. It is a straight rebuild, not a
+generator run: ``kws-codegen`` always emits the profiling scaffolding in
+``gen/*_infer.c``, wrapped in ``#if defined(CONFIG_KWS_INFER_PROFILE)`` — the
+Kconfig flag decides whether the preprocessor keeps or strips it, so the
+committed generated C is identical either way and ``kws-codegen --check``
+stays clean regardless of which way the flag is set.
+
+**Reading it.** Each model logs one line per op, in the order the generated
+code calls esp-nn:
+
+.. code-block:: text
+
+   profile command op0   conv     10x 49x  48 macs=    211680 us=      82 calls=  50 mac_per_us=  2581
+   profile command op1   dw       10x 49x  48 macs=    211680 us=      70 calls=  50 mac_per_us=  3024
+   ...
+   profile command total us=27114
+
+- **op<N>** — the op's index in the model graph (matches the ``opN_*``
+  constant names inside the generated ``.c``, so a line cross-references
+  straight back to the kernel call and to ``kws-model-graph``'s static MAC
+  table for the same model).
+- **type** — ``conv`` / ``dw`` / ``fc`` / ``mean`` / ``softmax`` /
+  ``logistic`` / ``quantize`` / ``avgpool`` — which esp-nn kernel (or, for
+  ``logistic``/``quantize``, which non-kernel elementwise op) ran.
+  ``logistic``/``quantize``/``softmax`` have no MAC count that means
+  anything (a LUT lookup, a rescale, an exp+normalise) and report ``macs=0``.
+- **the shape triple** — output width x height x channels.
+- **macs** — the static MAC count for that op, computed by the same planner
+  ``kws-model-graph`` reads its numbers from (``kws_de.codegen._profile_slot``),
+  so it does not depend on anything measured at runtime.
+- **us** — measured microseconds, averaged over the calls since the last
+  dump: ``esp_cpu_get_cycle_count()`` deltas divided by
+  ``esp_rom_get_cpu_ticks_per_us()`` on the device.
+- **calls** — invocations since the last dump (reset by the dump itself).
+- **mac_per_us** — ``macs / us``: the layer's realised throughput, directly
+  comparable to esp-nn's kernel ceiling for that op's channel width/alignment.
+
+The per-op lines are followed by a total (the summed per-op microseconds —
+still a per-call figure, since every "us" column feeding it already is).
+``recognise.cc``/``wake.cc`` print one further line right after — the
+*residual*, ``invoke time − profiled total``, both sides averaged over the
+same ~50/~100-step window — which is everything the table does not see:
+per-call dispatch (the ``data_dims_t``/params setup between kernel calls),
+the ring memcpy/memmove bookkeeping, and any requantisation done outside an
+esp-nn kernel. Both dumps happen automatically every ~50 steps in recognise
+mode and ~100 steps (every 2 s trace) in wake mode; the console command
+``profile`` triggers an on-demand dump of both models' tables at any time.
+
+**What it does not do.** It does not change what the model computes — the
+timers wrap existing kernel calls, they do not skip or reorder them — and
+with the flag off the guarded lines compile to nothing, so the shipped
+build's generated code paths are unaffected. It also does not itself
+recommend or apply any optimisation; reading the table and picking where to
+spend effort next is a separate step (see ``docs/paper-notes.md`` for a
+worked example against the two shipped models).
+
 Screenshot mechanism
 ----------------------
 
