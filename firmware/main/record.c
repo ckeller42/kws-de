@@ -43,7 +43,8 @@ static uint32_t s_speaker;
 static uint32_t s_boot;                       /* boot counter, bumped once in nvs_load() */
 static int s_paused = 1;
 static int16_t *s_take;                       /* PSRAM; see TAKE_BUF_SAMPLES */
-#define TAKE_MAX (KWS_SAMPLE_RATE * 6 + PREROLL_SAMPLES)
+/* 9.8 s (PROMPT_ELICIT's cap, prompt_cap_ms()) is the longest guided take. */
+#define TAKE_MAX (KWS_SAMPLE_RATE * 98 / 10 + PREROLL_SAMPLES)
 /* One buffer serves both writers. A field take of a re-triggered window can be
    longer than a guided take, so the buffer is the larger of the two — 313 KB of
    the 8 MB PSRAM, which is what lets field_take_span() cap on the ring rather
@@ -99,7 +100,8 @@ static int next_path(char *out, size_t n)
     char dir[64];
     int slugdir = s_prompts.set == PROMPT_WORDS || s_prompts.set == PROMPT_WAKE;
     const char *sub = slugdir ? prompt_slug(&s_prompts)
-                    : s_prompts.set == PROMPT_SENTENCES ? "_phrase_" : "_neg_";
+                    : s_prompts.set == PROMPT_SENTENCES ? "_phrase_"
+                    : s_prompts.set == PROMPT_ELICIT ? "_elicit_" : "_neg_";
     snprintf(dir, sizeof dir, "%s/%s", storage_root(), s_st.speaker);         mkdir(dir, 0777);
     snprintf(dir, sizeof dir, "%s/%s/%s", storage_root(), s_st.speaker, sub); mkdir(dir, 0777);
     for (int i = 1; i < 1000; i++) {
@@ -120,8 +122,12 @@ static void append_session_csv(const char *path, uint32_t ms, float peak_dbfs)
     if (!f) { ESP_LOGE(TAG, "csv open failed"); return; }
     if (fresh) fputs("prompt,file,ms,peak_dbfs,set,seed,ts\n", f);
     /* the file column stays root-relative (spkNN/...), so the host-side ingest
-       reads the same rows whichever volume the take was written to */
-    fprintf(f, "\"%s\",%s,%lu,%.1f,%s,%lu,%lld\n", prompt_text(&s_prompts), path + strlen(storage_root()) + 1,
+       reads the same rows whichever volume the take was written to. For
+       PROMPT_ELICIT the prompt column is the EXPECTED INTENT ("Licht Küche
+       an"), not the scene/question shown on screen — QC compares what the
+       speaker actually said against this, not against the display text. */
+    const char *csv_prompt = s_prompts.set == PROMPT_ELICIT ? prompt_intent(&s_prompts) : prompt_text(&s_prompts);
+    fprintf(f, "\"%s\",%s,%lu,%.1f,%s,%lu,%lld\n", csv_prompt, path + strlen(storage_root()) + 1,
             (unsigned long)ms, peak_dbfs, prompt_set_name(s_prompts.set), (unsigned long)s_prompts.seed,
             esp_timer_get_time() / 1000);
     fclose(f);
@@ -330,6 +336,12 @@ static void record_task(void *arg)
                of a word, a short one before the second read. Paces the session so
                it no longer flies past; the prompt label stays on screen throughout. */
             status_set(REC_GETREADY);
+            if (s_prompts.set == PROMPT_ELICIT) {
+                /* Console-visible ground truth for a device check without a camera:
+                   what the screen shows, and what answer is expected. */
+                ESP_LOGI(TAG, "elicit: prompt %d/%d \"%s\" expects \"%s\"",
+                         s_prompts.index + 1, s_prompts.count, prompt_text(&s_prompts), prompt_intent(&s_prompts));
+            }
             vTaskDelay(pdMS_TO_TICKS(s_take_idx == 0 ? GETREADY_MS : BETWEEN_TAKES_MS));
             int r = capture_one(&cmd);
             if (r == 0) {                                 /* take saved */
@@ -376,6 +388,12 @@ static void record_task(void *arg)
             s_take_idx = 0; s_saved_takes = 0;
             nvs_bump_speaker();
             prompt_session_init(&s_prompts, PROMPT_WAKE, (uint32_t)esp_timer_get_time());
+            s_paused = 0;
+            break;
+        case REC_CMD_START_ELICIT_SESSION:
+            s_take_idx = 0; s_saved_takes = 0;
+            nvs_bump_speaker();
+            prompt_session_init(&s_prompts, PROMPT_ELICIT, (uint32_t)esp_timer_get_time());
             s_paused = 0;
             break;
         }
