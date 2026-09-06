@@ -176,6 +176,30 @@ generated before that existed has to be regenerated to be checkable at all. The 
 summary is the useful part: a voice that is not German shows up as 100 % failed, not as
 scattered bad luck.
 
+### 7. Once the model is deployed, its own false fires are the best negatives you will get
+
+TTS near-misses (rule 5) are a hypothesis about what a wake model over-generalises to; a
+deployed model's field-capture log is the *measurement*. Round 7 trained on the round 6d
+model's first real-environment false fires — 16 of them from one session with capture armed
+at the loose 0.85 gate (E21): 10 on ordinary German conversation, 5 on near-silence, 1
+clipped. Nothing about this class of negative exists anywhere else in the recipe — TTS
+near-misses are synthetic and aimed at a *guessed* failure family, and the field hard
+negatives of rule 3 are cut from deliberately-spoken command takes, never from the device
+just sitting there being talked near.
+
+Treat it like every other real-audio addition in this file: its own feature dir(s), added
+*on top of* the existing weights (never paid for out of them), and split so half is held out
+and never trained on — a false fire that recurs on the held-out half after training on the
+other half is the round's answer to "did this help", the same way a held-out session answers
+it for positives (rule 1). A single capture session cannot be session-disjoint against
+itself, so the split here is by clip, not by session; say so in the report rather than
+implying a guarantee the data can't back.
+
+A false fire on ordinary speech and a false fire on near-silence are different failure
+modes worth different feature dirs and different acceptance rows — a near-silence clip has
+almost no phonetic content for the model to have latched onto, so lumping it in with speech
+negatives would hide which kind of confusion, if either, actually improved.
+
 ### Probing
 
 Use `scripts/wake_probe.py` (device gate 0.85 x 2 consecutive steps), not an ad-hoc loop:
