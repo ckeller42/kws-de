@@ -305,11 +305,16 @@ Three mechanisms, and all three are needed:
 - ``kws_de.qc.voice_gate(engine, voice, transcriber)`` judges a whole
   **voice**, once, not a clip: it synthesizes one fixed German calibration
   sentence (``VOICE_GATE_SENTENCE``) with that voice and passes iff the
-  detected language is ``de`` and at least 90% of the sentence's tokens are
-  heard, in order. A voice that gets a full sentence right says every short
-  command word right too, and a voice that gets it wrong would fail every
-  clip it's asked for anyway (E27, round-6d) — so a failing voice is dropped
-  entirely rather than judged clip-by-clip. ``kws_de.data.passing_voices``
+  detected language is ``de`` and at least 85% of the sentence's required
+  vocabulary tokens are heard *anywhere* in the transcript (order-independent
+  — ``_voice_gate_score``, E29). A voice that gets a full sentence right says
+  every short command word right too, and a voice that gets it wrong would
+  fail every clip it's asked for anyway (E27, round-6d) — so a failing voice
+  is dropped entirely rather than judged clip-by-clip. The tolerance exists
+  because a strict, order-locked match let one Whisper mishearing (E28:
+  "Küche" heard as "Kirche") zero out every token after it in the sentence,
+  wrongly failing demonstrably good voices; E29's calibration sentence also
+  avoids that specific mishearing outright. ``kws_de.data.passing_voices``
   caches one verdict per ``engine:voice`` in
   ``$KWS_DATA_ROOT/data/tts_voice_gate.json`` (voice, engine, ok, reason,
   transcript, date) — a voice's audio doesn't change, so a cached verdict

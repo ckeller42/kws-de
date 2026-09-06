@@ -452,16 +452,45 @@ def tts_gate(path: Path, text: str, transcriber: Transcriber) -> tuple[bool, str
 # right says every command word right too, and a voice that gets it wrong (wrong
 # language, or Whisper can barely make out the words) would fail every short command
 # clip it's asked for anyway — the failure mode is a voice, not a clip.
-VOICE_GATE_SENTENCE = "Bitte schalte das Licht in der Küche an und die Heizung im Bad aus"
-VOICE_GATE_MIN_SCORE = 0.9
+#
+# E28 shipped "...der Küche an..." and then found Whisper mishears "Küche" as "Kirche"
+# on demonstrably good voices (thorsten-medium and 4 others) — the exact mishearing
+# round-6d's field report already named (train/mww/README.md rule 5). This sentence
+# avoids "Küche" entirely while still exercising umlauts/eszett via "außen" (ß),
+# "Kühlschrank" (ü) and "wärmer" (ä), plus three more command words (Licht, an, aus,
+# Heizung) — seven required vocabulary tokens total (E29).
+VOICE_GATE_SENTENCE = (
+    "Mach bitte das Licht außen an, schalte den Kühlschrank aus und stell die Heizung wärmer"
+)
+# 6/7 required tokens (one substituted/misheard token) still passes; below that, a
+# voice has more than one genuinely wrong word and is rejected (E29 — was 0.9/strict
+# in-order matching, which let a single early mishearing zero out every token after
+# it; see `_voice_gate_score`).
+VOICE_GATE_MIN_SCORE = 0.85
 VOICE_GATE_RATE = 160  # wpm; a normal speaking rate, not an augmentation extreme
+
+
+def _voice_gate_score(prompt: str, transcript_text: str) -> tuple[float, str | None]:
+    """Fraction of `prompt`'s required vocabulary tokens heard anywhere in
+    `transcript_text` (each via `_matches`'s exact-or-edit-distance-1 rule). Unlike
+    `content_gate`'s sequential in-order match, this is order-independent: one
+    substituted/misheard token costs only itself, not every required token after it
+    in the sentence (E29 — see VOICE_GATE_SENTENCE's comment)."""
+    need = required_tokens(prompt, "sentences")
+    heard = normalise(transcript_text)
+    if not need:
+        return 1.0, None
+    missing = [w for w in need if not any(_matches(w, h) for h in heard)]
+    score = (len(need) - len(missing)) / len(need)
+    return score, None if not missing else f"missing:{' '.join(missing)}"
 
 
 def voice_gate(engine: str, voice: str, transcriber: Transcriber, synth=None) -> dict:
     """Pass/fail one TTS voice: synthesize `VOICE_GATE_SENTENCE` with it and judge the
     voice, not a clip. Pass iff the detected language is `de` and at least
-    `VOICE_GATE_MIN_SCORE` of the sentence's tokens are heard, in order (the same
-    order-tolerant match `content_gate` uses for a "sentences" take).
+    `VOICE_GATE_MIN_SCORE` of the sentence's required tokens are heard anywhere in the
+    transcript (`_voice_gate_score` — order-independent, tolerant of one substituted
+    token).
 
     `synth` defaults to `kws_de.tts.synthesize`; injectable for tests. Returns a plain
     dict — ``{"engine", "voice", "ok", "reason", "transcript"}`` — the shape
@@ -491,7 +520,7 @@ def voice_gate(engine: str, voice: str, transcriber: Transcriber, synth=None) ->
             "reason": f"language:{lang}",
             "transcript": transcript,
         }
-    score, reason = content_gate("sentences", VOICE_GATE_SENTENCE, transcript)
+    score, reason = _voice_gate_score(VOICE_GATE_SENTENCE, transcript)
     ok = score >= VOICE_GATE_MIN_SCORE
     return {
         "engine": engine,
