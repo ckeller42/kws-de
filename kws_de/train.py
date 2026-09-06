@@ -179,7 +179,10 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     out_name = args.out or ("command.keras" if args.v2 else "kws.keras")
     float_path = config.MODELS_DIR / out_name
     data = np.load(config.DATA_DIR / f"{prefix}_train.npz")
-    X, y = upweight_real(data["X"], data["y"], data["is_tts"], args.real_weight)
+    # Older/toy feature caches (e.g. tests/test_train_qat.py's fixture) predate the
+    # `is_tts` row flag; --real-weight is a no-op without it (real_idx empty below).
+    is_tts = data["is_tts"] if "is_tts" in data.files else np.ones(data["X"].shape[0], dtype=bool)
+    X, y = upweight_real(data["X"], data["y"], is_tts, args.real_weight)
     size = args.epochs * X.shape[0]
     with Timed("train", size=size, note=prefix):
         model, history = train(X, y, epochs=args.epochs, num_classes=num_classes, width=args.width)
