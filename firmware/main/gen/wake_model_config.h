@@ -7,5 +7,5 @@
 #define KWS_WAKE_ARENA_BYTES 40960
 #define KWS_WAKE_FRAMES 3
 #define KWS_WAKE_FEATURES 40
-#define KWS_WAKE_MODEL_ID "hey_bus.tflite@5fcdaf63 2026-09-04"
+#define KWS_WAKE_MODEL_ID "hey_bus.tflite@4aaa2f98 2026-09-06"
 #define KWS_WAKE_MODEL_BYTES 58080
