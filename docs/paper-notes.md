@@ -2873,6 +2873,72 @@ Not implemented here — this entry is measurement only. `docs/sphinx/firmware.r
 default and the device was rebuilt and reflashed to the default (flag-off) configuration
 before ending the session (Assistent mode, `field on`, `field thresh 0.85`).
 
+### E33 — training on the deployed model's own real false fires (wake, 2026-09-06, host-only)
+
+E22/E24 shipped round 6d after recommending a device soak with field capture armed at the
+loose gate (E21). The soak delivered exactly what it was for: one real conversation session
+(spk19+spk20, nobody addressing the device) made the deployed model false-fire **16 times**
+— 10 on ordinary German speech, 5 on near-silence, 1 clipped — plus 25 new real "Hey Bus"
+positives. Every prior negative in this recipe was TTS or real speech cut deliberately after
+a spoken "Hey Bus" (round 6's rule 3); this is the first round trained on real false fires
+from a session where the device was never addressed.
+
+Each false-fire subgroup is split 50/50 by clip (a single session cannot be session-disjoint
+against itself): the train halves become two new feature dirs added *on top of* round 6d's
+negative weights (weight 4.0 for real false-fire speech, 2.0 for near-silence — first
+reasonable values, not a search), and the held-out halves — never trained on — become the
+round's two new acceptance rows. New real positives are split 12 train / 13 held out and
+folded into the same trimmed-positive dir at the same 5.0 weight as round 6d's ten, keeping
+the 71.4 % real share unchanged; 3 of the 12 train-side clips trimmed to nearly their full
+length instead of isolating "Hey Bus" and were dropped rather than risk the round-5/6c
+label-alignment bug on clips longer than `clip_duration_ms`.
+
+| gate | round 6d (installed) | round 7 |
+|---|---|---|
+| held-out session 0849 fires (3) | 3/3 @ 0.996 | 3/3 @ 0.996 |
+| new real positives, held out (13) | 12/13 | **13/13** |
+| held-out real non-wake (9) / in-training (5) | 0/9 (0.402) / 0/5 (0.598) | 0/9 (**0.285**) / 0/5 (**0.285**) |
+| room noise, in-training (40) / held out (9) | 0/40 / 0/9 | 0/40 / 0/9 |
+| **real false-fire speech, held out (5)** | n/a — this round's target | 5/5 (deployed) → **1/5** |
+| **near-silence fires, held out (3)** | n/a — this round's target | 3/3 (deployed) → **1/3** |
+| TTS non-wake, seen (46) / unseen (36) | 4/46 / 2/36 | 5/46 / 4/36 |
+| fire latency, held-out / in-training / new-held (median) | 0.14 / 0.23 / 0.35 s | **0.02 / −0.07 / 0.04 s** |
+| size / MACs | 58,080 B / 24,736 | 58,080 B / 24,736 |
+
+**It works, at the cost the round expected.** The two target rows are the point: real
+false fires that hit the deployed model 5/5 and 3/3 on their now-held-out halves — clips
+round 7 never saw in any form during training — drop to 1/5 and 1/3, with recall not just
+retained but improved (round 7 fixes round 6d's one held-out miss). Every real-audio
+non-wake row ties or improves, and latency improves by 0.1-0.3 s across every positive set.
+The residual near-silence fire is the *clipped* clip, not either near-silence one, and its
+peak is bit-for-bit identical (0.996) before and after — clipping looks like a different
+failure mode this recipe may not reach at all.
+
+The cost lands entirely on the synthetic TTS gate: 1 more seen-voice and 2 more
+unseen-voice fires out of 46/36 fixed clips. It is not a superset of round 6d's failure —
+round 6d's entire residue was `de_DE-mls-medium`, already flagged (E22 follow-up 2) as a
+poor short-phrase synthesiser, and round 7 fires on it **zero** times; the new fires are
+"der bus kommt gleich" spread across three different, better-behaved voices instead. This
+is the same real-audio-vs-TTS-margin trade round 5's user decision already made once
+deliberately, now made again by a small amount on the far side of it.
+
+The internal mWW ambient metric, which has disagreed with the real-audio gates in both
+directions in E20 and E22, moves *with* everything else this time: faph at the 0.85 cutoff
+drops from 2.062 to 0.187. Treated as supporting context, not a decision — the pattern
+established in E20/E22 is that it does not reliably track what matters here.
+
+ETA ledger note: `KWS_DATA_ROOT` was not exported for either `kws-eta` call this round, so
+both landed in the repo-local fallback ledger rather than the shared one — predicted 16.1
+min (4 runs), actual 17.36 min (+7.8%, just past the top of the range). Full report in the
+training directory as `HEYBUS-R7-REPORT.md`.
+
+**Recommendation: deploy `hey_bus_r7.tflite`.** It is the first model trained specifically
+against the deployed model's own real-environment false fires and it cuts them sharply with
+zero recall loss and improved latency, at a small, honestly-reported TTS-gate cost that
+lands on voices the project would trade for real-device accuracy regardless. Nothing was
+promoted: `hey_bus.tflite` and `firmware/main/gen/` are untouched, no firmware was built or
+flashed, and no audio was played to any device or speaker in this round.
+
 ### E34 — deploying round 7 (2026-09-06, host-only)
 
 Round 7 (E33, `HEYBUS-R7-REPORT.md` in the training directory) trains on the deployed
