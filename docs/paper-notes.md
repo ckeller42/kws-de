@@ -2509,6 +2509,81 @@ build — the task did not call for it, and this entry's numbers reflect the voi
 alone. Device flashing/measurement was out of scope for this host-only session and was
 not performed.
 
+### E29 — grammar rescoring at window close + wake burn-in (feat/grammar-rescoring-burnin)
+
+Two small firmware fixes, both from device evidence: `#67`'s field test saw `an`
+rarely fire even when heard clearly enough to be the second-best candidate the
+moment `Licht` (or another device) landed on `_unknown_`, and a separate take
+fired at wake_prob 0.965 on -58 dBFS silence 40 s after boot — the wake gate
+trusting the very first post-reset steps, before `wakefront_reset()`'s cleared
+noise estimate/PCAN gains had resettled.
+
+**A — grammar rescoring.** `firmware/main/intent.c`'s `intent_rescore()`: when
+the plain `intent_parse()` fails, retry once by substituting the stream
+decoder's runner-up command word at each `"_unknown_"` slot, accepting the
+retry only if exactly one substitution (at or above `INTENT_RESCORE_FLOOR`,
+0.25) makes it valid. `firmware/main/stream.{h,c}` now keeps `last_smoothed[]`
+(the moving-average vector `stream_push()` already computed but discarded) so
+`firmware/main/recognise.cc` can record each fired step's runner-up alongside
+`window_words` in a new `window_seconds` field
+(`firmware/main/recognise.h:22`), same `"<label>:<conf>"` / `'|'` format,
+positionally aligned. `firmware/main/wake.cc`'s window-close edge falls back to
+`intent_rescore()` only when the plain parse is invalid, logs `intent: <text>
+(rescored: X->Y)` on a successful retry, and hands `post_field_take()` the
+same `text`/`rst.window_words` as before — `device_intent` carries the
+rescored text, `device_words` stays the untouched raw fires.
+
+Host test: `firmware/test/test_intent.c` adds 5 cases — a missing action and a
+missing device slot, each fixed by one substitution; below-floor and
+two-`_unknown_` cases both correctly refused; an already-valid parse is a
+no-op. `scripts/gen-intent-cases.py`/`intent_cases.h` (the plain-parse parity
+table against `kws_de.grammar.parse()`) is untouched.
+
+**B — wake burn-in.** `firmware/main/wakefront.c`/`.h`: a `WAKEFRONT_BURN_IN_STEPS`
+(33, ~1 s of 30 ms wake-model steps) counter, reset to 0 by both
+`wakefront_init()` and `wakefront_reset()` and incremented (capped) by every
+`wakefront_take()`; `wakefront_warm()` reports true once it reaches the cap.
+Lives in `wakefront.c` rather than `wake.cc` because it is fundamentally a
+front-end property (is the noise estimate/PCAN state resettled yet), which
+also makes it host-testable exactly like the rest of the front-end.
+`firmware/main/wake.cc`'s fire condition gains one `&& wakefront_warm()`
+clause — one line, applying to every `wakefront_reset()` call site (mode
+entry and the ring-overrun path both), not just mode entry. The peak trace
+above the fire check is unaffected, so a burn-in "fire" that never happened
+still shows up as a peak in the log.
+
+Host test: `firmware/test/test_wakefront.c` adds a block asserting
+`wakefront_warm()` is false for the first `WAKEFRONT_BURN_IN_STEPS` takes
+after a reset and true from the next one on (content-agnostic — silence PCM,
+since only the step count is under test).
+
+**Host checks, all clean.** `make -C firmware/test`: `host tests OK` (12
+targets, including the new `test_intent`/`test_wakefront` cases). Docker
+`espressif/idf:v5.5.5 idf.py build`: clean, `kws_de_fw.bin` 0xf9eb0 B (67%
+partition free). Repeated once more with a `CONFIG_KWS_INFER_GENERATED=n`
+overlay in a scratch build dir (`build_overlay`, deleted after; `firmware/sdkconfig`
+untouched — both gitignored) to confirm the interpreter fallback path still
+builds: clean, one pre-existing unrelated warning (`recognise.cc:180: unused
+variable 'use_generated'`, present on the interpreter path regardless of this
+branch). `ruff check`: clean (no `kws_de/*.py` touched).
+
+**Device verification: pending.** `bar` (the CoreS3's remote host) was
+unreachable over Tailscale SSH for the whole of this session — every
+`ssh bar` attempt timed out at the TCP connect stage, tried repeatedly over
+more than the 10-minute budget agreed with the coordinator. Not flashed, not
+run on real audio. The clips this verification needs are already staged and
+gated: `uv run --no-sync kws-tts-check` on the "Hey Bus, Licht an" takes
+(`eva_k`, `ramona`, `thorsten` voices, 6 dB) found `eva_k` and `thorsten` `ok`
+(`de`, transcript "Hey Bus, Licht an.") and `ramona` failing content match
+(transcript "Hey Bus liegt an" — Whisper mishearing "Licht" as "liegt", a real
+gate rejection, not a manifest bug) — only the two `ok` clips are cleared to
+play. Follow-up device session: flash, `mode assist`, confirm no fire in the
+first 2 s of the wake trace (burn-in), `field on`, play the two `ok` clips
+(three plays total) and confirm `intent: Licht -> an` (plain or rescored)
+fires more often than `#67`'s baseline, `scripts/ingest.sh -H bar` the session
+into `incoming-tts/`, leave the device in Assistent with `field on`,
+`field thresh 0.85`.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

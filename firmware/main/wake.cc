@@ -329,7 +329,11 @@ static void wake_task(void *)
                wake_prob is what kws-qc re-reads against WAKE_THRESHOLD to say
                whether the production gate would have fired on this take. */
             float fire_peak = 0;
-            if (consecutive >= WAKE_MIN_CONSECUTIVE && esp_timer_get_time() >= deaf_until_us) {
+            /* wakefront_warm(): mute the gate for the front-end's first
+               WAKEFRONT_BURN_IN_STEPS after a reset (mode entry or ring
+               overrun, above) -- the peak trace below still runs, so a burn-in
+               "fire" that never happened still shows up as a peak in the log. */
+            if (consecutive >= WAKE_MIN_CONSECUTIVE && esp_timer_get_time() >= deaf_until_us && wakefront_warm()) {
                 deaf_until_us = esp_timer_get_time() + (int64_t)WAKE_REFRACTORY_MS * 1000;
                 consecutive = 0;
                 fire_peak = run_peak;
@@ -408,9 +412,15 @@ static void wake_task(void *)
                         recognise_status_t rst;
                         recognise_get_status(&rst);
                         intent_t iv = intent_parse(rst.window_intent);
+                        const char *rescored_from = nullptr, *rescored_to = nullptr;
+                        if (!iv.valid)
+                            iv = intent_rescore(rst.window_intent, rst.window_seconds, INTENT_RESCORE_FLOOR,
+                                                 &rescored_from, &rescored_to);
                         char text[64];
                         intent_format(&iv, text, sizeof text);
-                        if (iv.valid) ESP_LOGI(TAG, "intent: %s", text);
+                        if (iv.valid && rescored_to)
+                            ESP_LOGI(TAG, "intent: %s (rescored: %s->%s)", text, rescored_from, rescored_to);
+                        else if (iv.valid) ESP_LOGI(TAG, "intent: %s", text);
                         else ESP_LOGI(TAG, "intent: none (%s)", rst.window_intent);
                         xSemaphoreTake(s_lock, portMAX_DELAY);
                         strlcpy(s_last_intent, iv.valid ? text : "none", sizeof s_last_intent);

@@ -57,6 +57,14 @@
 /** Rows buffered internally; the model consumes 3 per Invoke(). */
 #define WAKEFRONT_MAX_ROWS 3
 
+/** wakefront_take() calls (i.e. 30 ms wake-model steps, WAKEFRONT_MAX_ROWS
+ * rows each) after a wakefront_reset() before wakefront_warm() reports true.
+ * ~1 s: long enough for the noise estimate/PCAN gains FrontendReset() just
+ * cleared to resettle from a cold state -- a take fired at wake_prob 0.965 on
+ * -58 dBFS silence 40 s after boot when the wake gate trusted the very first
+ * post-reset steps (E29). */
+#define WAKEFRONT_BURN_IN_STEPS 33
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -100,6 +108,13 @@ bool wakefront_ready(int frames);
  *               Filled oldest row first — the order the model expects.
  */
 void wakefront_take(int frames, int8_t *dst);
+
+/**
+ * @brief Has the front-end had WAKEFRONT_BURN_IN_STEPS steps to resettle
+ * since the last wakefront_reset()? The wake gate must not fire while this
+ * is false -- see WAKEFRONT_BURN_IN_STEPS.
+ */
+bool wakefront_warm(void);
 
 #ifdef __cplusplus
 }
