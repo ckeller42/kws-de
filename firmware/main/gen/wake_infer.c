@@ -75,6 +75,68 @@ static const int8_t op36_w[1088] = {-55, -33, -12, 39, 1, -48, -47, -26, -42, 14
 static const int32_t op36_b[1] = {-705};
 static const int8_t op37_lut[256] = {-128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -128, -127, -127, -127, -127, -127, -127, -126, -126, -126, -125, -125, -124, -123, -122, -121, -119, -117, -115, -112, -109, -105, -101, -96, -90, -83, -76, -67, -58, -47, -36, -25, -12, 0, 12, 25, 36, 47, 58, 67, 76, 83, 90, 96, 101, 105, 109, 112, 115, 117, 119, 121, 122, 123, 124, 125, 125, 126, 126, 126, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127};
 
+#if defined(CONFIG_KWS_INFER_PROFILE)
+#ifdef ESP_PLATFORM
+#include "esp_cpu.h"
+#include "esp_rom_sys.h"
+static inline uint32_t kws_infer_ticks(void) { return esp_cpu_get_cycle_count(); }
+static inline uint32_t kws_infer_ticks_per_us(void)
+{
+    return esp_rom_get_cpu_ticks_per_us();
+}
+#else
+#include <time.h>
+static inline uint32_t kws_infer_ticks(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec);
+}
+static inline uint32_t kws_infer_ticks_per_us(void) { return 1000; }  /* ns -> us */
+#endif
+
+typedef struct { int op_index; const char *type; uint16_t w, h, c; uint32_t macs; } wake_infer_profile_meta_t;
+static const wake_infer_profile_meta_t wake_infer_profile_meta[12] = {
+    { 14, "conv", 1, 1, 32, 6400u },
+    { 17, "dw", 1, 1, 32, 160u },
+    { 18, "conv", 1, 1, 64, 2048u },
+    { 23, "dw", 1, 1, 64, 576u },
+    { 24, "conv", 1, 1, 64, 4096u },
+    { 29, "dw", 1, 1, 64, 832u },
+    { 30, "conv", 1, 1, 64, 4096u },
+    { 32, "dw", 1, 1, 64, 1344u },
+    { 33, "conv", 1, 1, 64, 4096u },
+    { 36, "fc", 1, 1, 1, 1088u },
+    { 37, "logistic", 1, 1, 1, 0u },
+    { 44, "quantize", 1, 1, 1, 0u }
+};
+typedef struct { uint32_t cycles; uint32_t calls; } wake_infer_profile_slot_t;
+wake_infer_profile_slot_t wake_infer_profile[12];
+
+#include <stdio.h>
+uint32_t wake_infer_profile_dump(void)
+{
+    uint32_t tpus = kws_infer_ticks_per_us();
+    if (tpus == 0) tpus = 1;
+    uint32_t total_us = 0;
+    for (int i = 0; i < 12; i++) {
+        uint32_t calls = wake_infer_profile[i].calls;
+        uint32_t us = calls ? wake_infer_profile[i].cycles / tpus / calls : 0;
+        total_us += us;
+        uint32_t mac_per_us = us ? wake_infer_profile_meta[i].macs / us : 0;
+        printf("profile wake op%-3d %-8s %3ux%3ux%4u macs=%10lu us=%6lu calls=%4lu mac_per_us=%6lu\n",
+               wake_infer_profile_meta[i].op_index, wake_infer_profile_meta[i].type,
+               (unsigned)wake_infer_profile_meta[i].w, (unsigned)wake_infer_profile_meta[i].h, (unsigned)wake_infer_profile_meta[i].c,
+               (unsigned long)wake_infer_profile_meta[i].macs, (unsigned long)us,
+               (unsigned long)calls, (unsigned long)mac_per_us);
+        wake_infer_profile[i].cycles = 0;
+        wake_infer_profile[i].calls = 0;
+    }
+    printf("profile wake total us=%lu (per call, summed over 12 ops)\n", (unsigned long)total_us);
+    return total_us;
+}
+#endif
+
 /* Point esp-nn's file-static scratch pointers at the shared region.
    Done at init *and* on entry to every inference: a TFLite Micro
    interpreter in the same image (the fallback build, and the on-device
@@ -116,6 +178,9 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
 {
     set_scratch();
     memcpy(ring3 + 80, in, 120);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op14_in = { .width = 1, .height = 5, .channels = 40, .extra = 1 };
       const data_dims_t op14_out = { .width = 1, .height = 1, .channels = 32, .extra = 1 };
@@ -124,7 +189,14 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const quant_data_t op14_q = { .shift = (int32_t *)op14_shift, .mult = (int32_t *)op14_mult };
       esp_nn_conv_s8(&op14_in, ring3, &op14_flt, op14_w, op14_b, &op14_out, (arena + 0), &op14_p, &op14_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[0].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[0].calls++; }
+    #endif
     memcpy(ring2 + 128, (arena + 0), 32);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op17_in = { .width = 1, .height = 5, .channels = 32, .extra = 1 };
       const data_dims_t op17_out = { .width = 1, .height = 1, .channels = 32, .extra = 1 };
@@ -133,6 +205,13 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const quant_data_t op17_q = { .shift = (int32_t *)op17_shift, .mult = (int32_t *)op17_mult };
       esp_nn_depthwise_conv_s8(&op17_in, ring2, &op17_flt, op17_w, op17_b, &op17_out, (arena + 64), &op17_p, &op17_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[1].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[1].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op18_in = { .width = 1, .height = 1, .channels = 32, .extra = 1 };
       const data_dims_t op18_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
@@ -141,7 +220,14 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const quant_data_t op18_q = { .shift = (int32_t *)op18_shift, .mult = (int32_t *)op18_mult };
       esp_nn_conv_s8(&op18_in, (arena + 64), &op18_flt, op18_w, op18_b, &op18_out, (arena + 0), &op18_p, &op18_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[2].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[2].calls++; }
+    #endif
     memcpy(ring1 + 512, (arena + 0), 64);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op23_in = { .width = 1, .height = 9, .channels = 64, .extra = 1 };
       const data_dims_t op23_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
@@ -150,6 +236,13 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const quant_data_t op23_q = { .shift = (int32_t *)op23_shift, .mult = (int32_t *)op23_mult };
       esp_nn_depthwise_conv_s8(&op23_in, ring1, &op23_flt, op23_w, op23_b, &op23_out, (arena + 0), &op23_p, &op23_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[3].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[3].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op24_in = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
       const data_dims_t op24_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
@@ -158,7 +251,14 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const quant_data_t op24_q = { .shift = (int32_t *)op24_shift, .mult = (int32_t *)op24_mult };
       esp_nn_conv_s8(&op24_in, (arena + 0), &op24_flt, op24_w, op24_b, &op24_out, (arena + 64), &op24_p, &op24_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[4].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[4].calls++; }
+    #endif
     memcpy(ring0 + 768, (arena + 64), 64);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op29_in = { .width = 1, .height = 13, .channels = 64, .extra = 1 };
       const data_dims_t op29_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
@@ -167,6 +267,13 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const quant_data_t op29_q = { .shift = (int32_t *)op29_shift, .mult = (int32_t *)op29_mult };
       esp_nn_depthwise_conv_s8(&op29_in, ring0, &op29_flt, op29_w, op29_b, &op29_out, (arena + 0), &op29_p, &op29_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[5].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[5].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op30_in = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
       const data_dims_t op30_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
@@ -175,7 +282,14 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const quant_data_t op30_q = { .shift = (int32_t *)op30_shift, .mult = (int32_t *)op30_mult };
       esp_nn_conv_s8(&op30_in, (arena + 0), &op30_flt, op30_w, op30_b, &op30_out, (arena + 64), &op30_p, &op30_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[6].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[6].calls++; }
+    #endif
     memcpy(ring5 + 1280, (arena + 64), 64);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op32_in = { .width = 1, .height = 21, .channels = 64, .extra = 1 };
       const data_dims_t op32_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
@@ -184,6 +298,13 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const quant_data_t op32_q = { .shift = (int32_t *)op32_shift, .mult = (int32_t *)op32_mult };
       esp_nn_depthwise_conv_s8(&op32_in, ring5, &op32_flt, op32_w, op32_b, &op32_out, (arena + 0), &op32_p, &op32_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[7].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[7].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op33_in = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
       const data_dims_t op33_out = { .width = 1, .height = 1, .channels = 64, .extra = 1 };
@@ -192,12 +313,37 @@ void wake_infer_step(const int8_t in[120], uint8_t *out)
       const quant_data_t op33_q = { .shift = (int32_t *)op33_shift, .mult = (int32_t *)op33_mult };
       esp_nn_conv_s8(&op33_in, (arena + 0), &op33_flt, op33_w, op33_b, &op33_out, (arena + 64), &op33_p, &op33_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[8].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[8].calls++; }
+    #endif
     memcpy(ring4 + 1024, (arena + 64), 64);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     esp_nn_fully_connected_s8(ring4, 128, 1088, op36_w, 0, op36_b, (arena + 0), 1, -19, -10, 1197299478, -128, 127);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[9].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[9].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     for (int i = 0; i < 1; i++)
         (arena + 16)[i] = op37_lut[(uint8_t)((arena + 0)[i] + 128)];
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[10].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[10].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     for (int i = 0; i < 1; i++)
         ((uint8_t *)out)[i] = (uint8_t)((arena + 16)[i] ^ 0x80);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    wake_infer_profile[11].cycles += kws_infer_ticks() - _kws_pt;
+    wake_infer_profile[11].calls++; }
+    #endif
     memmove(ring0, ring0 + 64, 768);
     memmove(ring1, ring1 + 64, 512);
     memmove(ring2, ring2 + 32, 128);
