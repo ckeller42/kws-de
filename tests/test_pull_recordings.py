@@ -83,3 +83,38 @@ def test_pull_copies_field_takes_and_appends_device_columns(tmp_path):
     # tell a ring-truncated take from one the recogniser simply never answered.
     assert field[0]["window_ms"] == "2500"
     assert not (mnt / "field" / "spk03").exists()  # cleared after a successful copy
+
+
+def _fake_drive_with_elicit(root: Path) -> Path:
+    """An elicit ("Situationen") take rides in the same spkNN/session.csv as
+    every other guided set (words/sentences/negs/wake) -- record.c writes it
+    there, not to field.csv. The pull script's main loop (spk*/) copies every
+    session.csv row through generically; it never special-cases `set`."""
+    mnt = _fake_drive(root)
+    (mnt / "spk03" / "_elicit_").mkdir(parents=True)
+    (mnt / "spk03" / "_elicit_" / "licht-kueche-an_001.wav").write_bytes(b"RIFF" + b"\0" * 40)
+    (mnt / "spk03" / "session.csv").write_text(
+        (mnt / "spk03" / "session.csv").read_text()
+        + '"Licht Küche an",spk03/_elicit_/licht-kueche-an_001.wav,4000,-9.5,elicit,3,5678\n'
+    )
+    return mnt
+
+
+def test_pull_copies_elicit_takes_with_the_expected_intent_as_prompt_unchanged(tmp_path):
+    # No awk/set-specific branch handles this row: it must survive the pull
+    # exactly like a words/sentences/negatives/wake row, prompt column included.
+    mnt = _fake_drive_with_elicit(tmp_path)
+    dest = tmp_path / "recordings"
+    r = _run(mnt, dest)
+    assert r.returncode == 0, r.stderr
+    assert (dest / "spk03" / "_elicit_" / "licht-kueche-an_001.wav").exists()
+
+    rows = list(csv.DictReader((dest / "sessions.csv").open()))
+    elicit = [r for r in rows if r["set"] == "elicit"]
+    assert len(elicit) == 1
+    assert elicit[0]["speaker"] == "spk03"
+    assert elicit[0]["prompt"] == "Licht Küche an"  # the EXPECTED intent, not the scene text
+    assert elicit[0]["file"] == "spk03/_elicit_/licht-kueche-an_001.wav"
+    assert elicit[0]["ms"] == "4000" and elicit[0]["peak_dbfs"] == "-9.5"
+    assert elicit[0]["seed"] == "3" and elicit[0]["ts"] == "5678"
+    assert not (mnt / "spk03").exists()  # cleared after a successful copy

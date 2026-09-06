@@ -48,6 +48,24 @@ int main(void)
     assert(prompt_takes_per_prompt(PROMPT_WAKE) == 1);
     assert(prompt_takes_per_prompt(PROMPT_SENTENCES) == 2);
 
+    /* elicit ("Situationen") set: one take per prompt (a natural answer, not a
+       read to redo), a 9.8 s cap (an unscripted answer runs long), 1200 ms
+       hangover, and prompt_intent() distinct from prompt_text() — the display
+       text is the scene/question, the intent is what session.csv records. */
+    prompt_session_init(&a, PROMPT_ELICIT, 1);
+    assert(a.count == KWS_NUM_ELICIT_PROMPTS && a.count > 0);
+    assert(!strcmp(prompt_set_name(PROMPT_ELICIT), "elicit"));
+    assert(prompt_takes_per_prompt(PROMPT_ELICIT) == 1);
+    assert(prompt_cap_ms(PROMPT_ELICIT) == 9800);
+    assert(prompt_hangover_ms(PROMPT_ELICIT) == 1200);
+    for (int i = 0; i < a.count; i++) {
+        assert(strlen(prompt_text(&a)) > 0);
+        assert(strlen(prompt_slug(&a)) > 0);
+        assert(strlen(prompt_intent(&a)) > 0);
+        assert(strcmp(prompt_text(&a), prompt_intent(&a)) != 0);
+        prompt_advance(&a);
+    }
+
     puts("test_prompts OK");
     return 0;
 }

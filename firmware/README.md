@@ -2,7 +2,7 @@
 
 ## What it does
 
-Multi-mode ESP-IDF app on the M5Stack CoreS3. It boots to a 5-button
+Multi-mode ESP-IDF app on the M5Stack CoreS3. It boots to a 7-button
 selection menu; every mode's back button returns to it (see "Modes and the
 selection screen" below).
 
@@ -16,6 +16,13 @@ selection screen" below).
   but it prompts `WAKE_PROMPT_REPEATS` (5) single-take reads of the wake
   word and finishes straight to the success screen — no sentence/negative
   sets chained on. Collects real wake-word positives for `models/hey_bus.tflite`.
+- **Situationen mode** — elicitation: a scene ("Es ist dunkel in der
+  Küche.") or a question the device asks ("Wo soll die Heizung an?") plus
+  the cue "Sag es dem Bus", with the speaker answering in their own words
+  instead of reading a script (wake phrase included). Same recorder
+  machinery, one take per prompt, no sentence/negative sets chained on.
+  Collects natural command speech — read sentences alone generalise poorly
+  to real usage (paper notes E30).
 - **Recognise mode** — an on-device keyword recogniser: mic -> MFCC -> the
   int8 TFLite Micro model -> the same streaming detector logic as
   `kws_de.stream`, shown live on the LCD and logged to the recording
@@ -82,12 +89,12 @@ docker run --rm -v "$PWD/firmware:/project" -w /project --device=/dev/ttyACM0 \
 ## Modes and the selection screen
 
 The device boots into a dark-theme selection menu: a small "kws-de" title
-over a column of five big buttons — **Recognition**, **Hey Bus**,
-**Record**, **Hey Bus aufnehmen**, **USB** — each switching straight to
-that mode. Every mode's own back/abort button returns to this menu; no mode
-links directly to another mode. `app_set_mode()` (`firmware/main/main.c`)
-is the only place that suspends/resumes the consumer task for the mode
-being left/entered.
+over a column of seven big buttons — **Assistent**, **Recognition**, **Hey
+Bus**, **Record**, **Hey Bus aufnehmen**, **Situationen**, **USB** — each
+switching straight to that mode. Every mode's own back/abort button returns
+to this menu; no mode links directly to another mode. `app_set_mode()`
+(`firmware/main/main.c`) is the only place that suspends/resumes the
+consumer task for the mode being left/entered.
 
 ## Record-mode walkthrough
 
@@ -120,6 +127,19 @@ prompts 5 single-take (not doubled) reads of the wake word straight to the
 success screen — no sentence/negative sets chained on. Takes land under
 `spkNN/hey-bus/NNN.wav`, and each `session.csv` row has `set` = `wake`
 (same `prompt,file,ms,peak_dbfs,set,seed,ts` shape as every other row).
+
+**Situationen** on the menu runs the same machinery for elicitation: it
+bumps the speaker id, then walks `config.SITUATIONS` (30 scene/question
+prompts), one single take per prompt, straight to the success screen — no
+sentence/negative sets chained on. The screen shows the scene/question, the
+cue "Sag es dem Bus", and a `elicit <n>/30` progress line; the speaker
+answers however they would naturally, wake phrase included. Takes land
+under `spkNN/_elicit_/<slug>_NNN.wav` (slugged from the EXPECTED INTENT,
+not the scene text), and each `session.csv` row has `set` = `elicit` with
+`prompt` set to that expected-intent text (e.g. `Licht Küche an`) rather
+than the on-screen scene — QC (`kws_de.qc`) scores what was actually said
+against this. Recording cap is 9.8 s (an unscripted answer runs longer than
+a read sentence), 1200 ms hangover.
 
 ## Where recordings are stored
 
@@ -267,12 +287,13 @@ mode usb
 status
 ```
 
-- `mode menu|record|recordwake|recognise|wake|assist|usb` — switches the app
-  mode, same as tapping the matching menu/back button.
+- `mode menu|record|recordwake|elicit|recognise|wake|assist|usb` — switches
+  the app mode, same as tapping the matching menu/back button.
 - `status` — prints the current mode; the model stamps as
   `models command=<id> wake=<id>`; an `intent <text>` line naming the last
   closed assist window's parsed result (omitted before the first window);
-  and in record/record-wake mode also the recorder's phase/index/count/speaker.
+  and in record/record-wake/elicit mode also the recorder's
+  phase/index/count/speaker.
 - `wakefire` — injects one synthetic wake fire down the same path as a real
   one (gate, beep, log, UI). A measurement hook for the assist-mode duty
   cycle, which cannot be exercised without fires.
@@ -342,6 +363,16 @@ no success screen. Tap **USB** -> pull -> `column -s, -t <
 data/recordings/sessions.csv` lists the session; tap **Recognition** →
 say "Licht" -> word appears, inference < 30 ms; `recognise.log` replays
 through `stream.KeywordStream` with the same events.
+
+Situationen mode: from the menu, tap **Situationen** -> the session starts
+at a new speaker id, shows a scene/question and "Sag es dem Bus"; answer
+naturally, wake phrase included -> the console log shows `elicit: prompt
+1/30 "<scene text>" expects "<intent text>"` before each capture and
+`record: saved ...` after it; `status` in this mode also reports the
+recorder's phase/index/speaker; completing all 30 shows "Fertig - danke!"
+with the speaker id, no sentence/negative sets chained on. Tap **USB** ->
+pull -> the session's `sessions.csv` rows have `set` = `elicit` with
+`prompt` = the expected-intent text, not the on-screen scene.
 
 Wake mode: tap **Hey Bus** -> the probability updates live and stays low
 on silence; say "Hey Bus" -> the screen flashes green, the speaker beeps

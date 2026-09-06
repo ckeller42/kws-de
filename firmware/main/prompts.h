@@ -6,8 +6,14 @@
 #include <stdint.h>
 #include "gen/prompts.h"
 
-/** @brief Which prompt table a session draws from. */
-typedef enum { PROMPT_WORDS = 0, PROMPT_SENTENCES = 1, PROMPT_NEGS = 2, PROMPT_WAKE = 3 } prompt_set_t;
+/** @brief Which prompt table a session draws from. PROMPT_ELICIT ("Situationen")
+ * shows a scene/question and expects the speaker's own phrasing, wake word
+ * included; its display text (prompt_text()) is the scene, but the EXPECTED
+ * INTENT text (prompt_intent()) is what gets written to session.csv's prompt
+ * column, so QC compares what was said against what was meant. */
+typedef enum {
+    PROMPT_WORDS = 0, PROMPT_SENTENCES = 1, PROMPT_NEGS = 2, PROMPT_WAKE = 3, PROMPT_ELICIT = 4,
+} prompt_set_t;
 /** @brief A shuffled walk through one prompt set. */
 typedef struct {
     prompt_set_t set;
@@ -23,19 +29,26 @@ void        prompt_session_init(prompt_session_t *p, prompt_set_t set, uint32_t 
 const char *prompt_text(const prompt_session_t *p);
 /** @brief Filename-safe slug for the current prompt. */
 const char *prompt_slug(const prompt_session_t *p);
+/** @brief PROMPT_ELICIT only: the expected-intent text for the current prompt
+ * (e.g. "Licht Küche an"), not the scene/question shown on screen. Used for
+ * session.csv's prompt column instead of prompt_text() so QC can compare the
+ * speaker's actual words against what the scene was meant to elicit. */
+const char *prompt_intent(const prompt_session_t *p);
 /** @brief Advance to the next prompt. @return 0 when the set is exhausted (index unchanged), 1 otherwise. */
 int         prompt_advance(prompt_session_t *p);
-/** @brief Recording time cap for a prompt set, in ms (4000 for words, 6000 otherwise). */
+/** @brief Recording time cap for a prompt set, in ms (4000 for words, 9800 for
+ * elicit — an unscripted answer runs longer than a read sentence — 6000 otherwise). */
 uint32_t    prompt_cap_ms(prompt_set_t set);
 /** @brief Trailing-silence hangover before a take closes, in ms: 500 for words, 1200
- * for sentences/negatives/wake. A natural reading pause between the words of a longer
- * prompt exceeds 500 ms, so those sets need the longer hangover or the take gets cut
- * after the first word. */
+ * for sentences/negatives/wake/elicit. A natural reading pause between the words of a
+ * longer prompt exceeds 500 ms, so those sets need the longer hangover or the take
+ * gets cut after the first word. */
 uint32_t    prompt_hangover_ms(prompt_set_t set);
 /** @brief Reads captured per prompt before advancing (2 normally, for wrong-read review;
  * 1 for PROMPT_WAKE — a "Hey Bus" session wants exactly config.WAKE_PROMPT_REPEATS real
- * positives, not doubled reads). */
+ * positives, not doubled reads; 1 for PROMPT_ELICIT — an elicited answer is one natural
+ * take, not a read to redo). */
 int         prompt_takes_per_prompt(prompt_set_t set);
 /** @brief Set name as used in session.csv and the UI progress line
- * ("words"|"sentences"|"negatives"|"wake"). */
+ * ("words"|"sentences"|"negatives"|"wake"|"elicit"). */
 const char *prompt_set_name(prompt_set_t set);

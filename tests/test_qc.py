@@ -402,6 +402,13 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
         "field_false_alarm": 0,
         "field_near_miss_capture": 0,
         "field_false_alarm_capture": 0,
+        "elicit_takes": 0,
+        "elicit_approved": 0,
+        "elicit_parsable": 0,
+        "elicit_wake": 0,
+        "elicit_unfiled": 0,
+        "elicit_expected_match": 0,
+        "elicit_expected_compared": 0,
     }
     licht_files = sorted((appr / "words" / "Licht").glob("*.wav"))
     assert len(licht_files) == 2  # bare take + phrase-segmented word, distinct files
@@ -986,6 +993,164 @@ def test_run_qc_field_take_with_an_empty_transcript_is_rejected(tmp_path):
     assert "1 field takes, 0 approved" in (qcd / "report.md").read_text()
     row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
     assert row["reason"] == "empty_transcript"
+
+
+# --- Elicit ("Situationen") -----------------------------------------------------------
+# An elicit take is a guided-session row (session.csv, not field.csv) whose prompt
+# column is the EXPECTED INTENT the scene/question was meant to draw out (see
+# firmware/main/record.c's prompt_intent()), and whose audio starts with the wake
+# phrase like a field take. It shares the field branch's wake-split/parse/filing
+# logic but is counted separately (kws_de.qc.run_qc's n_elicit_*) and scored
+# against the expected intent, not against a device's own answer.
+
+
+def _elicit_session(tmp_path, expected: str, slug: str = "licht-kueche-an", ms: int = 4000) -> Path:
+    inc = tmp_path / "incoming" / "e1"
+    _wav(inc / "spk09" / "_elicit_" / f"{slug}_001.wav", _tone(ms=ms))
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        f"spk09,t,{expected},spk09/_elicit_/{slug}_001.wav,{ms},-10,elicit,1,1\n"
+    )
+    return inc
+
+
+def test_content_gate_elicit_accepts_any_speech_and_rejects_only_silence():
+    # Same philosophy as "field": an elicit answer is natural speech in the
+    # speaker's own words, not a script to match — content_gate only asks
+    # "was anything said". Whether it said what was EXPECTED is expected_match.
+    assert qc.content_gate("elicit", "Licht Küche an", "irgendwas ganz anderes") == (1.0, None)
+    assert qc.content_gate("elicit", "Licht Küche an", "") == (0.0, "empty_transcript")
+
+
+def test_audio_gate_elicit_take_may_run_up_to_the_firmware_cap(tmp_path):
+    assert qc.audio_gate(_wav(tmp_path / "e9.wav", _tone(ms=9700)), "elicit")[1] is None
+    assert qc.audio_gate(_wav(tmp_path / "e10.wav", _tone(ms=9900)), "elicit")[1] == "too_long"
+
+
+def test_run_qc_elicit_take_that_says_the_expected_intent_matches(tmp_path):
+    inc = _elicit_session(tmp_path, "Licht Küche an")
+    qcd, appr = tmp_path / "qc" / "e1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _field_transcriber)  # answers "Hey Bus Licht Küche an"
+
+    assert counts["elicit_takes"] == 1
+    assert counts["elicit_approved"] == 1
+    assert counts["elicit_parsable"] == 1
+    assert counts["elicit_expected_match"] == 1
+    assert counts["elicit_expected_compared"] == 1
+    assert counts["elicit_wake"] == 1
+    assert counts["elicit_unfiled"] == 0
+
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["set"] == "elicit"
+    assert row["expected_match"] == "1"
+    assert row["prompt"] == "Licht Küche an"  # the derived (Whisper) label
+    assert "## Elicit" in (qcd / "report.md").read_text()
+
+    # filed exactly like a field command: wake clip + phrase + word clips
+    assert len(list((appr / "wake" / "spk09").glob("*.wav"))) == 1
+    assert len(list((appr / "phrases" / "spk09").glob("*.wav"))) == 1
+    assert {p.parent.name for p in (appr / "words").rglob("*.wav")} == {"Licht", "Küche", "an"}
+
+
+def test_run_qc_elicit_take_with_alternative_phrasing_is_filed_but_flagged_mismatch(tmp_path):
+    # The speaker answered a DIFFERENT valid command than the scene expected — a
+    # mismatch is still real, useful data: it is filed under its own (Whisper)
+    # label, never under the expected one, and expected_match says "0".
+    def transcriber(p: Path):
+        return {
+            "text": "Hey Bus Heizung an",
+            "words": [
+                {"word": "Hey", "start": 0.10, "end": 0.35},
+                {"word": "Bus", "start": 0.36, "end": 0.60},
+                {"word": "Heizung", "start": 1.40, "end": 1.80},
+                {"word": "an", "start": 1.85, "end": 2.05},
+            ],
+        }
+
+    inc = _elicit_session(tmp_path, "Licht Küche an")
+    qcd, appr = tmp_path / "qc" / "e1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+
+    assert counts["elicit_parsable"] == 1
+    assert counts["elicit_expected_compared"] == 1
+    assert counts["elicit_expected_match"] == 0
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["expected_match"] == "0"
+    assert row["prompt"] == "Heizung an"  # filed under what was actually said
+    idx = list(csv.DictReader((appr / "phrases" / "index.csv").open()))
+    assert idx[0]["prompt"] == "Heizung an"
+
+
+def test_run_qc_elicit_take_that_does_not_parse_is_left_unfiled_and_uncompared(tmp_path):
+    # Speech the grammar rejects (but with no command vocabulary in it, so it
+    # is not the "vocab present, still unfiled" case either) is kept as a
+    # negative, exactly like the field rule — there is nothing to compare
+    # against the expected intent, so expected_match stays "".
+    def transcriber(p: Path):
+        return {
+            "text": "Hey Bus mach mal irgendwas",
+            "words": [
+                {"word": "Hey", "start": 0.10, "end": 0.35},
+                {"word": "Bus", "start": 0.36, "end": 0.60},
+                {"word": "mach", "start": 0.70, "end": 0.90},
+                {"word": "mal", "start": 0.95, "end": 1.10},
+                {"word": "irgendwas", "start": 1.15, "end": 1.60},
+            ],
+        }
+
+    inc = _elicit_session(tmp_path, "Licht Küche an")
+    qcd, appr = tmp_path / "qc" / "e1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+
+    assert counts["elicit_parsable"] == 0
+    assert counts["elicit_expected_compared"] == 0
+    assert counts["elicit_expected_match"] == 0
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["expected_match"] == ""
+    assert len(list((appr / "negatives" / "spk09").glob("*.wav"))) == 1
+
+
+def test_run_qc_elicit_take_that_is_only_the_wake_phrase_is_unfiled(tmp_path):
+    inc = _elicit_session(tmp_path, "Licht Küche an")
+    qcd, appr = tmp_path / "qc" / "e1", tmp_path / "approved"
+
+    def transcriber(p: Path):
+        return {
+            "text": "Hey Bus.",
+            "words": [
+                {"word": "Hey", "start": 0.10, "end": 0.35},
+                {"word": "Bus", "start": 0.36, "end": 0.60},
+            ],
+        }
+
+    counts = qc.run_qc(inc, qcd, appr, transcriber)
+    assert counts["elicit_wake"] == 1
+    assert counts["elicit_unfiled"] == 1
+    assert counts["elicit_expected_compared"] == 0
+    assert not (appr / "negatives").exists()
+
+
+def test_run_qc_elicit_and_field_takes_in_one_session_are_counted_separately(tmp_path):
+    # Both share the wake-split/parse/filing branch; the per-set counters (and
+    # the Field/Elicit report sections) must not cross-contaminate.
+    inc = tmp_path / "incoming" / "mix"
+    _wav(inc / "spk09" / "_elicit_" / "licht-kueche-an_001.wav", _tone(ms=4000))
+    _wav(inc / "field" / "spk09" / "1-1.wav", _tone(ms=4000))
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts,"
+        "fire_ms,wake_prob,device_intent,device_words,window_ms\n"
+        "spk09,t,Licht Küche an,spk09/_elicit_/licht-kueche-an_001.wav,4000,-10,elicit,1,1,,,,,\n"
+        "spk09,t,,field/spk09/1-1.wav,4000,-10,field,,1,1,0.910,Licht Küche an,"
+        "Licht:0.93|an:0.88,2500\n"
+    )
+    qcd, appr = tmp_path / "qc" / "mix", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, _field_transcriber)
+    assert counts["elicit_takes"] == 1 and counts["field_takes"] == 1
+    assert counts["elicit_expected_compared"] == 1 and counts["elicit_expected_match"] == 1
+    # the field take's device-vs-Whisper agreement is untouched by the elicit row
+    assert counts["field_agree"] == 1
+    report = (qcd / "report.md").read_text()
+    assert "## Field" in report and "## Elicit" in report
 
 
 def test_cli_missing_sessions_csv_exits_2(tmp_path, monkeypatch):
