@@ -457,6 +457,45 @@ from ``hey_bus.tflite@dd9db24f 2026-09-03`` to ``hey_bus.tflite@5fcdaf63 2026-09
 the previous round-5 bytes are kept on disk as ``hey_bus.v5.tflite``. Architecture,
 arena, and scratch are unchanged (see below).
 
+**Round 7 — real false-fire negatives from the deployed model, deployed
+(2026-09-06).** Round 6d's post-deploy field soak produced the project's first
+real-environment failure evidence: one conversation session made the deployed model
+false-fire 16 times (10 on ordinary German speech, 5 near-silence, 1 clipped). Round 7
+trains on half of each false-fire subgroup (added on top of round 6d's weights) and
+holds the other half out as two new acceptance rows, unchanged size and MACs
+(58,080 B / 24,736 MACs):
+
+.. list-table::
+   :header-rows: 1
+
+   * - Probe
+     - Round 6d (was deployed)
+     - Round 7 (deployed)
+   * - Held-out session fires (3) / new real positives held out (13)
+     - 3/3 @ 0.996 / 12/13
+     - 3/3 @ 0.996 / **13/13**
+   * - Held-out / in-training real non-wake, worst peak
+     - 0/9 (0.402) / 0/5 (0.598)
+     - 0/9 (**0.285**) / 0/5 (**0.285**)
+   * - Real false-fire speech, held out (new)
+     - 5/5 @ 0.992 (deployed model)
+     - **1/5** @ 0.969
+   * - Near-silence fires, held out (new)
+     - 3/3 @ 0.996 (deployed model)
+     - **1/3** @ 0.996 (residual is the clipped clip)
+   * - TTS non-wake, seen / unseen voices
+     - 4/46 / 2/36
+     - 5/46 / 4/36 (small, honestly-reported regression)
+   * - Fire latency, held-out (median)
+     - 0.14 s
+     - **0.02 s**
+
+Full acceptance table and recipe: ``HEYBUS-R7-REPORT.md`` in the training directory,
+and ``docs/paper-notes.md`` E34. ``KWS_WAKE_MODEL_ID`` moved from
+``hey_bus.tflite@5fcdaf63 2026-09-04`` to ``hey_bus.tflite@4aaa2f98 2026-09-06``; the
+previous round-6d bytes are kept on disk as ``hey_bus.v6d.tflite``. Architecture,
+arena, and scratch are unchanged (see below).
+
 How a new main user adds their voice
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -474,7 +513,7 @@ loop and ``scripts/data-loop.sh`` for running it in one command.
 Wake model anatomy
 ~~~~~~~~~~~~~~~~~~~~
 
-microWakeWord's streaming graph, read straight from ``hey_bus.tflite`` (round 6d as
+microWakeWord's streaming graph, read straight from ``hey_bus.tflite`` (round 7 as
 deployed, same architecture as every round back to round 4 -- weights differ, the
 graph below does not) via ``kws_de.model_graph`` -- one node per
 compute op, one "ring N x C" node per resource-variable state
@@ -492,7 +531,7 @@ compute op, one "ring N x C" node per resource-variable state
 
       $ export KWS_DATA_ROOT=/path/to/data-root
       $ uv run --no-sync kws-model-graph "$KWS_DATA_ROOT/models/hey_bus.tflite" \
-          --out docs/sphinx/_generated/hey_bus.dot --title "Hey Bus wake model (round 6d)"
+          --out docs/sphinx/_generated/hey_bus.dot --title "Hey Bus wake model (round 7)"
 
 .. list-table:: Layer table (compute and state ops of the 49 in the graph)
    :header-rows: 1
