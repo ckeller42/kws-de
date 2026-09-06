@@ -139,8 +139,14 @@ void ui_record_refresh(const record_status_t *st)
     char buf[64];
     if (!bsp_display_lock(50)) return;          /* skip a frame rather than block the recorder */
     /* "<set> <n>/<N> - read <r>/<takes>" — one progress line replaces the old
-       three-label header row (set/seed, counter, speaker). */
-    snprintf(buf, sizeof buf, "%s %d/%d - read %d/%d", prompt_set_name(st->set), st->index + 1, st->count, st->take, st->takes);
+       three-label header row (set/seed, counter, speaker). PROMPT_ELICIT has no
+       "read r/takes" (one take per prompt) and shows the elicitation cue
+       instead: the speaker answers the scene/question above in their own
+       words, wake phrase included. */
+    if (st->set == PROMPT_ELICIT)
+        snprintf(buf, sizeof buf, "Sag es dem Bus - %d/%d", st->index + 1, st->count);
+    else
+        snprintf(buf, sizeof buf, "%s %d/%d - read %d/%d", prompt_set_name(st->set), st->index + 1, st->count, st->take, st->takes);
     lv_label_set_text(l_counter, buf);
     lv_label_set_text(l_prompt, st->prompt);
     /* The background stays a constant dark charcoal (set once in ui_show_record);

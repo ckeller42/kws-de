@@ -30,11 +30,17 @@ def slug(text: str) -> str:
     return "-".join(w for w in "".join(c if c.isalnum() else " " for c in s).split())
 
 
-def prompt_sets() -> tuple[list, list, list, list]:
+def prompt_sets() -> tuple[list, list, list, list, list]:
     """(display, slug) pairs for words, sentences, negatives, and the wake set — in
     canonical (unshuffled) order; the device shuffles with its on-screen seed. The
     wake set is config.WAKE_WORD repeated config.WAKE_PROMPT_REPEATS times (a
-    "Hey Bus"-only recording session, not a proper prompt catalog)."""
+    "Hey Bus"-only recording session, not a proper prompt catalog). The elicit
+    ("Situationen") set is (display, slug, intent) triples: display is the
+    scene/question shown on screen, slug is derived from the EXPECTED INTENT
+    (short and shared across paraphrases of the same command, unlike the long
+    scene sentence), and intent is that expected-intent text — written verbatim
+    into session.csv's prompt column so QC can compare it against what the
+    speaker actually said (see kws_de.qc)."""
     words = [(label, slug(label)) for label in config.COMMAND_LABELS if not label.startswith("_")]
     sentences = []
     for it in build_catalog():
@@ -42,7 +48,8 @@ def prompt_sets() -> tuple[list, list, list, list]:
         sentences.append((text, slug(text)))
     negs = [(p, slug(p)) for p in config.NEGATIVE_PROMPTS]
     wake = [(config.WAKE_WORD, slug(config.WAKE_WORD))] * config.WAKE_PROMPT_REPEATS
-    return words, sentences, negs, wake
+    elicit = [(scene, slug(intent), intent) for scene, intent in config.SITUATIONS]
+    return words, sentences, negs, wake, elicit
 
 
 def mfcc_tables() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -124,12 +131,16 @@ def generate(out) -> None:
         + _c_strings("KWS_LABELS", labels)
     )
 
-    words, sentences, negs, wake = prompt_sets()
+    words, sentences, negs, wake, elicit = prompt_sets()
     p = hdr
     for tag, items in (("WORD", words), ("SENTENCE", sentences), ("NEG", negs), ("WAKE", wake)):
         p += f"#define KWS_NUM_{tag}_PROMPTS {len(items)}\n"
         p += _c_strings(f"KWS_{tag}_PROMPTS", [d for d, _ in items])
         p += _c_strings(f"KWS_{tag}_SLUGS", [s for _, s in items])
+    p += f"#define KWS_NUM_ELICIT_PROMPTS {len(elicit)}\n"
+    p += _c_strings("KWS_ELICIT_PROMPTS", [d for d, _, _ in elicit])
+    p += _c_strings("KWS_ELICIT_SLUGS", [s for _, s, _ in elicit])
+    p += _c_strings("KWS_ELICIT_INTENTS", [i for _, _, i in elicit])
     (out / "prompts.h").write_text(p)
 
     win, mel, dct = mfcc_tables()

@@ -35,6 +35,7 @@ CAP_MS = {
     # FIELD_MAX_TAKE_SAMPLES: a window extends on every fire inside it, so a take
     # is not fixed at 3500 ms — the firmware's ring is the only ceiling.
     "field": 9800,
+    "elicit": 9800,  # prompts.c prompt_cap_ms(PROMPT_ELICIT): an unscripted answer runs long
 }
 MIN_MS = 300
 MIN_RMS_DBFS = -45.0
@@ -128,6 +129,12 @@ class QcRow:
     # "a wake clip was written": a head-cut fragment is unusable as a positive but
     # the speaker did say the phrase, and the near-miss count needs the latter.
     wake_clip: str = ""
+    # Elicit ("Situationen") only: "1"/"0" the Whisper-derived Intent matches the
+    # EXPECTED intent session.csv recorded for this prompt (record.c's
+    # prompt_intent()); "" when the speaker's answer did not parse at all — there
+    # is nothing to compare then. A "0" is still filed under its Whisper label
+    # (alternative phrasing is good data, not a reject).
+    expected_match: str = ""
 
 
 def normalise(text: str) -> list[str]:
@@ -330,10 +337,14 @@ def content_gate(set_name: str, prompt: str, transcript_text: str) -> tuple[floa
             if h in counts and (len(h) >= 3 or counts[h] >= 2):
                 return 0.0, f"contains_command:{h}"
         return 1.0, None
-    if set_name == "field":
-        # Everything is kept: a field take is real usage, and speech the grammar
-        # cannot parse is exactly the negative/`_unknown_` material the model
-        # needs. Only silence (or a transcriber that returned nothing) rejects.
+    if set_name in ("field", "elicit"):
+        # Everything is kept: a field/elicit take is real usage (the elicit
+        # speaker answers in their own words, not a script), and speech the
+        # grammar cannot parse is exactly the negative/`_unknown_` material the
+        # model needs. Only silence (or a transcriber that returned nothing)
+        # rejects. Whether the elicit answer said what the scene EXPECTED is a
+        # separate question (`expected_match`, computed in run_qc) — content_gate
+        # only asks "was anything said at all".
         return (1.0, None) if heard else (0.0, "empty_transcript")
     if set_name == "wake":
         glued = "".join(heard)
@@ -710,6 +721,13 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
     # What the loose capture gate actually bought, at both thresholds: a wake the
     # production gate would have MISSED, and a non-wake it would have FIRED on.
     n_near_miss = n_false_alarm = n_near_miss_cap = n_false_alarm_cap = 0
+    # Elicit ("Situationen") takes share the field branch's wake-split/parse/filing
+    # logic (a speaker's answer starts with the wake phrase, exactly like a field
+    # take), but are counted separately: there is no capture-vs-production wake
+    # gate to compare here (a guided take is not gated at all), and the figure
+    # that matters is whether the speaker said what the scene was meant to elicit.
+    n_elicit = n_elicit_approved = n_elicit_wake = n_elicit_parsable = n_elicit_unfiled = 0
+    n_elicit_expected_compared = n_elicit_expected_match = 0
     for t in takes:
         try:
             row, tr = judge(t, transcriber)
@@ -733,10 +751,22 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         if t.set == "field":
             n_field += 1
             n_field_truncated += row.truncated == "1"
+        elif t.set == "elicit":
+            n_elicit += 1
         if row.verdict != "approve":
             continue
-        if t.set == "field":
-            n_field_approved += 1
+        if t.set in ("field", "elicit"):
+            if t.set == "field":
+                n_field_approved += 1
+            else:
+                n_elicit_approved += 1
+            # The expected-intent text session.csv wrote for this prompt (record.c's
+            # prompt_intent()) — save it before `row.prompt`/`t.prompt` below get
+            # overwritten with what was actually derived from speech.
+            expected = t.prompt
+            # `t` gets rebound below (to a derived "sentences"/"negatives" Take) once
+            # filing starts, so remember which branch we're in before that happens.
+            is_elicit = t.set == "elicit"
             split = field_wake_split(tr)
             # Whisper, not the device, decides whether the speaker really said
             # "Hey Bus" in this take — which is what makes the two counts below
@@ -746,12 +776,13 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             # Computed here, before `t` is rebound to the derived sentence take.
             heard_wake = bool(split.command_start) or contains_wake(split.tokens)
             row.wake_clip = "1" if heard_wake else "0"
-            if heard_wake:
-                n_near_miss += row.would_fire == "0"
-                n_near_miss_cap += t.wake_prob < CAPTURE_WAKE_THRESHOLD
-            else:
-                n_false_alarm += row.would_fire == "1"
-                n_false_alarm_cap += t.wake_prob >= CAPTURE_WAKE_THRESHOLD
+            if t.set == "field":
+                if heard_wake:
+                    n_near_miss += row.would_fire == "0"
+                    n_near_miss_cap += t.wake_prob < CAPTURE_WAKE_THRESHOLD
+                else:
+                    n_false_alarm += row.would_fire == "1"
+                    n_false_alarm_cap += t.wake_prob >= CAPTURE_WAKE_THRESHOLD
             if split.wake_end is not None:
                 # the wake phrase is a real "Hey Bus" positive: file it exactly
                 # where the guided wake set goes, so it trains the wake model too
@@ -770,19 +801,39 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                     },
                 )
                 n_wake += 1
-                n_field_wake += 1
+                if t.set == "field":
+                    n_field_wake += 1
+                else:
+                    n_elicit_wake += 1
             if contains_wake(split.tokens):
                 # Whisper heard the phrase but gave no word span to locate it by,
                 # so it cannot be cut out. Filing the take anyway is how "Hey Bus"
                 # ended up inside phrases/ and negatives/ (#58): file nothing.
-                n_field_unfiled += 1
+                if t.set == "field":
+                    n_field_unfiled += 1
+                else:
+                    n_elicit_unfiled += 1
                 continue
             # A negative is described by what is left AFTER the wake phrase, not by
             # the whole transcript: the words before it are not in the clip either.
             kept_text = " ".join(split.tokens) if split.command_start else row.transcript
             got = field_intent(split.tokens)
+            if t.set == "elicit" and isinstance(got, Intent):
+                # Did the speaker say what the scene/question was meant to elicit?
+                # `expected` is the record.c-written expected-intent text
+                # (prompt_intent()), run through the SAME normalise/label/parse path
+                # as the heard speech so the comparison is apples to apples. A
+                # mismatch is still filed below with the WHISPER label — alternative
+                # phrasing of the same scene is good training data, not a reject.
+                exp = field_intent(normalise(expected))
+                row.expected_match = "1" if isinstance(exp, Intent) and exp == got else "0"
+                n_elicit_expected_compared += 1
+                n_elicit_expected_match += row.expected_match == "1"
             if isinstance(got, Intent):
-                n_field_parsable += 1
+                if t.set == "field":
+                    n_field_parsable += 1
+                else:
+                    n_elicit_parsable += 1
                 # The derived label is the row's prompt too, so `qc.csv` says on
                 # its own face whether a field take parsed — `agrees` keeps its
                 # single meaning (the device comparison) instead of two.
@@ -832,15 +883,24 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 # Küche"). Filing the latter under negatives/ would teach the model
                 # a real command is _unknown_ (data.py) and score a correct
                 # recognition of it as a false accept (eval.py). Leave it unfiled.
-                n_field_unfiled += 1
+                if t.set == "field":
+                    n_field_unfiled += 1
+                else:
+                    n_elicit_unfiled += 1
                 continue
             if t.span:
                 # the tail may reach past the take's end: clamp before judging,
                 # or a 0.15 s stub gets filed as a phrase (seen on 2026-09-05)
                 t.span = (t.span[0], min(t.span[1], row.dur_ms / 1000))
                 if t.span[1] - t.span[0] < MIN_MS / 1000:
-                    # cutting the wake phrase out left a stub, not a clip
-                    n_field_unfiled += 1
+                    # cutting the wake phrase out left a stub, not a clip. `t` is
+                    # already rebound to the derived sentences/negatives Take here,
+                    # so the original set (`is_elicit`, captured above) decides
+                    # which counter this belongs to.
+                    if is_elicit:
+                        n_elicit_unfiled += 1
+                    else:
+                        n_field_unfiled += 1
                     continue
         if t.set == "words":
             tok = required_tokens(t.prompt, "words")[0]
@@ -967,12 +1027,27 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         )
     else:
         field_section = ""
+    if n_elicit:
+        expected_rate = (
+            f"{n_elicit_expected_match / n_elicit_expected_compared:.3f}"
+            if n_elicit_expected_compared
+            else "n/a"
+        )
+        elicit_section = (
+            f"\n## Elicit\n\n{n_elicit} elicit takes, {n_elicit_approved} approved, "
+            f"{n_elicit_parsable} parsable, said-what-we-expected rate {expected_rate} "
+            f"over {n_elicit_expected_compared} compared, {n_elicit_wake} wake clips, "
+            f"{n_elicit_unfiled} approved but unfiled.\n"
+        )
+    else:
+        elicit_section = ""
     (qc_dir / "report.md").write_text(
         f"# QC {incoming.name}\n\n{len(rows)} takes, {approved_n} approved, "
         f"{len(rejects)} rejected, {n_words} word clips written, "
         f"{n_skipped} word clips skipped, {n_wake} wake clips written "
-        "(word and wake counts mix guided takes with field-derived clips; "
-        "the Field section below separates them).\n\n## Rejects\n\n"
+        "(word and wake counts mix guided takes with field-derived and "
+        "elicit-derived clips; the Field/Elicit sections below separate "
+        "them).\n\n## Rejects\n\n"
         + "".join(
             f"- `{Path(r.file).relative_to(incoming)}` — reject: {r.reason} "
             f'(heard: "{r.transcript}")\n'
@@ -981,6 +1056,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         + "\n## Segmentation gaps\n\n"
         + ("".join(f"- `{f}`\n" for f in gap_files) or "(none)\n")
         + field_section
+        + elicit_section
     )
     return {
         "takes": len(rows),
@@ -998,6 +1074,13 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         "field_false_alarm": n_false_alarm,
         "field_near_miss_capture": n_near_miss_cap,
         "field_false_alarm_capture": n_false_alarm_cap,
+        "elicit_takes": n_elicit,  # every elicit row, approved or not
+        "elicit_approved": n_elicit_approved,
+        "elicit_parsable": n_elicit_parsable,
+        "elicit_wake": n_elicit_wake,
+        "elicit_unfiled": n_elicit_unfiled,
+        "elicit_expected_match": n_elicit_expected_match,
+        "elicit_expected_compared": n_elicit_expected_compared,
     }
 
 

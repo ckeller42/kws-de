@@ -2,6 +2,7 @@
 #include <string.h>
 
 _Static_assert(KWS_NUM_SENTENCE_PROMPTS <= 64, "grow prompt_session_t.order");
+_Static_assert(KWS_NUM_ELICIT_PROMPTS <= 64, "grow prompt_session_t.order");
 
 static uint32_t xorshift(uint32_t *s) { *s ^= *s << 13; *s ^= *s >> 17; *s ^= *s << 5; return *s; }
 
@@ -11,6 +12,7 @@ static void set_tables(prompt_set_t set, const char *const **text, const char *c
     case PROMPT_SENTENCES: *text = KWS_SENTENCE_PROMPTS; *slug = KWS_SENTENCE_SLUGS; *n = KWS_NUM_SENTENCE_PROMPTS; break;
     case PROMPT_NEGS:      *text = KWS_NEG_PROMPTS;      *slug = KWS_NEG_SLUGS;      *n = KWS_NUM_NEG_PROMPTS;      break;
     case PROMPT_WAKE:      *text = KWS_WAKE_PROMPTS;     *slug = KWS_WAKE_SLUGS;     *n = KWS_NUM_WAKE_PROMPTS;     break;
+    case PROMPT_ELICIT:    *text = KWS_ELICIT_PROMPTS;   *slug = KWS_ELICIT_SLUGS;   *n = KWS_NUM_ELICIT_PROMPTS;   break;
     default:               *text = KWS_WORD_PROMPTS;     *slug = KWS_WORD_SLUGS;     *n = KWS_NUM_WORD_PROMPTS;     break;
     }
 }
@@ -40,6 +42,11 @@ const char *prompt_slug(const prompt_session_t *p)
     return s[p->order[p->index]];
 }
 
+const char *prompt_intent(const prompt_session_t *p)
+{
+    return KWS_ELICIT_INTENTS[p->order[p->index]];
+}
+
 int prompt_advance(prompt_session_t *p)
 {
     if (p->index + 1 >= p->count) return 0;
@@ -47,14 +54,22 @@ int prompt_advance(prompt_session_t *p)
     return 1;
 }
 
-uint32_t prompt_cap_ms(prompt_set_t set) { return set == PROMPT_WORDS ? 4000 : 6000; }
+uint32_t prompt_cap_ms(prompt_set_t set)
+{
+    if (set == PROMPT_WORDS) return 4000;
+    if (set == PROMPT_ELICIT) return 9800;  /* an unscripted answer runs longer than a read sentence */
+    return 6000;
+}
 
 uint32_t prompt_hangover_ms(prompt_set_t set) { return set == PROMPT_WORDS ? 500 : 1200; }
 
-int prompt_takes_per_prompt(prompt_set_t set) { return set == PROMPT_WAKE ? 1 : 2; }
+int prompt_takes_per_prompt(prompt_set_t set)
+{
+    return (set == PROMPT_WAKE || set == PROMPT_ELICIT) ? 1 : 2;
+}
 
 const char *prompt_set_name(prompt_set_t set)
 {
-    static const char *names[] = {"words", "sentences", "negatives", "wake"};
+    static const char *names[] = {"words", "sentences", "negatives", "wake", "elicit"};
     return names[set];
 }

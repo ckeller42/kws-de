@@ -21,7 +21,7 @@ def test_slug_is_ascii_and_stable():
 
 
 def test_prompt_sets_cover_labels_and_catalog():
-    words, sentences, negs, wake = firmware_gen.prompt_sets()
+    words, sentences, negs, wake, elicit = firmware_gen.prompt_sets()
     assert [w for w, _ in words] == [
         label for label in config.COMMAND_LABELS if not label.startswith("_")
     ]
@@ -30,6 +30,26 @@ def test_prompt_sets_cover_labels_and_catalog():
     assert len({s for _, s in words + sentences + negs}) == len(words + sentences + negs)
     wake_prompt = (config.WAKE_WORD, firmware_gen.slug(config.WAKE_WORD))
     assert wake == [wake_prompt] * config.WAKE_PROMPT_REPEATS
+
+
+def test_elicit_prompts_match_situations_and_parse_to_the_expected_intent():
+    """Every Situationen entry emits (scene, slug-of-intent, intent text); the
+    intent text is exactly what kws_de.qc's field-style parse would derive from
+    the speaker's answer, so a speaker who says the expected intent scores a
+    match (see qc.field_intent, used by expected_match)."""
+    from kws_de.grammar import Intent
+    from kws_de.qc import field_intent, normalise
+
+    _, _, _, _, elicit = firmware_gen.prompt_sets()
+    assert len(elicit) == len(config.SITUATIONS) >= 25
+    for (scene, slug, intent), (want_scene, want_intent) in zip(
+        elicit, config.SITUATIONS, strict=True
+    ):
+        assert scene == want_scene
+        assert intent == want_intent
+        assert slug == firmware_gen.slug(want_intent)
+        got = field_intent(normalise(intent))
+        assert isinstance(got, Intent), (intent, got)
 
 
 def test_sentence_prompts_say_prozent_for_light_levels():
