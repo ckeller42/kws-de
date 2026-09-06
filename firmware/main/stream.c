@@ -19,6 +19,7 @@ int stream_push(stream_t *s, const float posterior[KWS_NUM_LABELS])
         float m = 0.f;
         for (int h = 0; h < s->hist_len; h++) m += s->hist[h][k];
         m /= s->hist_len;
+        s->last_smoothed[k] = m;
         if (m > best) { best = m; idx = k; }
     }
     int candidate = (best >= KWS_THRESHOLD && idx != KWS_SILENCE_INDEX) ? idx : -1;

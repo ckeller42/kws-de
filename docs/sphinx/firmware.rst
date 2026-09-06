@@ -92,9 +92,14 @@ C port of ``kws_de.grammar.parse()``, host-tested against it case for case in
 parse shows green with the formatted result, e.g. "Licht Küche -> an" or
 "Licht -> fünfzig Prozent"; anything else — missing device, wrong order, an
 action the device does not support — shows grey "nicht verstanden" plus the
-words the recogniser actually heard. The confirmation double beep above is
-keyed to this same verdict. The console logs ``intent: <text>`` or
-``intent: none (<words>)`` at the same edge, and the field-capture CSV's
+words the recogniser actually heard. A parse that fails only on one
+"_unknown_" slot gets one retry, substituting the stream decoder's runner-up
+command word for that step if it clears ``INTENT_RESCORE_FLOOR``
+(``firmware/main/intent.c``'s ``intent_rescore()``, host-tested alongside the
+plain parse). The confirmation double beep above is keyed to this same
+verdict (rescored or not). The console logs ``intent: <text>``, ``intent:
+<text> (rescored: X->Y)`` on a successful retry, or ``intent: none
+(<words>)`` at the same edge, and the field-capture CSV's
 ``device_intent`` column (:need:`REQ_FW_FIELD_CAPTURE`) carries the formatted
 text too — empty when the window's intent was invalid, so
 ``kws_de.qc``'s device/label agreement check has nothing to compare rather
