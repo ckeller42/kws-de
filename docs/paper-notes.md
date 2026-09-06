@@ -2645,6 +2645,127 @@ one (`tests/test_qc.py` `_elicit_session`-style fixtures, `tests/test_eval_recor
 `_elicit_qc_root`), plus firmware host tests (`firmware/test/test_prompts.c`) and
 `kws_de.firmware_gen` coverage (`kws-fwgen --check` now also covers `KWS_ELICIT_*`).
 
+### E31 — fixing the voice gate's own false negative, van augmentation on (2026-09-06, host-only, feat/tts-voice-gate-2)
+
+E28 flagged two defects in its own voice-gate build without fixing them: the calibration
+sentence's "Küche" is exactly the word Whisper mishears as "Kirche" elsewhere in this
+codebase, wrongly failing demonstrably good voices; and van-cabin augmentation
+(`KWS_NOISE_DIR`/`KWS_RIR_DIR`) was left off. This entry fixes both and reruns the
+rebuild/retrain/eval E28 already did.
+
+**Calibration sentence.** Replaced `VOICE_GATE_SENTENCE` — "...der Küche an..." — with
+"Mach bitte das Licht außen an, schalte den Kühlschrank aus und stell die Heizung
+wärmer", which drops "Küche" entirely while still exercising umlauts/eszett (`außen`,
+`Kühlschrank`, `wärmer`) and five more command words (`Licht`, `an`, `Kühlschrank`,
+`aus`, `Heizung`) — seven required vocabulary tokens. `voice_gate`'s match was also the
+other half of the bug: `content_gate`'s sequential in-order matching meant a single
+early mishearing zeroed out every required token *after* it in the sentence too (a
+`thorsten-medium`-shaped transcript with only "Küche"→"Kirche" wrong scores 0.2, not
+"5/6" — the rest of the sentence is right there in the transcript, just never reached
+because the pointer never advances past the missed token). New `qc._voice_gate_score`
+checks each required token's presence anywhere in the transcript (order-independent,
+same exact-or-edit-distance-1 tolerance `_matches` already used), and the pass bar
+moved 0.9 → 0.85 (tolerates exactly one bad token of seven). Four new/renamed tests in
+`tests/test_qc.py`; `docs/sphinx/pipeline.rst` updated to match.
+
+**Re-gating.** Deleted `tts_voice_gate.json` and re-gated all 259 candidate voices
+against the new sentence/score (backed up as `tts_voice_gate.json.e28-backup`).
+**252/259 pass, up from 51/259.** All 9 `say` voices still pass (unchanged). All 14
+non-`mls` Piper voices now pass (was 2/14) — `thorsten-medium` is back, plus `eva_k`,
+`kerstin`, `ramona`, and all 8 `thorsten_emotional#N` speakers, exactly the voices E28
+named as wrongly failed. `de_DE-mls-medium#N` speakers: 229/236 pass (was 40/236). The
+remaining 7 failures are real: each is missing two or more required tokens on an
+actually-garbled reading (`Licht aus und anschalte` for `Licht außen an`, `Heizungwärme`
+glued into one word for `Heizung wärmer`), not a mishearing artefact — the gate is
+right to drop them.
+
+**Van augmentation.** `KWS_NOISE_DIR=<mww-train>/data/fma_16k` (210 files) and
+`KWS_RIR_DIR=<mww-train>/data/mit_rirs` (270 files) exported before the build; both are
+plain directories of 16 kHz wavs, no code change needed (`van_augmentation_enabled()` is
+already opt-in via these two env vars, per PR #73). Confirmed with the existing tests
+(`tests/test_augment.py`, `tests/test_data.py`'s van tests, 4 passed) and by the row-count
+delta below.
+
+**Rebuild.** `raw_clips_v3.pre-voicegate.pkl` → `raw_clips_v3.pkl` → `drop-tts-clips.py`
+(4,078 → 2,465, identical to E28's starting point) → `kws-dataset build --cache
+raw_clips_v3.pkl --prefix features_v3`. **Aggregate gate drop: 331/4,735 = 7.0%**
+(E28: 293/4,735 = 6.2%) — still entirely plain `duration:` cheap-gate rejections, zero
+language/content mismatches; the small increase over E28 is the wider voice pool (252
+vs. 51 admitted voices) drawing more short-duration attempts from the same handful of
+inherently-short words (`Dach` 146/300, `an` 88/300, `zu` 76/299 — vs. E28's `Dach`
+126/300, `an` 88/300, `zu` 72/299), not a regression in gate quality. `kälter` and
+`Aufstelldach`/`Außen`/`Heizung`/`hundert`/the `fünf*` numbers now synthesize with
+**zero** drops (was partial in E28). `[dataset] built seed=0: train=35,261, val=6,417,
+test=11,507` — train grew 32,725 → 35,261 (+2,536 rows), consistent with van
+augmentation's 3 extra rows (`VAN_SNRS = (0, 5, 10)` dB) per real (non-TTS) clip.
+
+**Retrain + export.** `kws-train --v2 --prefix features_v3 --out command_v3_w48.keras
+--width 48 --qat` (epochs=40, `kws-eta` predicted ~6.8 min, actual 9m32s — same
+ledger-underestimate pattern E27/E28 both noted, no width term in `size`), then
+`kws-export --v2 --qat --prefix features_v3 --model command_v3_w48.keras --width 48`
+(no `--firmware` — evaluation only, pending the deploy decision below). Run-1's
+(E28) exports backed up as `*.run1-voicegate` first (models and
+`features_v3_{train,val,test}.npz`/`manifest_v3.json`).
+
+**Real-voice comparison**, `scripts/compare_command_models.py`, deployed vs. E28's
+run-1 candidate vs. this run's candidate, same 197-word/101-phrase/29-negative approved
+set plus `spk18`:
+
+| | deployed w48 | run-1 candidate (E28) | run-2 candidate (E31) |
+|---|---|---|---|
+| bytes / sha256 | 25,832 / `8fa81d08` | 25,832 / `e398048c` | 25,832 / `d49093a4` |
+| INT8 test acc (own-era test set, not cross-comparable) | 93.59% (n=10,356) | 64.54% (n=8,901) | 65.92% (n=11,507) |
+| spk01 words (n=13, in-training) | 0.923 | 0.538 | **0.769** |
+| spk02 words (n=38, in-training) | 0.895 | 0.816 | 0.684 |
+| spk10 words (n=146, held-out) | 0.856 | 0.747 | **0.829** |
+| spk18 words (n=36, held-out) | 0.333 | 0.806 | **0.667** |
+| **aggregate words (n=233)** | **0.785** | 0.755 | 0.777 |
+| false accepts, spk02/spk10/spk18 | 0/10, 0/19, 0/3 | 0/10, 0/19, 0/3 | 0/10, 0/19, 0/3 |
+| **false accepts total (n=32)** | **0/32** | 0/32 | 0/32 |
+| phrase intent (spk10 only nonzero) | 0.082 | 0.082 (unchanged) | 0.113 |
+
+**spk01 (n=13, in-training, one clip per word).** Deployed gets 12/13 right, missing
+only `kälter`. The E31 candidate gets 10/13, missing `kälter` (unchanged — the same word
+the deployed model already fails, still the thinnest-covered word in the vocabulary
+even with the fixed gate) plus two new misses, `Außen` and `auf`. Neither traces to TTS
+coverage: `auf` never appears in this build's "synthesizing N more" log at all — real
+(MSWC/device) clips already met the 300-clip target before any TTS was drawn — and
+`Außen` kept its strong real base (159/300 real, 141 TTS-topped) with **zero** cheap-gate
+drops this run, so nothing noisy or `mls`-sourced fed either word. With one clip per
+word, each miss is a single binary outcome in an 13-item slice; the more plausible
+explanation is ordinary retrain variance now amplified by van-cabin augmentation
+changing the training-noise distribution (materially different from what either the
+deployed model or run-1 trained on), not a data-quality regression the calibration fix
+could reach. spk02 (in-training) shows the same shape of movement, dropping from run-1's
+0.816 to 0.684 — a second signal pointing at the retrain/augmentation axis rather than
+the voice gate.
+
+**Decision.** Per the same pre-agreed rule (aggregate words ≥ deployed's 0.785, false
+accepts no worse than 0/32, spk18 words > deployed's 0.333): the E31 candidate ties
+false accepts (0/32) and clears spk18 by a wide margin (0.333 → 0.667), but **still
+misses the aggregate-words bar** (0.777 < 0.785 — short by 2 of 233 words), driven by
+spk01's and spk02's in-training regressions. **Candidate does not satisfy all three
+conditions → the deployed w48 export stays**, a third session in a row. `firmware/main/gen/`
+and `models/command_v3_w48_qat.tflite` (the checked-in deploy path) are untouched:
+`kws-export` ran without `--firmware`.
+
+**Reading.** Both of E28's named defects are now fixed and both worked as expected in
+isolation — the calibration sentence fix alone lifted the voice pass rate 51→252/259 with
+no code path left to blame Whisper's own mishearing for a rejected voice, and van
+augmentation trained more (and differently-perturbed) real-clip rows without breaking
+anything the existing tests check. Combined, the candidate closes about 71% of run-1's
+aggregate-words shortfall (0.755 → 0.777 against deployed's 0.785) while holding false
+accepts and clearing spk18 — real progress — but it does not flip the deploy decision,
+because a *new* pair of in-training regressions (spk01, spk02) opened up that a wider
+voice pool and van-cabin noise do not obviously explain and this session did not
+diagnose further (out of scope per the task brief — spk01 above is investigation, not a
+fix). The next lever is almost certainly on the retrain/augmentation side, not the TTS
+gate: e.g. checking whether van augmentation's SNR range or the RIR pool is too
+aggressive for a model this small, or whether the run-to-run variance on a 233-clip
+real-voice eval is simply too high to reliably tell a real regression from noise without
+`kws-benchmark --folds` (open question, below). Device flashing/measurement was out of
+scope for this host-only session and was not performed.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

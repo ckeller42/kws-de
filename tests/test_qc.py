@@ -1346,11 +1346,30 @@ def test_voice_gate_fails_wrong_language():
     assert result["reason"] == "language:en"
 
 
-def test_voice_gate_fails_below_90_percent_content_match():
-    # German, but only about half the calibration sentence's tokens are heard.
+def test_voice_gate_fails_below_85_percent_content_match():
+    # German, but only about a seventh of the calibration sentence's required tokens
+    # are heard (just "Licht").
     tr = _fake_tts_transcriber({"half.wav": ("Bitte schalte das Licht", "de")})
     result = qc.voice_gate("piper", "half", tr, synth=_stub_synth({"half": None}))
     assert result["ok"] is False
+
+
+def test_voice_gate_tolerates_one_substituted_token():
+    # E29: one required token misheard/replaced (aussen -> drinnen) still passes —
+    # 6/7 = 0.857 >= VOICE_GATE_MIN_SCORE (0.85). Unlike content_gate's sequential
+    # in-order match, one bad token here does not zero out every token after it.
+    bad = qc.VOICE_GATE_SENTENCE.replace("außen", "drinnen")
+    tr = _fake_tts_transcriber({"one-off.wav": (bad, "de")})
+    result = qc.voice_gate("piper", "one-off", tr, synth=_stub_synth({"one-off": None}))
+    assert result["ok"] is True
+    assert result["reason"] is None
+
+
+def test_voice_gate_score_is_order_independent():
+    scrambled = "wärmer Heizung aus Kühlschrank an außen Licht"
+    score, reason = qc._voice_gate_score(qc.VOICE_GATE_SENTENCE, scrambled)
+    assert score == 1.0
+    assert reason is None
 
 
 def _tts_dir(tmp_path):
