@@ -377,3 +377,130 @@ def test_recordings_section_has_no_field_table_without_field_takes(tmp_path):
     res = ev.eval_recordings(root, predict_fn)
     assert res["field"]["takes"] == 0
     assert "## Field" not in ev.render_recordings_section(res)
+
+
+# --- Elicit section -----------------------------------------------------------
+#
+# Mirrors the Field section above: qc.run_qc routes `set == "elicit"` takes
+# through the same wake-split/parse/filing branch as `set == "field"`, but
+# scores them against the EXPECTED intent (record.c's prompt_intent()) instead
+# of a device answer, and reports them separately (kws_de.qc.run_qc's
+# n_elicit_*, this file's elicit_figures/render_elicit_section).
+
+
+def _elicit_qc_root(tmp_path):
+    """One stamp, two speakers. spk05: 3 elicit takes, 2 approved, 2 parsable
+    (a.wav matches what the scene expected, b.wav is an alternative phrasing
+    that parsed to a DIFFERENT valid command), one REJECTED take (still a
+    take). spk06: 1 elicit take, parsable and matching. Plus one guided
+    `words` row that must be ignored, exactly like the Field fixture."""
+    root = tmp_path / "qc"
+    cols = (
+        "file,set,prompt,speaker,verdict,reason,transcript,match_score,"
+        "rms_dbfs,peak_dbfs,dur_ms,device_intent,agrees,truncated,"
+        "wake_prob,would_fire,wake_clip,expected_match\n"
+    )
+    (root / "s1").mkdir(parents=True)
+    (root / "s1" / "qc.csv").write_text(
+        cols
+        + "a.wav,elicit,Licht Küche an,spk05,approve,,Hey Bus Licht Küche an,1.0,-20,-6,4000,"
+        + ",,,0.0,,1,1\n"
+        + "b.wav,elicit,Heizung an,spk05,approve,,Hey Bus Heizung an,1.0,-20,-6,4000,"
+        + ",,,0.0,,1,0\n"
+        + "c.wav,elicit,,spk05,reject,empty_transcript,,0.0,-20,-6,4000,,,,0.0,,,\n"
+        + "d.wav,elicit,Aufstelldach auf,spk06,approve,,Hey Bus Aufstelldach auf,1.0,-20,-6,"
+        + "4000,,,,0.0,,1,1\n"
+        + "e.wav,words,Licht,spk05,approve,,Licht,1.0,-20,-6,800,,,,0.0,,,\n"
+    )
+    (root / "s1" / "report.md").write_text(
+        "# QC s1\n\n## Elicit\n\n4 elicit takes, 3 approved, 3 parsable, "
+        "said-what-we-expected rate 0.667 over 3 compared, 3 wake clips, "
+        "0 approved but unfiled.\n"
+    )
+    return root
+
+
+def test_elicit_figures_count_takes_parsable_and_expected_match(tmp_path):
+    fig = ev.elicit_figures(_elicit_qc_root(tmp_path))
+    # takes counts the rejected row too; approved is reported beside it.
+    assert fig["takes"] == 4
+    assert fig["approved"] == 3
+    assert fig["parsable"] == 3
+    assert fig["expected_compared"] == 3
+    assert fig["expected_match"] == 2
+    assert fig["wake"] == 3
+    assert fig["unfiled"] == 0
+    assert fig["per_speaker"]["spk05"] == {
+        "takes": 3,
+        "approved": 2,
+        "parsable": 2,
+        "expected_compared": 2,
+        "expected_match": 1,
+        "wake": 2,
+    }
+    assert fig["per_speaker"]["spk06"] == {
+        "takes": 1,
+        "approved": 1,
+        "parsable": 1,
+        "expected_compared": 1,
+        "expected_match": 1,
+        "wake": 1,
+    }
+
+
+def test_recordings_section_carries_the_elicit_table(tmp_path):
+    root, predict_fn = _build_approved(tmp_path)
+    res = ev.eval_recordings(root, predict_fn, qc_root=_elicit_qc_root(tmp_path))
+    md = ev.render_recordings_section(res)
+    assert "## Elicit" in md
+    assert "4 elicit takes, 3 approved, 3 parsable" in md
+    # spk05: expected_match/compared = 1/2 = 0.500; spk06: 1/1 = 1.000.
+    assert "| spk05 | 3 | 2 | 2 | 0.500 |" in md
+    assert "| spk06 | 1 | 1 | 1 | 1.000 |" in md
+
+
+def test_elicit_table_says_n_a_rather_than_nan_when_nothing_was_compared(tmp_path):
+    fig = {
+        "per_speaker": {"spk09": dict.fromkeys(ev._ELICIT_KEYS, 0) | {"takes": 2, "approved": 2}},
+        **dict.fromkeys(ev._ELICIT_KEYS, 0),
+        "takes": 2,
+        "approved": 2,
+        "unfiled": 0,
+    }
+    md = ev.render_elicit_section(fig)
+    assert "| spk09 | 2 | 2 | 0 | n/a |" in md
+    assert "nan" not in md
+
+
+def test_recordings_section_has_no_elicit_table_without_elicit_takes(tmp_path):
+    root, predict_fn = _build_approved(tmp_path)
+    res = ev.eval_recordings(root, predict_fn)
+    assert res["elicit"]["takes"] == 0
+    assert "## Elicit" not in ev.render_recordings_section(res)
+
+
+def test_elicit_and_field_sections_coexist_without_cross_contamination(tmp_path):
+    root, predict_fn = _build_approved(tmp_path)
+    qc_root = tmp_path / "qc"
+    field_root = _qc_root(tmp_path)
+    assert field_root == qc_root  # same tmp_path -> same qc/ dir
+    # graft an elicit stamp onto the same qc/ tree the Field fixture already built
+    (qc_root / "s3").mkdir(parents=True)
+    (qc_root / "s3" / "qc.csv").write_text(
+        "file,set,prompt,speaker,verdict,reason,transcript,match_score,"
+        "rms_dbfs,peak_dbfs,dur_ms,device_intent,agrees,truncated,"
+        "wake_prob,would_fire,wake_clip,expected_match\n"
+        "z.wav,elicit,Licht Küche an,spk07,approve,,Hey Bus Licht Küche an,1.0,-20,-6,4000,"
+        ",,,0.0,,1,1\n"
+    )
+    (qc_root / "s3" / "report.md").write_text(
+        "# QC s3\n\n## Elicit\n\n1 elicit takes, 1 approved, 1 parsable, "
+        "said-what-we-expected rate 1.000 over 1 compared, 1 wake clips, "
+        "0 approved but unfiled.\n"
+    )
+    res = ev.eval_recordings(root, predict_fn, qc_root=qc_root)
+    assert res["field"]["takes"] == 6  # unchanged from test_field_figures_*
+    assert res["elicit"]["takes"] == 1
+    md = ev.render_recordings_section(res)
+    assert "## Field" in md and "## Elicit" in md
+    assert "1 elicit takes, 1 approved, 1 parsable" in md

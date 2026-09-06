@@ -11,9 +11,9 @@ Overview
 Seven stages, from the device to a retrained model:
 
 1. **Remote control** (firmware, already on ``main``) — serial console
-   commands ``mode menu|record|recognise|wake|usb`` and ``status`` drive the
-   CoreS3 without touching its screen; ``mode usb``/``mode menu`` are what
-   ingest uses.
+   commands ``mode menu|record|recordwake|elicit|recognise|wake|usb`` and
+   ``status`` drive the CoreS3 without touching its screen; ``mode
+   usb``/``mode menu`` are what ingest uses.
 2. **Ingest** (``scripts/ingest.sh``) — pulls a recording session from the
    device host to the workstation.
 3. **Quality control** (``kws-qc``) — an audio gate plus a Whisper content
@@ -53,6 +53,9 @@ Everything lives under ``$KWS_DATA_ROOT/data/recordings/``:
      spkNN/_phrase_/<slug>_NNN.wav        sentence takes
      spkNN/_neg_/<slug>_NNN.wav           negative-phrase takes
      spkNN/hey-bus/NNN.wav                wake-word ("Hey Bus") takes
+     spkNN/_elicit_/<slug>_NNN.wav         elicitation ("Situationen") takes;
+                                           <slug> is derived from the EXPECTED
+                                           INTENT, not the on-screen scene
      field/spkNN/<boot>-<ms>.wav           field takes, captured in Assistent
                                            mode (set=field, no prompt)
      sessions.csv                         speaker,pulled,prompt,file,ms,
@@ -68,7 +71,8 @@ Everything lives under ``$KWS_DATA_ROOT/data/recordings/``:
                                            speaker,verdict,reason,transcript,
                                            match_score,rms_dbfs,peak_dbfs,
                                            dur_ms,device_intent,agrees,
-                                           truncated
+                                           truncated,...,expected_match (the
+                                           last is elicit-only, see below)
      words.csv                            one row per SEGMENTED keyword clip
      written.txt                          approved-relative paths this stamp
                                            wrote, for idempotent re-runs
@@ -258,6 +262,35 @@ shortcut the wake rounds were built to break, and it would inflate the real
 share the wake recipe counts on. Pull such a session into a staging
 directory of its own and do not run ``kws-qc`` on it — nothing under
 ``approved/`` may come from a loudspeaker.
+
+An **elicit take** (``set=elicit``, captured via the guided-recorder's
+Situationen mode) shares the field take's route rather than the guided
+sentence's: it also starts with the wake phrase (the speaker answers "Hey
+Bus, ..." to a scene/question, never a script), so it goes through the same
+wake-split -> Whisper -> un-welding -> ``kws_de.grammar.parse`` -> filing
+pipeline described above for field takes, with the same duration cap
+(9800 ms) and the same "anything that transcribed to something" content
+gate. It is counted separately from field takes (no capture-vs-production
+wake-gate comparison applies — a guided take is not gated at all) and its
+``report.md``/eval sections are the *Elicit* line/section, not *Field*.
+
+What differs is the label it is scored against. Where a field take is
+compared to what the *device* itself recognised (``agrees``), an elicit
+take is compared to what the *scene was written to elicit*:
+``session.csv``'s ``prompt`` column carries the EXPECTED INTENT text
+(e.g. ``Licht Küche an``) rather than the on-screen scene, and
+``expected_match`` (a new ``qc.csv`` column, elicit-only) is ``1``/``0``
+for whether the Whisper-parsed ``Intent`` equals
+``field_intent(normalise(expected))`` — ``""`` when the answer did not
+parse at all, since there is then nothing to compare. **A mismatch is
+still filed under its own Whisper-derived label, never relabelled to the
+expected one** — a speaker answering a different valid command, or the
+same command in different words, is exactly the natural-phrasing data this
+mode exists to collect, not a rejection. Only a genuinely unparsable
+answer stays unfiled. ``expected_match`` is a proxy for how predictably a
+Situationen scene elicits its intended command (a corpus-design signal),
+not a substitute for evaluating the resulting model against real field
+usage.
 
 Auditing the whole tree
 ------------------------

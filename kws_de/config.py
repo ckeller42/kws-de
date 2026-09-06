@@ -79,6 +79,47 @@ def command_index(label: str) -> int:
     return COMMAND_LABELS.index(label)
 
 
+# Guided-recorder "Situationen" (elicitation) prompts: a scene or a question the
+# device asks, paired with the EXPECTED INTENT it is meant to elicit — not the
+# words to read. The speaker answers in their own phrasing, wake word included
+# ("Hey Bus, mach das Licht in der Küche an"), so this collects natural command
+# speech instead of read sentences (E30: read speech scored 0.27 on natural
+# field clips). Weighted to real commands across DEVICES/ZONES/ACTIONS, plus a
+# few question forms; deliberately no number-word drills (a scene that just
+# asks for a number teaches nothing about natural phrasing).
+SITUATIONS: list[tuple[str, str]] = [
+    ("Es ist dunkel in der Küche.", "Licht Küche an"),
+    ("Ihr geht schlafen, das Küchenlicht brennt noch.", "Licht Küche aus"),
+    ("Draußen ist es stockfinster und ihr wollt raus.", "Licht Außen an"),
+    ("Ihr seid wieder drin, das Außenlicht kann aus.", "Licht Außen aus"),
+    ("Zum Lesen ist es zu dunkel.", "Licht Lesen an"),
+    ("Du bist fertig mit Lesen und willst das Leselicht aus.", "Licht Lesen aus"),
+    ("Wo soll das Licht angehen?", "Licht Dach an"),
+    ("Wo soll das Licht ausgehen?", "Licht Dach aus"),
+    ("Das Leselicht blendet dich beim Lesen.", "Licht Lesen dunkler"),
+    ("Die Küche ist zu düster zum Kochen.", "Licht Küche heller"),
+    ("Ein sanftes Licht zum Einschlafen in der Küche.", "Licht Küche fünfundzwanzig"),
+    ("Du willst die Küche auf volle Helligkeit.", "Licht Küche hundert"),
+    ("Wie hell soll das Licht in der Küche sein?", "Licht Küche fünfzig"),
+    ("Wo soll die Heizung an?", "Heizung an"),
+    ("Dir ist kalt im Bus.", "Heizung an"),
+    ("Es ist drinnen zu warm geworden.", "Heizung aus"),
+    ("Die Heizung läuft, aber dir ist immer noch kalt.", "Heizung wärmer"),
+    ("Es wird euch langsam zu warm.", "Heizung kälter"),
+    ("Was soll mit der Heizung passieren?", "Heizung aus"),
+    ("Ihr kommt am Stellplatz an und wollt kühlen.", "Kühlschrank an"),
+    ("Ihr packt ab und der Kühlschrank kann aus.", "Kühlschrank aus"),
+    ("Der Kühlschrank brummt euch nachts wach.", "Kühlschrank leise"),
+    ("Was soll mit dem Kühlschrank passieren?", "Kühlschrank an"),
+    ("Ihr wollt das Dach für die Nacht öffnen.", "Aufstelldach auf"),
+    ("Ihr fahrt los, das Dach muss zu.", "Aufstelldach zu"),
+    ("Was soll mit dem Dach passieren?", "Aufstelldach auf"),
+    ("Ihr kommt spät abends am Stellplatz an, es ist dunkel draußen.", "Licht Außen an"),
+    ("Beim Kochen wird es dir zu warm in der Küche.", "Heizung kälter"),
+    ("Das Leselicht ist dir zu schwach zum Lesen.", "Licht Lesen heller"),
+    ("Wo soll es heller werden?", "Licht Dach heller"),
+]
+
 # Guided-recorder "negative" prompts: everyday German sentences that contain
 # none of the command vocabulary. Used only for on-device recording; the
 # recordings feed false-accept evaluation later.

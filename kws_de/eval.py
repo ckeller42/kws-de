@@ -298,6 +298,92 @@ def _rate(num: int, den: int) -> str:
 
 _EMPTY_FIELD = {"per_speaker": {}, **dict.fromkeys(_FIELD_KEYS, 0), "unfiled": 0}
 
+#: Per-speaker elicit ("Situationen") counters, summed into the same top-level keys.
+_ELICIT_KEYS = ("takes", "approved", "parsable", "expected_compared", "expected_match", "wake")
+
+
+def elicit_figures(qc_root) -> dict:
+    """Per-speaker elicit-capture figures, read from every `qc/<stamp>/qc.csv`.
+
+    Mirrors `field_figures`, but for `set == "elicit"` rows: **takes** is every
+    elicit row (approved or not), **approved** beside it. A row is **parsable**
+    iff its `prompt` is non-empty (`run_qc` writes `prompt = intent_text(got)`
+    only for a parsed elicit row). **expected_compared** counts rows where
+    `expected_match` is `"0"` or `"1"` (a parsed row always gets compared, so
+    this equals `parsable` in practice — kept separate for the same reason
+    `field_figures` keeps `compared` separate from `parsable`: it is what
+    `qc.csv` actually says, not an assumption about how the two relate).
+    **expected_match** counts `expected_match == "1"` over `expected_compared`,
+    never over `parsable`. `unfiled` has no qc.csv column (identical rows to a
+    filed negative there) -- summed from each stamp's report.md Elicit line."""
+    import csv
+    import re
+    from collections import defaultdict
+    from pathlib import Path
+
+    per_spk: dict = defaultdict(lambda: dict.fromkeys(_ELICIT_KEYS, 0))
+    unfiled = 0
+    for stamp in sorted(Path(qc_root).iterdir()):
+        csv_path = stamp / "qc.csv"
+        if not csv_path.exists():
+            continue
+        with csv_path.open(newline="") as fh:
+            for r in csv.DictReader(fh):
+                if r.get("set") != "elicit":
+                    continue
+                s = per_spk[r["speaker"]]
+                s["takes"] += 1
+                s["approved"] += r.get("verdict") == "approve"
+                if r.get("prompt"):
+                    s["parsable"] += 1
+                if r.get("expected_match") in ("0", "1"):
+                    s["expected_compared"] += 1
+                    s["expected_match"] += r["expected_match"] == "1"
+                if r.get("wake_clip") == "1":
+                    s["wake"] += 1
+        report_path = stamp / "report.md"
+        if report_path.exists():
+            # Field and Elicit sections use the identical "N approved but
+            # unfiled" phrase, so search only the text AFTER the Elicit
+            # heading — searching the whole file could match Field's number.
+            after_heading = report_path.read_text().partition("## Elicit")[2]
+            m = re.search(r"(\d+) approved but unfiled", after_heading)
+            if m:
+                unfiled += int(m.group(1))
+    total = {k: sum(s[k] for s in per_spk.values()) for k in _ELICIT_KEYS}
+    return {"per_speaker": dict(per_spk), **total, "unfiled": unfiled}
+
+
+def render_elicit_section(elicit: dict) -> str:
+    """Markdown for the elicit figures: per speaker, how many "Situationen"
+    answers were captured, how many parsed, and how often the speaker said what
+    the scene/question was meant to elicit."""
+    parsable_rate = _rate(elicit["parsable"], elicit["takes"])
+    expected_rate = _rate(elicit["expected_match"], elicit["expected_compared"])
+    unfiled_bit = f", {elicit['unfiled']} unparsed (vocab present)" if elicit["unfiled"] else ""
+    out = ["\n## Elicit\n"]
+    out.append(
+        f"{elicit['takes']} elicit takes, {elicit['approved']} approved, "
+        f"{elicit['parsable']} parsable ({parsable_rate}){unfiled_bit}. "
+        f"Said what the scene expected {expected_rate} of the "
+        f"{elicit['expected_compared']} compared takes -- a mismatch is still "
+        "filed under its own (Whisper-derived) label; alternative phrasing of a "
+        "valid command is good training data, not a reject.\n"
+    )
+    out.append(
+        "| speaker | elicit takes | approved | parsable | expected-match |\n|---|---|---|---|---|"
+    )
+    for spk in sorted(elicit["per_speaker"]):
+        s = elicit["per_speaker"][spk]
+        out.append(
+            f"| {spk} | {s['takes']} | {s['approved']} | {s['parsable']} | "
+            f"{_rate(s['expected_match'], s['expected_compared'])} |"
+        )
+    return "\n".join(out) + "\n"
+
+
+_EMPTY_ELICIT = {"per_speaker": {}, **dict.fromkeys(_ELICIT_KEYS, 0), "unfiled": 0}
+
 
 def eval_recordings(
     approved, predict_fn, *, step_ms: int = 100, manifest_path=None, qc_root=None
@@ -311,8 +397,9 @@ def eval_recordings(
     so a phrase clip is never actually training material regardless of speaker.
     With no manifest (missing path or file absent), every clip is `HELD_OUT`.
     `qc_root` (a `qc/` dir of per-stamp `qc.csv`+`report.md`, see
-    `field_figures`) is optional -- omitted or `None`, the result's `"field"`
-    is all zeros and `render_recordings_section` renders no Field section."""
+    `field_figures`/`elicit_figures`) is optional -- omitted or `None`, the
+    result's `"field"`/`"elicit"` are all zeros and `render_recordings_section`
+    renders no Field/Elicit section."""
     import csv
     from collections import defaultdict
     from pathlib import Path
@@ -398,6 +485,7 @@ def eval_recordings(
         "manifest_built_at": built_at,
         "figures": figures,
         "field": field_figures(qc_root) if qc_root is not None else dict(_EMPTY_FIELD),
+        "elicit": elicit_figures(qc_root) if qc_root is not None else dict(_EMPTY_ELICIT),
     }
 
 
@@ -478,6 +566,8 @@ def render_recordings_section(res: dict) -> str:
             )
     if res.get("field", {}).get("takes"):
         out.append(render_field_section(res["field"]))
+    if res.get("elicit", {}).get("takes"):
+        out.append(render_elicit_section(res["elicit"]))
     # one blank line between blocks, never two (markdownlint MD012/MD022/MD058)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out) + "\n")
 

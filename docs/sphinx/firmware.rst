@@ -14,7 +14,7 @@ Boot menu
 ---------
 
 The device boots into a dark-theme selection screen: a small "kws-de"
-title over a column of six buttons, each a direct
+title over a column of seven buttons, each a direct
 ``app_set_mode()`` call (:need:`REQ_FW_MENU_FLOW`):
 
 - **Assistent** — the always-on two-stage pipeline: the wake model runs
@@ -23,12 +23,14 @@ title over a column of six buttons, each a direct
 - **Hey Bus** ("Hey Bus demo") — the wake-word test mode, wake model only.
 - **Record** — the guided recorder: sentences, then negatives.
 - **Hey Bus aufnehmen** — the wake-word-only recording session (5 takes).
+- **Situationen** — elicitation: a scene/question plus "Sag es dem Bus",
+  answered in the speaker's own words rather than read from the screen.
 - **USB** — exposes recordings over USB mass storage.
 
 Every mode's own back/abort button returns to this menu; no mode links
 directly to another. **Assistent is deliberately first**: it is the one
 mode that is meant to be *used*, the shape the architecture is designed
-around; the other five are measurement and data-collection modes.
+around; the other six are measurement and data-collection modes.
 Recognition and Hey Bus still run their models in isolation from each other
 (:need:`REQ_FW_WAKE_ISOLATED`) — that is what makes them useful as
 measurements, and it is Assistent that combines them.
@@ -252,6 +254,24 @@ does, then prompts 5 single-take reads of "Hey Bus" straight to the
 success screen — no sentence/negative sets chained on. Back path: same as
 Record (Abbrechen -> menu, success screen's Menu -> menu).
 
+Situationen
+~~~~~~~~~~~~
+
+Elicitation, the third variant of the guided recorder: bumps the speaker id
+the same way Record does, then walks ``config.SITUATIONS`` (30 scenes/
+questions), one single take per prompt, straight to the success screen — no
+sentence/negative sets chained on. Where the sentence set asks the speaker
+to *read* a command, this mode shows a scene ("Es ist dunkel in der
+Küche.") or a question ("Wo soll die Heizung an?") plus the cue "Sag es dem
+Bus", and the speaker answers however they naturally would, wake phrase
+included — collecting the natural-phrasing speech a script cannot produce
+(read-sentence models scored 0.27 intent accuracy on real field clips, see
+paper notes E30). Each prompt carries an EXPECTED INTENT (e.g. ``Licht
+Küche an``), never the words to say; that text, not the on-screen scene, is
+what lands in the take's ``session.csv`` ``prompt`` column, so QC can score
+what was actually said against what the scene was meant to elicit. Back
+path: same as Record.
+
 USB
 ~~~
 
@@ -276,18 +296,23 @@ Tapping **Record** starts a fresh session (:need:`REQ_FW_RECORD_SESSION`):
    number of takes saved this session; **Menu** returns to the selection
    menu.
 
-The wake-word session (**Hey Bus aufnehmen**) is the one exception to the
-two-takes/sentences-then-negatives shape: 5 single-take reads of the wake
-word only, straight to the same success screen
-(:need:`REQ_FW_RECORD_WAKE_SET`).
+The wake-word session (**Hey Bus aufnehmen**) and the elicitation session
+(**Situationen**) are the two exceptions to the two-takes/sentences-then-
+negatives shape: each is a single, un-chained set of one-take-per-prompt
+reads straight to the same success screen — 5 reads of the wake word
+(:need:`REQ_FW_RECORD_WAKE_SET`), or the 30 scene/question prompts of
+``config.SITUATIONS`` for Situationen. For an elicit prompt the take is
+capped at 9.8 s rather than 6 s (an unscripted answer runs longer than a
+read sentence), and ``session.csv``'s ``prompt`` column carries the
+EXPECTED INTENT text, not the on-screen scene/question.
 
 Every take appends one row (``prompt,file,ms,peak_dbfs,set,seed,ts``) to
 ``<root>/<speaker>/session.csv`` (:need:`REQ_FW_RECORD_SESSION_CSV`), where
 ``<root>`` is the recording volume chosen at boot (see "Storage" below);
 the row's ``file`` column stays relative to that root either way. Trailing
 silence closes a take after a per-prompt-set hangover — 500 ms for words,
-1200 ms for sentences/negatives/wake — and a false-start filter discards a
-take opened by a breath or click and keeps listening
+1200 ms for sentences/negatives/wake/elicit — and a false-start filter
+discards a take opened by a breath or click and keeps listening
 (:need:`REQ_FW_RECORD_HANGOVER`). A clipped take is discarded and redone
 (:need:`REQ_FW_RECORD_CLIP_REJECT`); a corrupted or too-short take is
 rejected too. Aborting with **Abbrechen** at any point returns straight to
@@ -333,7 +358,7 @@ The console port accepts newline-terminated commands
 
 .. code-block:: text
 
-   mode menu|record|recordwake|recognise|wake|assist|usb
+   mode menu|record|recordwake|elicit|recognise|wake|assist|usb
    status
    wakefire
    beep
@@ -345,8 +370,9 @@ The console port accepts newline-terminated commands
   ``storage sd <free>/<total> MB`` or ``storage flash <free>/<total> KB``
   (:need:`REQ_FW_STORAGE_SD`), an ``intent <text>`` line naming the last
   closed assist window's parsed result (``intent Licht Küche -> an`` or
-  ``intent none``, omitted before the first window), and in record/record-wake
-  mode also the recorder's phase/index/count/speaker.
+  ``intent none``, omitted before the first window), and in
+  record/record-wake/elicit mode also the recorder's
+  phase/index/count/speaker.
 - ``wakefire`` injects one synthetic wake fire down the same path as a real
   one — a measurement hook for the assist-mode duty cycle
   (:need:`REQ_FW_ASSIST_GATE`), not a feature.

@@ -2474,6 +2474,67 @@ fires more often than `#67`'s baseline, `scripts/ingest.sh -H bar` the session
 into `incoming-tts/`, leave the device in Assistent with `field on`,
 `field thresh 0.85`.
 
+### E30 — elicitation ("Situationen"): natural phrasing instead of read sentences (host-only)
+
+Every guided sentence prompt to date is a script: the speaker reads `Licht Küche an` off
+the screen, so the phrase clips it produces are read speech, not natural command speech.
+Round-6d's field report (E17/E21) already measured how far that generalisation gap runs:
+a command model trained only on guided (read) clips scored **0.27 intent accuracy on
+real field clips** — natural "Hey Bus, ..." utterances the wake gate actually captured —
+against >0.9 on its own held-out guided test set. Reading a sentence and asking for
+something in your own words are different speech acts (different prosody, different word
+order, filler words, self-correction), and no amount of more guided recording closes that
+gap; only speech elicited the second way does.
+
+**Design.** A third guided-recorder mode, "Situationen", next to Record (words/sentences/
+negatives) and "Hey Bus aufnehmen" (the wake-only set). Each prompt is a SCENE ("Es ist
+dunkel in der Küche.") or a QUESTION the device asks ("Wo soll die Heizung an?") plus the
+on-screen cue "Sag es dem Bus" — never the words to say. The speaker answers however they
+would naturally, wake phrase included ("Hey Bus, mach das Licht in der Küche an"). Each
+prompt carries an EXPECTED INTENT (`config.SITUATIONS`: 30 (scene, intent) pairs, e.g.
+`("Es ist dunkel in der Küche.", "Licht Küche an")`), not words — the recorder never tells
+the speaker which tokens to hit.
+
+**Firmware.** `PROMPT_ELICIT` (`prompts.h`/`prompts.c`): one take per prompt (a natural
+answer is not read-and-redo material), a 9.8 s cap and 1200 ms hangover (an unscripted
+answer runs longer than a read sentence), `_elicit_/<slug>_NNN.wav` filing under the
+speaker's session dir. `record.c`'s `session.csv` row writes the EXPECTED INTENT text as
+the `prompt` column (`prompt_intent()`), not the scene text (`prompt_text()`) shown on
+screen — QC needs the target to score against, not the display copy. New menu entry
+"Situationen", console `mode elicit`, `UI_MODE_RECORD_ELICIT` — otherwise identical to
+every other guided mode (pause/resume, speaker id, storage root, USB export).
+
+**QC (`kws_de.qc`).** An elicit take starts with the wake phrase exactly like a field
+take, so it is routed through the SAME wake-split -> Whisper -> `_split_glued` ->
+`grammar.parse` -> filing pipeline as `set == "field"` (wake clip, phrase + word clips, or
+negative — never relabelled to the expected intent even on a match: the Whisper-derived
+label is always what gets filed, because that is what the clip actually contains). Counted
+separately from field takes (`n_elicit_*`, no capture-vs-production wake-gate comparison —
+a guided take is not gated at all) and scored against the expected intent via a new
+`expected_match` qc.csv column: `"1"`/`"0"` when the Whisper-parsed `Intent` does/doesn't
+equal `field_intent(normalise(expected))`, `""` when the answer didn't parse at all (nothing
+to compare). A `"0"` is not a reject — alternative phrasing of a valid command is exactly
+the natural-speech data this mode exists to collect; only a genuinely unparsable answer
+stays unfiled. `report.md` gets an `## Elicit` line (takes, approved, parsable,
+said-what-we-expected rate over compared takes, wake clips, approved-but-unfiled), and
+`kws_de.eval` an `## Elicit` section beside `## Field` (`elicit_figures`/
+`render_elicit_section`, per-speaker table).
+
+**What `expected_match` measures, and what it does not.** It is not intent-recognition
+accuracy — every filed clip (matched or not) still trains/tests the model under its own
+Whisper-derived label. It is a proxy for how predictably a scene elicits its intended
+command: a low rate means the SITUATIONS wording is ambiguous or invites a different
+phrasing than expected (a corpus-design signal), not that the recording session failed. A
+model trained partly on this corpus should be evaluated the same way E17's field figures
+already are — against real field clips — since that is the gap this mode exists to close;
+`expected_match` on the elicitation session itself is a collection-quality check, not a
+substitute for that evaluation.
+
+Host-only session: no elicit recordings were collected. Test plan mirrors the field
+one (`tests/test_qc.py` `_elicit_session`-style fixtures, `tests/test_eval_recordings.py`
+`_elicit_qc_root`), plus firmware host tests (`firmware/test/test_prompts.c`) and
+`kws_de.firmware_gen` coverage (`kws-fwgen --check` now also covers `KWS_ELICIT_*`).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
