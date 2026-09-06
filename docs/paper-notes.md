@@ -2934,9 +2934,13 @@ noted). ESP-IDF v5.5.5 Docker build (default config): OK, app image **1,025,952 
 E25-E32's intervening firmware work, so the +5,904 B is unrelated to this deploy — the
 wake weights are the only `gen/` bytes that moved, confirmed above).
 
-**Device: pending.** Not flashed, not measured. As with E24, a real "Hey Bus" fire
-check and a field-capture soak per E22/E24's recommendation remain open before this is
-more than a host-side candidate swap.
+**Device (2026-09-06 19:20, console only).** Flashed on the CoreS3: `status` reads
+`wake=hey_bus.tflite@4aaa2f98 2026-09-06`; `mode wake` trace `step 1277 +/- 154 us
+(invoke 1165 us)` over 67 steps per 2 s window — the round-6d baseline (E24: 1,256 µs);
+room-noise peaks 0.203 and 0.004 over the two windows (round 6d idled at 0.176). Left in
+Assistent mode with field capture armed at 0.85 for the soak. Still open: a spoken
+"Hey Bus" check and the next real session's false-fire count, which is the number E33's
+1/5 predicts should fall from 16 per session.
 
 ## Open questions
 
