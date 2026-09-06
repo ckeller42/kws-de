@@ -2399,6 +2399,116 @@ duration-aware augmentation check — is the next lever, not another gate-strict
 knob. Device flashing/measurement of either candidate was out of scope for this
 host-only session and was not performed.
 
+### E28 — voice-level TTS gate, van augmentation, decoder sweep (2026-09-06, host-only, feat/tts-voice-gate)
+
+E27 found the per-clip content gate mostly rejects good German audio, not bad audio,
+on short/single-word clips — `heller`/`zu`/`kälter` fail on Whisper language
+misdetection, `an` fails a hard duration floor, and a noisy `piper` `mls-medium`
+speaker pool (mostly non-German) drowns out everything else. This entry replaces the
+per-clip gate with a voice-level one (`kws_de.qc.voice_gate`,
+`kws_de.data.passing_voices`): one fixed calibration sentence ("Bitte schalte das
+Licht in der Küche an und die Heizung im Bad aus") per voice, cached in
+`tts_voice_gate.json`, ≥90% token match + detected `de` to pass; a passing voice's
+clips then only need `kws_de.qc.tts_cheap_gate` (duration ≥ `TTS_MIN_S`, now 0.25s;
+not silent — no per-clip Whisper). Also lands opt-in van-cabin augmentation
+(`kws_de.augment.van_augment`, off by default) and `scripts/sweep-decoder.py` (a
+read-only decoder threshold/hangover report, no retrain). Simplified away #71's
+`min_tokens_for_content` knob and `drop-tts-clips.py --all-engines` first (neither
+had a real use case once the voice gate replaced the mechanism they were patching).
+
+**Voice-gate results.** 259 candidate voices gated once and cached: all 9 `say`
+voices pass; 2/14 non-`mls` Piper voices pass (`karlsson-low`, `pavoque-low`); 40/236
+`de_DE-mls-medium#N` speakers pass — confirming E27's read that the pool is mostly
+non-German. **51/259 pass overall.**
+
+Surprise: 5 of the 12 failing non-`mls` Piper voices (`thorsten-medium`, `eva_k`,
+`kerstin`, `ramona`, all 8 `thorsten_emotional#N` speakers) fail not because they are
+bad voices, but because Whisper transcribes the calibration sentence's "Küche" as
+"Kirche" — the exact mishearing round-6d's field report already named
+(`train/mww/README.md` rule 5). `thorsten-medium`'s transcript is otherwise a
+verbatim match: `"...das Licht in der Kirche an und die Heizung..."`. One wrong token
+out of 6 scores 0.833, under the 0.9 bar, so a demonstrably fine voice is dropped
+entirely. Flagged as a follow-up (below), not fixed in this session — redoing the
+~25-minute build with a different calibration sentence was judged not worth it against
+the numbers already in hand.
+
+**Drop rate, before/after.** E27: 66.9% (strict gate) / 64.7% (lenient gate) of
+synthesized clips dropped, aggregated over the whole build. This build:
+`raw_clips_v3.pkl` backed up to `raw_clips_v3.pre-voicegate.pkl`,
+`drop-tts-clips.py` dropped 4,078 → 2,465 (say/legacy TTS out, 87 piper + 2,378 real
+kept), then `kws-dataset build --cache raw_clips_v3.pkl --prefix features_v3`
+regenerated the rest. **Aggregate gate drop: 293/4,735 = 6.2%** — every dropped clip's
+reason is now a plain `duration:` cheap-gate rejection, zero language/content
+mismatches. Per-word: `an` 88/300 (29.3%, was 300/300 in E27), `zu` 72/299 (24.1%, was
+~300/300), `heller` 0/299 (was 300/300), `kälter` 0/292 (was 44/300 partial), `Dach`
+126/300 (42.0%, a new word this build actually attempted), `Küche` 6/299 (2.0%).
+`[dataset] built seed=0: train=32725, val=4773, test=8901` — both splits much larger
+than E27's (train 17268-18442) since `an`/`zu`/`heller`/`kälter`/`Dach` etc. now
+actually receive TTS clips instead of losing every attempt.
+
+**ETA ledger.** `train` (`--v2 --width 48 --qat --prefix features_v3`, epochs=40,
+size=40×32725=1,309,000): predicted ~5.7 min (range 4.2–8.6, 10 runs), actual 8m46s
+— over the range, consistent with E27's own note that the ledger's `size` carries no
+width term and its history is mostly narrower runs. `kws-dataset build` itself: ~25m26s
+wall time, well under the "expect < 1h" estimate.
+
+**Decoder sweep** (`scripts/sweep-decoder.py`, committed separately, run against the
+*currently deployed* model before this retrain — a read-only report, no firmware
+change): 88 field takes (18 with a parsed command, 70 negative). Best over the swept
+grid (threshold 0.3–0.9, hangover 0/1/2 extra confirmation frames): **threshold=0.3,
+hangover=1 → 4/18 agreement, 0/70 false fires**, vs the firmware's current
+threshold=0.5, hangover=1 (`KWS_THRESHOLD`/`KWS_MIN_CONSECUTIVE`) → 3/18, 0/70. A small
+edge, on a small sample (18 parsed field takes) — not acted on; firmware constants are
+unchanged.
+
+**Real-voice comparison**, `scripts/compare_command_models.py` (copied from
+`.worktrees/data-regen`'s throwaway E27 driver, now committed) against the deployed
+w48 (`firmware/main/gen/model_data.h`) and the freshly exported candidate, same
+197-word/101-phrase/29-negative approved set plus `spk18`:
+
+| | deployed w48 | candidate w48 (voice-gate regen) |
+|---|---|---|
+| bytes / sha256 | 25,832 / `8fa81d08` | 25,832 / `e398048c` |
+| INT8 test acc (own-era test set, not cross-comparable) | 93.59% (n=10,356) | 64.54% (n=8,901) |
+| spk01 words (n=13, in-training) | 0.923 | **0.538** |
+| spk02 words (n=38, in-training) | 0.895 | 0.816 |
+| spk10 words (n=146, held-out) | 0.856 | 0.747 |
+| spk18 words (n=36, held-out) | 0.333 | **0.806** |
+| **aggregate words (n=233)** | **0.785** | 0.755 |
+| false accepts, spk02 (n=10) | 0/10 | 0/10 |
+| false accepts, spk10 (n=19) | 0/19 | 0/19 |
+| false accepts, spk18 (n=3) | 0/3 | 0/3 |
+| **false accepts total (n=32)** | **0/32** | **0/32** |
+| phrase intent | spk10 0.082, rest 0.000 | unchanged |
+
+**Decision.** Per the pre-agreed rule (deploy iff aggregate words ≥ deployed's 0.785,
+false accepts no worse than 0/32, spk18 words > deployed's 0.333): the candidate
+clears false-accepts (0/32, tied) and spk18 by a wide margin (0.333 → 0.806, the
+speaker the deployed model handles worst), but **misses the aggregate-words bar**
+(0.755 < 0.785), driven by a sharp regression on `spk01` (0.923 → 0.538, n=13 — small
+sample, but the largest single move in the table and the opposite direction from
+everything else). **Candidate does not satisfy all three conditions → the deployed
+w48 export stays.** `firmware/main/gen/` and `models/command_v3_w48_qat.tflite` (the
+checked-in deploy path) are untouched: `kws-export` ran without `--firmware`, and
+`models/` is gitignored regenerable output. Current `command_v3_w48_qat.tflite`/
+`.keras`/SavedModel dir backed up as `*.pre-voicegate.*` before export.
+
+**Reading.** The voice-level gate does exactly what it was built for — it fixed the
+five/six previously-zero words and cut the aggregate drop rate 10x (66.9%→6.2%) — and
+the resulting model generalises dramatically better to `spk18`, the speaker the
+deployed model was worst at. It does not clear the deploy bar this round because of
+one speaker's regression that this session did not diagnose further (host-only,
+no device access). Two concerns worth a follow-up, not resolved here: (1) the
+calibration sentence's own "Küche" is exactly the word Whisper mishears elsewhere in
+this codebase, so the voice gate inherits that false-negative — a sentence built from
+words Whisper handles reliably (or a per-word near-miss tolerance) would likely pass
+several more good voices, including `thorsten-medium`; (2) `spk01`'s regression is
+worth isolating (which words, which augmentation) before the next retrain attempt.
+Van-cabin augmentation (`KWS_NOISE_DIR`/`KWS_RIR_DIR`) was not enabled for this
+build — the task did not call for it, and this entry's numbers reflect the voice gate
+alone. Device flashing/measurement was out of scope for this host-only session and was
+not performed.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
