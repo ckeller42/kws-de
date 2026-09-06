@@ -60,6 +60,66 @@ static const int32_t op6_shift[48] = {-7, -6, -7, -7, -7, -7, -7, -7, -7, -7, -7
 static const int8_t op8_w[1104] = {-78, -25, 36, 17, -75, -23, -81, -90, -9, -20, -11, 28, 19, 37, -75, -7, -50, 58, 6, -51, 77, -10, -49, 50, 20, -51, -55, 44, -35, -24, -51, 70, -11, -89, 38, 43, 51, 14, -31, -30, -19, 18, 33, -3, -10, 53, -74, -110, -15, 74, 19, -69, -59, -27, -41, -47, 1, 11, 9, 87, -12, 4, -25, -13, 1, -40, 0, 36, 57, -50, -44, 60, -53, -60, 20, 6, -33, -16, 0, -23, -60, -2, 21, 32, -36, -55, -42, -43, 42, 54, 76, -37, 13, -47, -11, -69, 43, -49, -13, 40, -69, -32, 68, 59, -12, 41, 8, 59, 1, 14, -66, -57, -72, 44, 1, -48, -1, 39, 10, -43, 18, 18, 2, -5, -4, -33, 19, 7, -6, -41, -61, -57, 3, -54, 42, -23, 18, -37, -19, -37, 69, -39, 59, 30, -7, -26, -45, -44, 8, 2, -1, -47, -45, 62, -22, 50, -70, -56, -34, -38, 5, -8, -71, 2, -25, 56, 4, 53, -22, -47, -25, -43, 58, -87, 37, -14, 47, 75, 67, 46, -35, -18, 63, -59, -59, -15, -21, -32, 47, 43, -21, 71, -35, -78, -44, -39, -3, -12, 50, -8, 23, 54, -53, 79, 7, -51, -44, -45, -49, 25, -14, 29, 25, -58, -45, -52, 90, -56, 75, -44, 5, -62, -54, 80, -60, 39, 40, -92, 66, -1, -43, -50, -12, 17, 75, 49, 63, -78, -42, -44, -82, 8, -6, -56, -91, 55, -28, -46, -11, -79, -59, -42, -17, -43, -60, 33, -53, -44, 8, 43, -13, 110, -12, 22, -34, 62, -38, -39, 93, -78, -14, -34, -25, 82, 46, -55, -18, 62, 92, -78, -15, 36, 2, -21, 30, -33, -72, -8, -2, -57, -34, 17, 59, 20, -40, 54, -16, 49, 67, 16, -23, 4, 34, -44, -52, -37, -4, -46, -38, -54, -80, 15, -40, 50, -93, 25, -23, -23, -5, -69, 46, -13, 21, -30, -21, 3, -57, 72, 40, 19, 7, -9, -74, 24, 3, 61, -9, -24, -51, 53, -79, 23, 23, 65, -21, -59, 49, -45, -25, -18, 39, -46, -44, -14, 40, -63, 3, -44, -49, -16, 72, 73, -66, -19, -24, 51, -53, -1, -54, -32, -5, -54, 64, 11, 8, 37, 42, -6, -15, -39, -70, 73, 65, -78, -64, 31, -17, -43, -60, 62, 10, 3, -33, -101, 45, -22, -3, -31, -2, -3, -7, -69, 38, 47, -1, 50, -43, -50, -40, 78, -29, 6, -5, 72, 34, -1, -17, -93, -34, -95, -54, -3, 2, 35, 68, 88, 26, 15, -77, -82, 5, -63, -89, -14, -19, 38, 64, -8, -79, -63, -9, 13, -5, -43, 27, 51, 60, -42, -36, -40, 5, -10, 27, -37, -56, 19, -53, -16, -27, 49, -13, -58, 18, -32, 76, -63, 47, -46, -42, -7, -17, 40, -12, -41, -1, 15, -15, 26, -123, 36, 17, -44, -23, -69, -38, 28, -1, -44, -8, 29, -98, -33, 38, 65, -39, 38, -7, -54, -1, -85, 28, 17, -7, 61, -68, -40, -51, 52, -13, 34, 76, -43, 56, -58, 38, -24, -69, -34, -16, -83, -37, -22, 5, 4, -67, -54, -4, 14, 91, -20, 65, 38, -71, -37, -34, 45, 9, 32, 49, 23, 11, -19, -117, 66, -70, 62, -22, -86, 20, -39, -38, -49, -77, 32, -96, -10, 34, 38, -51, -57, -77, -56, -32, 58, -15, 39, -41, 52, 28, -52, -59, -4, -49, -9, 50, 40, 31, 2, 5, -95, -11, -22, 31, -79, 2, -109, -92, -51, -11, -28, -23, 76, 40, -48, 42, -63, -56, -14, 8, -36, 64, 42, 36, 7, 51, 54, -33, -54, -29, 42, 10, 66, 17, 41, 29, -58, -7, -20, -50, -26, -21, -96, 49, -20, 54, 79, -57, -85, -38, -9, 57, 48, -9, -35, 17, -7, -10, -47, 43, 35, 52, -63, -20, 45, -38, -27, 12, -29, 16, -20, 1, -26, -14, 10, -58, -42, -64, 68, -15, 62, -83, -46, -19, -17, -14, -20, 36, -32, 27, -39, 58, -20, 17, 45, -50, -36, -72, -40, 80, -127, -10, -17, -96, -17, -6, -24, 13, 1, 23, -76, -21, -61, -52, 51, 88, -6, 30, -46, 6, 44, 43, -53, 32, 12, -21, -1, -28, 31, -30, -36, -41, -80, -17, -75, -58, 58, 78, 94, 56, 20, 53, 19, -75, 65, 46, 17, -27, -32, 12, 30, -13, -63, -16, -43, -24, 87, -41, -18, -29, -2, -70, -5, -45, 3, -52, -22, -54, 37, 14, -15, -39, -39, 7, 72, -74, 69, -14, -31, 1, -4, -28, -52, -27, -25, 10, 44, 44, 65, -64, -38, 15, 64, -49, -36, -34, 15, -1, 5, -2, -10, -25, -37, -28, -21, -44, 59, -33, -23, -12, -8, 65, -61, 17, 42, 33, -45, 57, -46, 33, 94, 51, -76, -49, -46, 79, 54, 83, 23, -44, -77, -56, 35, 2, -7, -61, -45, 29, 5, -23, -15, 44, -93, -8, 35, -106, 45, 26, 44, -109, -42, 52, -56, 59, 5, -68, 41, -25, 13, 48, 2, 26, -53, 61, -59, -70, 0, 19, 9, -21, 36, -60, -28, -29, -41, -42, 4, -33, 23, 21, -70, 62, -3, 40, 22, 37, -62, 64, -7, 43, -15, -100, 10, 13, 4, 43, -86, -25, -38, 26, 2, 9, 61, -28, 66, 18, 17, -8, -49, 49, -10, -8, -60, -28, 57, -43, 33, -40, -6, -10, -11, 21, 12, -76, 41, -43, 57, 8, -22, -87, -29, -50, -42, 3, -38, 39, 55, 48, -59, -36, 53, -93, 14, 43, -21, -91, -36, 43, -59, 51, 13, -73, 38, -15, -77, 41, -20, 11, -11, -2, -38, -56, 30, -54, 7, 26, 35, -24, 60, 10, -27, 25, 45, -58, 19, -44, -81, -6, 38, -25, -9, -50, -35, -19, -55, 72, -2, 25, 21, -24, -18, -49, -44, 15, 0, 71, -9, 98, -57, -19, 70, -28, -43, 82, -67, 18, -23, 97, -9, 3, -76, 13, -30, -12, -12, -17, -65, -48, 30, 21, -13, -1, 13, -26, -12, -10, -11, -58, -21, 29, -5, 73, -12, 11, -11, -11, -48, 22, -54, -16, 21, -32, 60, -45, -50, 11, -20, -40, -14, -1, 62, 50, 54, -48, -14, -52, 25, -29, 26, 36, -2, -11, -50, -5, -27, -26, -65, -17, -15, 36, 57, -9, -55, -22, 1, -14, 38, -44, 16, -12, -54, -49, 53, -69, -96, 73, -117, -52, -19, 43, 32, -62, 3, -40, -40, 45, -68, 23, -20, -50, -33, -112, -72, -22, -5, 9, -25, 2, -1, -41, -26, -1, -41, -51, 56, -14, -71, 54, -72, 1, 64, -20, -55, -59, -81};
 static const int32_t op8_b[23] = {51, 290, -101, -674, -52, 8, -495, -585, 250, 323, 367, -183, -485, -426, -26, 358, 284, -726, -4, -531, 222, 263, 716};
 
+#if defined(CONFIG_KWS_INFER_PROFILE)
+#ifdef ESP_PLATFORM
+#include "esp_cpu.h"
+#include "esp_rom_sys.h"
+static inline uint32_t kws_infer_ticks(void) { return esp_cpu_get_cycle_count(); }
+static inline uint32_t kws_infer_ticks_per_us(void)
+{
+    return esp_rom_get_cpu_ticks_per_us();
+}
+#else
+#include <time.h>
+static inline uint32_t kws_infer_ticks(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec);
+}
+static inline uint32_t kws_infer_ticks_per_us(void) { return 1000; }  /* ns -> us */
+#endif
+
+typedef struct { int op_index; const char *type; uint16_t w, h, c; uint32_t macs; } command_infer_profile_meta_t;
+static const command_infer_profile_meta_t command_infer_profile_meta[10] = {
+    { 0, "conv", 10, 49, 48, 211680u },
+    { 1, "dw", 10, 49, 48, 211680u },
+    { 2, "conv", 10, 49, 48, 1128960u },
+    { 3, "dw", 10, 49, 48, 211680u },
+    { 4, "conv", 10, 49, 48, 1128960u },
+    { 5, "dw", 10, 49, 48, 211680u },
+    { 6, "conv", 10, 49, 48, 1128960u },
+    { 7, "mean", 1, 1, 48, 23520u },
+    { 8, "fc", 1, 1, 23, 1104u },
+    { 9, "softmax", 1, 1, 23, 0u }
+};
+typedef struct { uint32_t cycles; uint32_t calls; } command_infer_profile_slot_t;
+command_infer_profile_slot_t command_infer_profile[10];
+
+#include <stdio.h>
+uint32_t command_infer_profile_dump(void)
+{
+    uint32_t tpus = kws_infer_ticks_per_us();
+    if (tpus == 0) tpus = 1;
+    uint32_t total_us = 0;
+    for (int i = 0; i < 10; i++) {
+        uint32_t calls = command_infer_profile[i].calls;
+        uint32_t us = calls ? command_infer_profile[i].cycles / tpus / calls : 0;
+        total_us += us;
+        uint32_t mac_per_us = us ? command_infer_profile_meta[i].macs / us : 0;
+        printf("profile command op%-3d %-8s %3ux%3ux%4u macs=%10lu us=%6lu calls=%4lu mac_per_us=%6lu\n",
+               command_infer_profile_meta[i].op_index, command_infer_profile_meta[i].type,
+               (unsigned)command_infer_profile_meta[i].w, (unsigned)command_infer_profile_meta[i].h, (unsigned)command_infer_profile_meta[i].c,
+               (unsigned long)command_infer_profile_meta[i].macs, (unsigned long)us,
+               (unsigned long)calls, (unsigned long)mac_per_us);
+        command_infer_profile[i].cycles = 0;
+        command_infer_profile[i].calls = 0;
+    }
+    printf("profile command total us=%lu (per call, summed over 10 ops)\n", (unsigned long)total_us);
+    return total_us;
+}
+#endif
+
 /* Point esp-nn's file-static scratch pointers at the shared region.
    Done at init *and* on entry to every inference: a TFLite Micro
    interpreter in the same image (the fallback build, and the on-device
@@ -98,6 +158,9 @@ void command_infer(const int8_t in[490], int8_t out[23])
     assert(((uintptr_t) in & 15) == 0);
 #endif
     set_scratch();
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op0_in = { .width = 10, .height = 49, .channels = 1, .extra = 1 };
       const data_dims_t op0_out = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
@@ -106,6 +169,13 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const quant_data_t op0_q = { .shift = (int32_t *)op0_shift, .mult = (int32_t *)op0_mult };
       esp_nn_conv_s8(&op0_in, in, &op0_flt, op0_w, op0_b, &op0_out, (arena + 0), &op0_p, &op0_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[0].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[0].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op1_in = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
       const data_dims_t op1_out = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
@@ -114,6 +184,13 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const quant_data_t op1_q = { .shift = (int32_t *)op1_shift, .mult = (int32_t *)op1_mult };
       esp_nn_depthwise_conv_s8(&op1_in, (arena + 0), &op1_flt, op1_w, op1_b, &op1_out, (arena + 23520), &op1_p, &op1_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[1].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[1].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op2_in = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
       const data_dims_t op2_out = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
@@ -122,6 +199,13 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const quant_data_t op2_q = { .shift = (int32_t *)op2_shift, .mult = (int32_t *)op2_mult };
       esp_nn_conv_s8(&op2_in, (arena + 23520), &op2_flt, op2_w, op2_b, &op2_out, (arena + 0), &op2_p, &op2_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[2].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[2].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op3_in = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
       const data_dims_t op3_out = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
@@ -130,6 +214,13 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const quant_data_t op3_q = { .shift = (int32_t *)op3_shift, .mult = (int32_t *)op3_mult };
       esp_nn_depthwise_conv_s8(&op3_in, (arena + 0), &op3_flt, op3_w, op3_b, &op3_out, (arena + 23520), &op3_p, &op3_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[3].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[3].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op4_in = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
       const data_dims_t op4_out = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
@@ -138,6 +229,13 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const quant_data_t op4_q = { .shift = (int32_t *)op4_shift, .mult = (int32_t *)op4_mult };
       esp_nn_conv_s8(&op4_in, (arena + 23520), &op4_flt, op4_w, op4_b, &op4_out, (arena + 0), &op4_p, &op4_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[4].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[4].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op5_in = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
       const data_dims_t op5_out = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
@@ -146,6 +244,13 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const quant_data_t op5_q = { .shift = (int32_t *)op5_shift, .mult = (int32_t *)op5_mult };
       esp_nn_depthwise_conv_s8(&op5_in, (arena + 0), &op5_flt, op5_w, op5_b, &op5_out, (arena + 23520), &op5_p, &op5_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[5].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[5].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     {
       const data_dims_t op6_in = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
       const data_dims_t op6_out = { .width = 10, .height = 49, .channels = 48, .extra = 1 };
@@ -154,9 +259,34 @@ void command_infer(const int8_t in[490], int8_t out[23])
       const quant_data_t op6_q = { .shift = (int32_t *)op6_shift, .mult = (int32_t *)op6_mult };
       esp_nn_conv_s8(&op6_in, (arena + 23520), &op6_flt, op6_w, op6_b, &op6_out, (arena + 0), &op6_p, &op6_q);
     }
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[6].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[6].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     esp_nn_mean_nhwc_s8((arena + 0), (arena + 23520), 49, 10, 48, -126, -106, 749846610, -4);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[7].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[7].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     esp_nn_fully_connected_s8((arena + 23520), 106, 48, op8_w, 0, op8_b, (arena + 0), 23, 71, -9, 1200331266, -128, 127);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[8].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[8].calls++; }
+    #endif
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    { uint32_t _kws_pt = kws_infer_ticks();
+    #endif
     esp_nn_softmax_s8((arena + 0), 1, 23, 1294831616, 25, -62, out);
+    #if defined(CONFIG_KWS_INFER_PROFILE)
+    command_infer_profile[9].cycles += kws_infer_ticks() - _kws_pt;
+    command_infer_profile[9].calls++; }
+    #endif
 }
 int command_infer_scratch_query(void)
 {

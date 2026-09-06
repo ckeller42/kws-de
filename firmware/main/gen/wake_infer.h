@@ -23,6 +23,12 @@ size_t wake_infer_arena_bytes(void);
 size_t wake_infer_state_bytes(void);
 /* What the real esp-nn on the real chip wants for this model's widest op, asked with the very dims the kernels above are called with. Compare it against WAKE_INFER_SCRATCH_BYTES at boot: if the chip wants more, this module's port under-reserved and the kernels would write past the shared scratch region. */
 int wake_infer_scratch_query(void);
+/* CONFIG_KWS_INFER_PROFILE only: prints one line per kernel call in wake_infer_step() -- op index, type, output shape, static MACs, measured microseconds and MAC/us -- then a total line, and resets the counters. Returns the summed per-op microseconds, so the caller can print invoke_time - this as the residual (dispatch, requantisation, front-end work the table does not see). The per-op array behind it is exposed too (not just the printed table), so firmware/test/test_profile.c can assert every op's call count without depending on profile_dump()'s printf format. */
+#if defined(CONFIG_KWS_INFER_PROFILE)
+typedef struct { uint32_t cycles; uint32_t calls; } wake_infer_profile_slot_t;
+extern wake_infer_profile_slot_t wake_infer_profile[12];
+uint32_t wake_infer_profile_dump(void);
+#endif
 
 #ifdef __cplusplus
 }

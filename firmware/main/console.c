@@ -12,6 +12,10 @@
 #include "freertos/task.h"
 #include "gen/model_config.h"
 #include "gen/wake_model_config.h"
+#if defined(CONFIG_KWS_INFER_PROFILE)
+#include "gen/command_infer.h"
+#include "gen/wake_infer.h"
+#endif
 #include "record.h"
 #include "storage.h"
 #include "task.h"
@@ -70,6 +74,21 @@ static void handle_line(char *line)
     } else if (strcmp(cmd, "wakefire") == 0) {
         wake_inject_fire();                /* measurement hook: see wake.h */
         printf("ok\n");
+    } else if (strcmp(cmd, "profile") == 0) {
+#if defined(CONFIG_KWS_INFER_PROFILE)
+        /* Dump on demand rather than waiting for the periodic trace in
+           recognise.cc/wake.cc: whichever mode is active has been running
+           its own dump on a ~50/~100-step cadence already, so this mostly
+           saves the wait when driving the device from a script. Both tables
+           print unconditionally (CONFIG_KWS_INFER_PROFILE turns on
+           profiling for both models, not per-mode) even though only one is
+           likely to have nonzero counts, depending on which mode is active. */
+        command_infer_profile_dump();
+        wake_infer_profile_dump();
+        printf("ok\n");
+#else
+        printf("err CONFIG_KWS_INFER_PROFILE=n in this build\n");
+#endif
     } else if (strcmp(cmd, "field") == 0) {
         char *arg = strtok(NULL, " ");
         if (!arg) { printf("err missing on|off|thresh\n"); return; }
