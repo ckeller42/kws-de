@@ -15,6 +15,7 @@ typedef struct {
     int   run_fired;             /**< Whether the current run has already fired. */
     int   last_fired_label;     /**< Last label that fired, or -1 = none. */
     int   gap_since_last_fired; /**< Pushes since last_fired_label stopped being the candidate. */
+    float last_smoothed[KWS_NUM_LABELS]; /**< This push's smoothed per-class average, for intent rescoring's second-best lookup. */
 } stream_t;
 
 #ifdef __cplusplus

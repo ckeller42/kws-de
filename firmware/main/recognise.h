@@ -19,6 +19,7 @@ typedef struct {
     uint32_t fired_count;    /**< Total number of keyword detections since recognise_start(). */
     char window_intent[64];  /**< Command words fired since the last recognise_listen_for(), in order, space-joined ("Licht Küche an"); empty if none. */
     char window_words[96];   /**< The same fires as "<word>:<conf>" entries joined by '|' ("Licht:0.93|an:0.88"). */
+    char window_seconds[96]; /**< One entry per window_intent token, same order/format as window_words, but the stream decoder's runner-up command word for that step -- intent_rescore()'s substitution candidates. */
 } recognise_status_t;
 
 /** @brief Create the recognise task (allocates the model arena). Starts inactive; call recognise_set_active(true) to run inference. */
