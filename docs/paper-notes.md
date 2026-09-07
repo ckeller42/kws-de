@@ -3285,15 +3285,21 @@ file kept as `manifest_v3_qat.json.pre-run3rw3`. Future `compare_command_models.
 `kws-eval --qat` runs will now classify spk18 the way E35's prose already explained it
 should be read.
 
-**Not done, out of scope for this host-only session.** No device — flashing and the
-on-device recognise-step/memory measurement are left as `device: pending`; the
-architecture is unchanged from E18's measured 46–47 ms step / 45,431 B free internal,
-so the estimate carries over, but E16/E18 already recorded once that a MAC-ratio
-estimate for *this* architecture undershot by 25 % on a real width change — a retrain
-at fixed width is a much smaller extrapolation, but it is still an estimate, not a
-measurement. E36's own `w48_rw3_qe20` grid-CSV row and its `firmware/main/gen`
-untouched-hash check are unaffected by this entry — they describe the pre-deploy
-state, correctly.
+**Device (2026-09-07 23:30, flashed from main after PR #82/#83/#84/#85).** Docker
+default build `kws_de_fw.bin` 0xfa6f0 B; boot log `models: command
+command_v3_w48_qat.tflite@86b7105e 2026-09-06, wake hey_bus.tflite@4aaa2f98`; recogniser
+`47040 B arena (static, PSRAM) + 29824 B shared scratch, esp-nn scratch 29824 B queried /
+29824 B reserved`, **free internal 38,055 B** at recogniser start (wake: 60,107 B) — down from
+E18's 45,431 B because of the intent card, grammar rescoring and burn-in code that landed
+between (#69/#72/#76), not because of this model. Continuous `mode recognise`: **step 46 /
+47 ms** (`invoke 42274 us` / `42383 us`, front-end ≈ 0.49 ms over 6–7 new frames, stack
+3,736 B free), duty `1000/1000 of wall, 320 ms per wall second` — identical to E18's
+measurement of `8fa81d08`, as the unchanged architecture predicted. `profile` is
+`CONFIG_KWS_INFER_PROFILE=n` in the default build (E32 has the per-layer profile; same
+graph). Left in Assistent mode with `field on thresh 0.85`; wake step 1,259–1,265 µs,
+room peaks 0.20 / 0.008. No spoken test in this session (audio embargo). E36's own
+`w48_rw3_qe20` grid-CSV row and its `firmware/main/gen` untouched-hash check are unaffected
+by this entry — they describe the pre-deploy state, correctly.
 
 ### E38 — pipeline hygiene: train once, deploy recipe in the loop, per-clip van aug (2026-09-07, host-only)
 
