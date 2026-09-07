@@ -83,11 +83,12 @@ same width (32 → 48 channels), same 11,111 parameters and 4,234,704 MACs
 against 5,879 and 2,070,496 — only the weights changed, retrained on a
 rebuilt ``features_v3`` that folds in a real field session (E35) with the
 grid-search recipe ``--qat-epochs 20 --real-weight 3`` (E36). Device
-timing and memory are unaffected (same architecture): **46–47 ms
-recognise step** against a 100 ms budget (from 31 ms), command evaluation
-at 42.2 ms and 45,431 B of internal RAM still free when the recogniser
-starts, measured on the row above — not yet re-measured on-device for
-this retrain (``device: pending``, ``docs/paper-notes.md`` E37). Invoke
+timing is unaffected (same architecture), re-measured on-device for this
+retrain (``docs/paper-notes.md`` E37): **46–47 ms recognise step** against
+a 100 ms budget (from 31 ms), command evaluation at 42.3 ms, 38,055 B of
+internal RAM free when the recogniser starts (45,431 B on the row above;
+the difference is the intent card, rescoring and burn-in code that landed
+in between, not the model). Invoke
 time rose 1.55x on 2.05x the MACs over the width-32 model — wider is
 cheaper per MAC here, because 48 channels fill esp-nn's SIMD lanes and the
 fixed per-op costs do not grow with the arithmetic.
