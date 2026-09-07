@@ -3334,6 +3334,97 @@ path. Items 5 and 6 change what the *next* build/train produces (per-clip van dr
 best-val weights), so the next retrain is not byte-comparable to E37's — expected, and
 the reason none was run here.
 
+### E39 — run 4: E38's per-clip van draws + val checkpoint vs. the deployed `rw3qe20` (2026-09-07, host-only, exp/run4-van-perclip)
+
+E38 changed two things that alter what the *next* build/train produces without touching
+the recipe: (5) a fresh (noise, RIR) pair per real clip instead of one pair per build,
+and (6) `kws-train` restoring the best-`val_accuracy` epoch instead of the last. This
+entry measures what they buy, replicating E35's procedure exactly — same cache, same
+seed, same `--width 48 --qat --qat-epochs 20 --real-weight 3` recipe (epochs=40) — and
+scoring against the deployed E37 model (`command_v3_w48_qat.tflite@86b7105e`, aggregate
+0.936, 0/32, spk18 0.778). Worktree off `origin/main` at `09fffe2` (PR #83 merged);
+`KWS_NOISE_DIR` (210 wavs) / `KWS_RIR_DIR` (270 wavs) set as in E31/E35 and verified by
+count before the build.
+
+**Rebuild.** E35's `features_v3_{train,val,test}.npz` + `manifest_v3.json` backed up as
+`*.pre-run4` first (`manifest_v3_qat.json`, E37's refreshed copy, untouched). Then the
+identical `kws-dataset build --cache raw_clips_v3.pkl --prefix features_v3`.
+`[recordings] merged: {...}` is the same 21-label dict E35 printed (285 device clips,
+Licht 76 ... `_unknown_` 104). Manifest now carries `van_dirs` (both env paths).
+**Wall-clock 97 s** against E35's ~25 min — item (4), `fftconvolve`, is a ~15x build
+speed-up on its own.
+
+**Row count differs from E35: `train=38,734, val=6,425, test=11,315`** vs. E35's
+38,646 / 6,417 / 11,291 (+88 / +8 / +24 = +120). Diagnosed before training: the manifest
+diff shows real rows identical in every split (13,774 / 1,993 / 2,163) and the delta is
+entirely TTS — `[tts] Dach: 282 real clips, synthesizing 18 more` (gate dropped 4/18),
+`[tts] an: 299 real clips, synthesizing 1 more`, `[tts] added: {'Dach': 14, 'an': 1}`.
+15 new TTS clips x the 8-row augmentation multiplier = 120 rows (Dach 112 = 80+8+24,
+an 8), so the per-clip van draws changed content only, exactly as expected, and the
+multiplier is unchanged. The top-up is `build()`'s documented `_fill_with_tts`
+path, which persists new clips back into the cache: `raw_clips_v3.pkl` was rewritten
+(+403 KB; the pre-run4 clips are a strict subset). Not a break, but it means run 4 is
+not *only* the two E38 changes — 15 extra TTS clips (0.04 % of train) ride along.
+
+**Train.** `kws-train --v2 --prefix features_v3 --width 48 --qat --qat-epochs 20
+--real-weight 3 --out command_v3_w48_qat_run4.keras` (no `--seed` flag exists; seed is
+fixed at 0 inside `kws_de.train`). **Wall-clock 1,223 s** (E36's identical recipe:
+1,297 s). The new checkpoint print: **`best epoch 40/40: val accuracy 0.6577`** — the
+best val epoch *was* the last one, so item (6) selected exactly the weights the old
+code would have saved; last-epoch val accuracy = best = 0.6577. Final float train
+accuracy 0.7305, QAT final train accuracy 0.7463.
+
+**Export**, isolated as E35 did: `kws-export --v2 --qat --width 48 --prefix features_v3
+--model command_v3_w48_qat_run4.keras --out <models>/run4/` — *not* `--firmware`, which
+would write `firmware/main/gen/`. Canonical `models/command_v3_w48_qat.tflite` hashed
+`86b7105e` before and after; `git status` clean apart from this note and the CSV row.
+Export 7 s, INT8 test accuracy 0.7158 (n=11,315, own-era test set).
+
+**Comparison**, `scripts/compare_command_models.py --candidate <models>/run4/
+command_v3_w48_qat.tflite --candidate-test-npz features_v3_test.npz --deployed-test-npz
+features_v3_test.npz.pre-run4`, deployed header `86b7105e`. Note the manifest is now
+E37's refreshed one, so spk18 (and spk19/spk20) are labelled in-training here, unlike
+E35's table; the four-speaker scoreboard (233 words / 32 negatives) is unchanged.
+
+| | deployed `rw3qe20` (E37) | run 4 `rw3qe20` | run 4 `rw3qe10` (step 5) |
+|---|---|---|---|
+| bytes / sha256 | 25,832 / `86b7105e` | 25,800 / `b8df37db` | 25,800 / `bd3ae11d` |
+| INT8 test acc (own-era test set) | 69.36 % (n=11,291) | 71.58 % (n=11,315) | 71.54 % (n=11,315) |
+| spk01 words (n=13) | **1.000** | 0.923 | 0.923 |
+| spk02 words (n=38) | **1.000** | 0.974 | 0.974 |
+| spk10 words (n=146) | **0.952** | 0.938 | 0.932 |
+| spk18 words (n=36) | **0.778** | 0.750 | 0.750 |
+| spk19 words (n=16, outside the 4-speaker rule) | 0.688 | **0.812** | 0.750 |
+| spk20 words (n=20, outside the 4-speaker rule) | 0.800 | **0.900** | **0.950** |
+| **aggregate words (n=233)** | **0.936** | 0.914 | 0.910 |
+| false accepts spk02/spk10/spk18 | 0/10, 0/19, 0/3 | 0/10, **2/19**, 0/3 | 0/10, **1/19**, 0/3 |
+| **false accepts total (n=32)** | **0/32** | **2/32** | **1/32** |
+| phrase intent spk10/spk18/spk19/spk20 | 0.082, 0.176, 0.222, 0.083 | 0.093, 0.118, 0.333, 0.083 | 0.093, 0.118, 0.333, 0.083 |
+
+**Deploy rule** (aggregate >= 0.785, 0 false accepts of 32, spk18 > 0.333), evaluated by
+`scripts/recipe-grid.py`'s `passes()` (row `run4_w48_rw3_qe20` appended to
+`scripts/recipe-grid.csv`, `git_sha 09fffe2`): **FAIL** on false accepts (2/32). Against
+the deployed model specifically, run 4 is worse on every one of the rule's three
+figures: aggregate -0.022 (0.936 -> 0.914, 5 fewer of 233 words), spk18 -0.028 (28/36 ->
+27/36), and two new false accepts, both on spk10's negatives. **Run 4 does not beat
+`86b7105e`; it should not be deployed.** The only movement in its favour is on the two
+speakers the rule does not score (spk19 +0.125, spk20 +0.100) and a 2.2-point INT8
+test-set gain that is not cross-comparable (different test rows). **Step 5, the `--qat-epochs 10` twin** (`command_v3_w48_qat_run4_qe10.keras`, 996 s, exported to `<models>/run4-qe10/`): the float phase reproduced bit-for-bit (same `best epoch 40/40: val accuracy 0.6577`, same 0.7305), so this row isolates QAT length on the new data. Row `run4_w48_rw3_qe10`: aggregate 0.910, spk18 0.750, **1/32** false accepts (spk10 1/19) — also **FAIL**, and also below the deployed model on all three rule figures. Shorter QAT halves the false-accept count here, the opposite direction from E36 (where `qe20` removed `qe10`'s single false accept), which reads as scoreboard noise on spk10's 19 negatives rather than a QAT-length effect.
+
+**Reading.** Item (6) was a no-op this time (best = last epoch), so the whole delta is
+per-clip van draws (+ the 15-clip TTS top-up). That delta is negative on the standing
+scoreboard. One run at one seed cannot separate "per-clip draws hurt" from "the
+scoreboard has noise of this size": E36 already showed a single spk10 false accept
+appearing and disappearing between otherwise identical `qe10`/`qe20` runs, and 2/19 vs
+0/19 on one speaker's negatives is the same order. What this entry does establish: the
+E38 changes are *not* a free improvement over the deployed E37 model, and the deployed
+model stays. Cheap next steps if anyone wants to pursue the aug change: (a) rerun the
+build at 2-3 seeds (97 s each now) and train each, to get a variance bar for the rule's
+false-accept count; (b) keep the pre-run4 npz as the deploy baseline until something
+clears 0/32 again. The new npz/manifest are left in place as the current build (the
+`*.pre-run4` files are E35's); the exports live under `<models>/run4/` and
+`<models>/run4-qe10/`, never at the canonical path. No device, no flashing.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
