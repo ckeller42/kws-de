@@ -112,10 +112,12 @@ except (OSError, KeyError):
 ' "$manifest" 2>/dev/null || echo 0)
   train_size=$(( epochs * n_train ))
   (( train_size > 0 )) || train_size=$epochs
+  # The deployed recipe (docs/paper-notes.md E37): w48, QAT 20 epochs, real clips x3.
   eta train "$train_size" \
-    kws-train --v2 --prefix "$prefix" --out command_v3.keras --epochs "$epochs"
+    kws-train --v2 --prefix "$prefix" --out command_v3.keras --epochs "$epochs" \
+    --width 48 --qat --qat-epochs 20 --real-weight 3
   stage "export (health gate)"
-  eta export 1 kws-export --prefix "$prefix" --model command_v3.keras --firmware
+  eta export 1 kws-export --prefix "$prefix" --model command_v3.keras --width 48 --qat --firmware
 fi
 
 stage "evals"
@@ -123,6 +125,6 @@ stage "evals"
 eval_size=$(find "$rec/approved" -name '*.wav' 2>/dev/null | wc -l | tr -d ' ')
 (( eval_size > 0 )) || eval_size=1
 eta eval "$eval_size" \
-  kws-eval --recordings "$rec/approved" --prefix "$prefix" --out docs/eval-report-v3.md
+  kws-eval --recordings "$rec/approved" --prefix "$prefix" --width 48 --qat --out docs/eval-report-v3.md
 
 echo "done: held-out + user-customised figures in \$KWS_DATA_ROOT/docs/eval-report-v3.md. Flash with your flash script for the device host."

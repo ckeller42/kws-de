@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.signal import fftconvolve
 
 
 def _tile_to(noise: np.ndarray, n: int, rng: np.random.Generator) -> np.ndarray:
@@ -36,7 +37,8 @@ def van_augment(clip, noise, rir, snr_db: float, rng) -> np.ndarray:
     clips only; see `kws_de.data.van_augmentation_enabled`."""
     sig = np.asarray(clip, dtype=np.float32).ravel()
     if rir is not None and len(np.ravel(rir)):
-        sig = np.convolve(sig, np.asarray(rir, dtype=np.float32).ravel())[: len(sig)]
+        rir = np.asarray(rir, dtype=np.float32).ravel()
+        sig = fftconvolve(sig, rir)[: len(sig)].astype(np.float32)
     return mix_at_snr(sig, noise, snr_db, rng)
 
 

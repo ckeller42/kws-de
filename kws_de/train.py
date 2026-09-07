@@ -15,6 +15,8 @@ if "--qat" in sys.argv and os.environ.get("TF_USE_LEGACY_KERAS") != "1":
     os.execv(sys.executable, [sys.executable, "-m", "kws_de.train", *sys.argv[1:]])
 
 import argparse  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 import tensorflow as tf  # noqa: E402
@@ -183,25 +185,32 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     # `is_tts` row flag; --real-weight is a no-op without it (real_idx empty below).
     is_tts = data["is_tts"] if "is_tts" in data.files else np.ones(data["X"].shape[0], dtype=bool)
     X, y = upweight_real(data["X"], data["y"], is_tts, args.real_weight)
+    # Val-selected best epoch when the build wrote a val split (kws-dataset build does);
+    # older/toy caches without one fall back to the last epoch.
+    val_path = config.DATA_DIR / f"{prefix}_val.npz"
+    val = np.load(val_path) if val_path.exists() else None
     size = args.epochs * X.shape[0]
-    with Timed("train", size=size, note=prefix):
-        model, history = train(X, y, epochs=args.epochs, num_classes=num_classes, width=args.width)
-    model.save(config.MODELS_DIR / out_name)
+    with tempfile.TemporaryDirectory() as td, Timed("train", size=size, note=prefix):
+        ckpt = str(Path(td) / "best.weights.h5")
+        checkpoint = tf.keras.callbacks.ModelCheckpoint(
+            ckpt, save_best_only=True, save_weights_only=True, monitor="val_accuracy", mode="max"
+        )
+        model, history = train(
+            X,
+            y,
+            epochs=args.epochs,
+            num_classes=num_classes,
+            width=args.width,
+            validation_data=None if val is None else (val["X"], val["y"]),
+            callbacks=None if val is None else [checkpoint],
+        )
+        if val is not None:
+            va = history["val_accuracy"]
+            best = int(np.argmax(va))
+            model.load_weights(ckpt)  # best val_accuracy epoch, not necessarily the last
+            print(f"best epoch {best + 1}/{args.epochs}: val accuracy {va[best]:.4f}")
+    model.save(float_path)
     print(f"final train accuracy: {history['accuracy'][-1]:.4f}")
-
-    if args.qat and float_path.exists():
-        # Reuse the already-trained float model's weights (a same-architecture
-        # `.keras` file, possibly saved under a different Keras major version --
-        # `load_weights` round-trips fine across Keras 2/3 even when a full
-        # `load_model` does not) rather than retraining, so the QAT fine-tune
-        # starts from the exact model the PTQ path already exports.
-        model = build_dscnn(num_classes=num_classes, width=args.width)
-        model.load_weights(float_path)
-        print(f"loaded existing float model weights from {out_name} for QAT fine-tune")
-    else:
-        model, history = train(X, y, epochs=args.epochs, num_classes=num_classes, width=args.width)
-        model.save(float_path)
-        print(f"final train accuracy: {history['accuracy'][-1]:.4f}")
 
     if args.qat:
         qmodel, qhistory = train_qat(model, X, y, epochs=args.qat_epochs)

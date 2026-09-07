@@ -71,7 +71,22 @@ FIELDS = [
     "sha256",
     "train_seconds_predicted",
     "train_seconds_actual",
+    "passes",
+    "git_sha",
 ]
+GIT_SHA = subprocess.run(
+    ["git", "rev-parse", "--short", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True
+).stdout.strip()
+
+
+def passes(row: dict) -> bool:
+    """The standing deploy rule (E27/E28): aggregate real-voice words >= 0.785, no false
+    accepts, and the least-represented speaker (spk18) above the deployed 1/3 floor."""
+    return (
+        float(row["aggregate_words"]) >= 0.785
+        and int(row["false_accepts"]) == 0
+        and float(row["spk18_words"]) > 0.333
+    )
 
 
 def run_id(width: int, real_weight: int, qat_epochs: int) -> str:
@@ -86,6 +101,8 @@ def existing_runs(csv_path: Path) -> set[str]:
 
 
 def append_row(csv_path: Path, row: dict) -> None:
+    row = {**row, "passes": "PASS" if passes(row) else "FAIL", "git_sha": GIT_SHA}
+    print(f"{row['run']}: {row['passes']}")
     is_new = not csv_path.exists()
     with csv_path.open("a", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=FIELDS)

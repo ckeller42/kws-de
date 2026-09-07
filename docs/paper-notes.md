@@ -3295,6 +3295,45 @@ measurement. E36's own `w48_rw3_qe20` grid-CSV row and its `firmware/main/gen`
 untouched-hash check are unaffected by this entry — they describe the pre-deploy
 state, correctly.
 
+### E38 — pipeline hygiene: train once, deploy recipe in the loop, per-clip van aug (2026-09-07, host-only)
+
+Tooling only — no model, dataset, or firmware artefact changed; no device. Seven
+small fixes to the training/data path, each found while reading E35–E37's code paths:
+
+1. `kws-train` trained the float model **twice** on a non-QAT run (a leftover
+   `else:` retrain branch after the QAT weight-reload). Now trains exactly once; the
+   QAT fine-tune starts from the in-process model, which is already Keras-2 under the
+   `--qat` re-exec.
+2. `scripts/data-loop.sh` trained and exported the default `w32` PTQ recipe, not the
+   deployed one; its train/export pair now carries E37's `--width 48 --qat --qat-epochs 20
+   --real-weight 3` (export: `--width 48 --qat`), so the loop produces
+   `command_v3_w48_qat.tflite`.
+3. Deleted the legacy v1 build path (`kws_de.data._build_and_split`, `kws-data --build`,
+   `make_transition_windows`, and `build_dataset`'s `transition_*` inputs, none of which
+   `kws-dataset build` ever used). `split_by_speaker` stays — `eval.py`/`transducer.py`
+   still call it.
+4. `van_augment`: `np.convolve` → `scipy.signal.fftconvolve` (same result to 1e-4,
+   float32, same length; scipy was already a librosa dependency). Direct convolution of a
+   16 k-sample clip with a multi-thousand-sample RIR was the slowest step of a van build.
+5. Van-cabin augmentation drew **one** noise clip and **one** RIR per build and reused
+   them for every real clip; now a fresh (noise, RIR) pair per real clip (wav lists
+   globbed once). The manifest records `van_dirs` (the two env paths, or `null`) so a
+   build without van augmentation is visible.
+6. `kws-train` selects the best `val_accuracy` epoch via `ModelCheckpoint` when
+   `{prefix}_val.npz` exists (the `benchmark.py` pattern), printing the epoch; falls back
+   to last-epoch weights when there is no val split. QAT fine-tune unchanged.
+7. `scripts/recipe-grid.py` applies the E27/E28 deploy rule per row (`passes`:
+   aggregate ≥ 0.785, false accepts = 0, spk18 > 0.333) as a PASS/FAIL column plus a
+   `git_sha` column; the committed CSV is back-filled (three PASS rows: `deployed_w48`,
+   `w32_rw3_qe10`, `w48_rw3_qe20`; `git_sha` empty for pre-existing rows).
+
+Checks: `pytest -q` 368 passed, 1 skipped, 1 xfailed (three transition-window tests
+removed with their code, one fftconvolve-vs-`np.convolve` test added); `ruff check` /
+`ruff format --check` clean; a 24-row toy `kws-train` run exercised the val-checkpoint
+path. Items 5 and 6 change what the *next* build/train produces (per-clip van draws,
+best-val weights), so the next retrain is not byte-comparable to E37's — expected, and
+the reason none was run here.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

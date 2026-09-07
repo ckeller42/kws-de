@@ -38,6 +38,16 @@ def test_van_augment_preserves_length_and_hits_target_snr():
         assert abs(measure_snr(sig, out) - target) < 1.0
 
 
+def test_van_augment_rir_matches_direct_convolution():
+    # fftconvolve must agree with np.convolve; zero noise makes mix_at_snr a no-op.
+    rng = np.random.default_rng(4)
+    sig = rng.standard_normal(2000).astype(np.float32)
+    rir = rng.standard_normal(300).astype(np.float32)
+    out = van_augment(sig, np.zeros_like(sig), rir, 0.0, rng)
+    assert out.dtype == np.float32 and out.shape == sig.shape
+    assert np.allclose(out, np.convolve(sig, rir)[: len(sig)], atol=1e-4)
+
+
 def test_van_augment_without_rir_is_noise_only():
     rng = np.random.default_rng(3)
     sig = rng.standard_normal(16000).astype(np.float32)
