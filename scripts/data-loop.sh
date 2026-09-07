@@ -125,6 +125,6 @@ stage "evals"
 eval_size=$(find "$rec/approved" -name '*.wav' 2>/dev/null | wc -l | tr -d ' ')
 (( eval_size > 0 )) || eval_size=1
 eta eval "$eval_size" \
-  kws-eval --recordings "$rec/approved" --prefix "$prefix" --out docs/eval-report-v3.md
+  kws-eval --recordings "$rec/approved" --prefix "$prefix" --width 48 --qat --out docs/eval-report-v3.md
 
 echo "done: held-out + user-customised figures in \$KWS_DATA_ROOT/docs/eval-report-v3.md. Flash with your flash script for the device host."

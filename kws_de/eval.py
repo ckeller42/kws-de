@@ -1021,6 +1021,12 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
         action="store_true",
         help="evaluate the QAT export (command<suffix>_qat.tflite) instead of the PTQ one",
     )
+    ap.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help="DS-CNN width of the export to evaluate (command<suffix>_w<width>[_qat].tflite)",
+    )
     args = ap.parse_args()
     if args.v2_catalog:
         out = args.out if args.out != "docs/eval-report.md" else "docs/eval-report-v2.md"
@@ -1048,9 +1054,13 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
             out_path.write_text(replace_recordings_section(report, note))
             print(note.strip())
             return
+        # model file mirrors kws-export naming: command<suffix>[_w<width>][_qat].tflite;
+        # the manifest carries no width term.
+        model_suffix = f"{suffix}_w{args.width}" if args.width else suffix
         if args.qat:
             suffix = f"{suffix}_qat"  # the QAT export of the same prefix (kws-export --qat)
-        model_path = config.MODELS_DIR / (f"command{suffix}.tflite" if suffix else "command.tflite")
+            model_suffix = f"{model_suffix}_qat"
+        model_path = config.MODELS_DIR / f"command{model_suffix}.tflite"
         try:
             tflite_bytes = model_path.read_bytes()
             predict_fn = make_command_predict_fn(tflite_bytes)
