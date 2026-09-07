@@ -3008,6 +3008,122 @@ Assistent mode with field capture armed at 0.85 for the soak. Still open: a spok
 "Hey Bus" check and the next real session's false-fire count, which is the number E33's
 1/5 predicts should fall from 16 per session.
 
+### E35 — field-take retrain (run 3): today's spk18 session plus the grid's winning recipe (2026-09-06, host-only, feat/run3-field-takes)
+
+A real session today (`qc/2026-09-06-1404`) added 36 word clips, 22 phrases, 25 wake
+clips and 10 negatives to `approved/spk18` — natural commands ("Hey Bus, Licht
+dunkler", etc.), not read sentences. `kws-dataset build` merges `approved/` on every
+build, so a plain rebuild picks these up. In parallel, a sibling branch
+(`exp/recipe-grid`, PR #80, **E36**) ran an 8-way width x `--real-weight` x
+`--qat-epochs` grid on the *pre-rebuild* `features_v3` and found `--width 48 --qat
+--qat-epochs 20 --real-weight 3` clears the standing deploy rule by a wide margin
+(aggregate 0.9185, spk18 0.778, 0/32 false accepts) at identical MACs/bytes to the
+shipped w48. This entry rebuilds the dataset with today's field takes included, then
+trains *both* the plain default recipe and the grid's winning recipe against that
+rebuild, to see whether the grid's win survives real new data.
+
+**Correction caught mid-session.** The first rebuild omitted `KWS_NOISE_DIR`/
+`KWS_RIR_DIR` (van-cabin augmentation, on since E31) — the resulting `train=32,647` was
+suspiciously close to `35,261 - 2,536` (E31's augmentation row delta), confirming the
+omission before any training ran on it. Redone with both env vars set
+(`<mww-train>/data/fma_16k`, 210 files; `<mww-train>/data/mit_rirs`, 270 files, same
+paths E31 used) and the mismatched run discarded unreported.
+
+**Rebuild.** `kws-dataset build --cache raw_clips_v3.pkl --prefix features_v3` (E31's
+voice-gated TTS cache, unchanged). `[recordings] merged: {'Aufstelldach': 6, 'Außen':
+22, 'Heizung': 12, 'Küche': 1, 'Kühlschrank': 17, 'Lesen': 12, 'Licht': 76, 'an': 26,
+'auf': 3, 'aus': 19, 'dunkler': 11, 'fünfundsiebzig': 8, 'fünfundzwanzig': 8, 'fünfzig':
+11, 'heller': 9, 'hundert': 13, 'kälter': 5, 'leise': 4, 'wärmer': 2, 'zu': 4,
+'_unknown_': 104}`; 285 device clips moved into `train` (`--recordings-split train`,
+default). `[dataset] built seed=0: train=38,646, val=6,417, test=11,291` — train grew
+over E31's 35,261 by +3,385, consistent with today's added real clips each drawing the
+same van-augmentation row multiplier.
+
+**Training + export.** Both recipes trained on the same rebuilt `features_v3`:
+`command_v3_w48_qat_run3.keras` (plain `kws-train --v2 --prefix features_v3 --width 48
+--qat`) and `command_v3_w48_qat_run3_rw3qe20.keras` (`--qat-epochs 20 --real-weight 3`,
+after merging `origin/exp/recipe-grid` into this branch to pick up the `--real-weight`
+flag). Exported each into its own `models/run3-default/` / `models/run3-rw3qe20/`
+directory (`kws-export --v2 --qat --width 48 --prefix features_v3`) rather than the
+canonical path, so `models/command_v3_w48_qat.tflite` and `firmware/main/gen/` were
+never touched — confirmed by hash before and after (`f277889b...` unchanged). The
+pre-session canonical files were also backed up as `*.pre-run3` before any export ran,
+belt-and-braces.
+
+**Real-voice comparison**, `scripts/compare_command_models.py`, deployed vs. both run-3
+candidates, same real-voice approved set (spk01/spk02/spk10/spk18, 233 words / 32
+negatives) used by every prior entry:
+
+| | deployed w48 | run-3 default | run-3 `rw3qe20` |
+|---|---|---|---|
+| bytes / sha256 | 25,832 / `8fa81d08` | 25,832 / `98c0263a` | 25,832 / `86b7105e` |
+| INT8 test acc (own-era test set, not cross-comparable) | 61.78% (n=11,291) | 68.82% (n=11,291) | 69.36% (n=11,291) |
+| spk01 words (n=13, in-training) | 0.923 | 0.692 | **1.000** |
+| spk02 words (n=38, in-training) | 0.895 | 0.816 | **1.000** |
+| spk10 words (n=146, held-out) | 0.856 | 0.842 | **0.952** |
+| spk18 words (n=36, held-out\*) | 0.333 | 0.694 | **0.778** |
+| **aggregate words (n=233)** | **0.785** | 0.807 | **0.936** |
+| false accepts, spk02/spk10/spk18 | 0/10, 0/19, 0/3 | 0/10, **1/19**, 0/3 | 0/10, 0/19, 0/3 |
+| **false accepts total (n=32)** | **0/32** | **1/32** | **0/32** |
+| phrase intent (spk18/spk19/spk20 now nonzero) | 0, 0.111, 0 | 0, 0, 0 | 0.176, 0.222, 0.083 |
+
+**\*spk18 is no longer a clean held-out figure.** `compare_command_models.py`'s default
+manifest (`data/manifest_v3_qat.json`) is dated 2026-09-02 — it was never regenerated
+by today's rebuild — so it still labels spk18 as `held-out` and the isolated-word count
+stays at the original n=36 (today's new spk18 clips aren't indexed by this stale
+manifest and so don't enter this specific word-accuracy denominator). But
+`--recordings-split train` (the dataset build's default) put today's new spk18 clips
+into the actual training rows regardless of what this manifest says, and both run-3
+models trained on that rebuild. So spk18's jump (0.333 → 0.694 / 0.778) is now
+partly-to-mostly an **in-training** result — the same speaker's voice, and likely some
+of the same words, informed the model that is then scored against spk18 — not a
+held-out generalisation result. Treat it as encouraging but not evidence the model
+generalises to *new* unseen speakers; spk10, spk19 and spk20 (still genuinely
+untouched by today's clips) are the honest held-out signal, and `rw3qe20` moves all
+three up too (spk10 0.856→0.952, spk19 0.250→0.688, spk20 0.200→0.800).
+
+**Decision, same pre-agreed rule** (aggregate ≥ deployed's 0.785, false accepts no
+worse than 0/32, spk18 words > deployed's 0.333): run-3 default clears spk18 and the
+aggregate bar but **introduces a new false accept** (spk10 1/19) — worse than
+deployed's 0/32 — so it fails the rule outright despite the higher aggregate. **Run-3
+`rw3qe20` passes all three conditions** (aggregate 0.936, 0/32 false accepts, spk18
+0.778) **and has the highest aggregate of any candidate to date** — the grid's win
+(E36) survives the real field-take rebuild. **This is the deploy candidate**, matching
+the recipe change E36 already flagged (no architecture change, same MACs/bytes as the
+shipped w48). Per the task brief for this session, deployment/flashing was explicitly
+left to the coordinator: `models/command_v3_w48_qat.tflite` and `firmware/main/gen/`
+remain untouched.
+
+**Field / Elicit** (`kws-eval --recordings --prefix features_v3 --qat`, both
+sections are device-Whisper agreement at *capture time* — i.e. properties of whatever
+model was actually deployed when each take was recorded, not of the models compared
+above, so they read identically regardless of which candidate is loaded):
+
+Field: 125 field takes, 68 approved, 36 parsable (0.288). Against the production gate
+0.85: 0 near-misses, 18 false alarms; at the capture gate 0.60: 0 near-misses, 18 false
+alarms. By speaker: spk17 49 takes/0 approved; spk18 39/37 approved, 18 parsable,
+agreement 0.125, 8 false alarms; spk19 24/19 approved, 9 parsable, agreement 0.500, 10
+false alarms; spk20 13/12 approved, 9 parsable, agreement 0.500, 0 false alarms.
+
+Elicit: 4 elicit takes, 4 approved, 4 parsable (1.000), 1 unparsed (vocab present);
+said what the scene expected 0.667 of the 3 compared takes (spk20).
+
+**Reading.** Two independent host-only threads converged on the same answer this round:
+E36's hyperparameter search found a recipe that clears the deploy rule on old data, and
+this entry confirms it still clears the rule — by an even wider margin — once real
+field takes are folded in via a from-scratch rebuild. The plain-recipe retrain (no
+`--real-weight`) is a useful negative control: it shows the aggregate lift is not just
+"more real data helps a little," it needed the real-clip upweighting to avoid a new
+false accept. `spk10`/`spk19`/`spk20` moving together under `rw3qe20` (all three
+genuinely untouched by today's session) is the more convincing signal than spk18 alone.
+Two open items for whoever deploys: (1) refresh `data/manifest_v3_qat.json` so future
+`compare_command_models.py`/`kws-eval --qat` runs correctly re-classify spk18 as
+in-training instead of quietly under-counting its held-out figure; (2) the E36 grid
+never rebuilt data, so its own `w48_rw3_qe20` CSV row still reflects the pre-field-take
+`features_v3` — this entry's `rw3qe20` numbers, not the grid's, are the ones that
+reflect today's data. Device flashing/measurement was out of scope for this host-only
+session and was not performed.
+
 ### E36 — hyper-recipe grid: width x real-clip weight x QAT epochs (2026-09-06, host-only)
 
 E27/E28/E31 each tried a *dataset*-side fix (regenerating the TTS cache, then a voice-level
