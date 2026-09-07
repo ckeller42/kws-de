@@ -3425,6 +3425,57 @@ clears 0/32 again. The new npz/manifest are left in place as the current build (
 `*.pre-run4` files are E35's); the exports live under `<models>/run4/` and
 `<models>/run4-qe10/`, never at the canonical path. No device, no flashing.
 
+### E41 — sentence-level (end-to-end phrase) performance of the deployed run-3 model (2026-09-07, host-only)
+
+(E40 is reserved for the run-5 seed-variance entry.) Every command-model comparison since E15
+has scored isolated words; phrase intent has been a footnote row ("spk10 0.082, rest 0.000").
+This entry measures the deployed `rw3qe20` (`command_v3_w48_qat.tflite@86b7105e`, E37) on the
+full QC-approved set through the same streaming decoder + grammar path the device runs, so
+the paper can state the word→sentence gap as a number rather than an aside. Host-only, no
+device, no training:
+
+```text
+KWS_DATA_ROOT=<data root> kws-eval --recordings "$KWS_DATA_ROOT/data/recordings/approved" \
+  --prefix features_v3 --width 48 --qat --out "$KWS_DATA_ROOT/docs/eval-report-v3-now.md"
+```
+
+Report at `$KWS_DATA_ROOT/docs/eval-report-v3-now.md` (`.recordings.json` beside it); manifest
+`data/manifest_v3_qat.json`, built 2026-09-06T18:16:55Z (E37's refreshed copy, so spk18/spk19/
+spk20 are labelled in-training; phrase clips are always held-out — never trained on).
+
+| speaker | isolated words n | acc | e2e phrases n | exact-intent acc | negatives n | false accepts |
+|---|---|---|---|---|---|---|
+| spk01 | 13 | 1.000 | 0 | — | 0 | — |
+| spk02 | 38 | 1.000 | 4 | 0.000 | 10 | 0/10 |
+| spk10 | 146 | 0.952 | 97 | 0.082 | 19 | 0/19 |
+| spk18 | 36 | 0.778 | 17 | 0.176 | 3 | 0/3 |
+| spk19 | 16 | 0.688 | 9 | 0.222 | 10 | 0/10 |
+| spk20 | 20 | 0.800 | 12 | 0.083 | 1 | 0/1 |
+| **all** | **269** | **0.911** | **139** | **≈ 0.10 (14/139)** | **43** | **0/43** |
+
+The 269-word aggregate (0.911) is over all six speakers; the deploy rule's 233-word
+four-speaker scoreboard (E35/E37) reads 0.936 on the same model — spk19/spk20 sit outside that
+rule and pull the six-speaker figure down.
+
+**Field** (device–Whisper agreement *at capture time*, i.e. of the model deployed when each take
+was recorded — `8fa81d08` for every session to date, not `86b7105e`): 125 field takes, 68
+approved, 36 parsable (0.288); 18 false alarms at both the production gate 0.85 and the capture
+gate 0.60, 0 near-misses. spk18 39 takes / 37 approved / 18 parsable, agreement 0.125, 8 false
+alarms; spk19 24 / 19 / 9, agreement 0.500, 10 false alarms; spk20 13 / 12 / 9, agreement 0.500,
+0 false alarms; spk17 49 takes, 0 approved. Elicit: 4 takes, 4 approved, 4 parsable, expected-match
+0.667 of 3 compared (spk20).
+
+**Reading.** The classifier is at 0.94 on words (deploy scoreboard) and 0 false accepts in 43;
+the streaming decoder over the same speakers' read sentences yields ≈ 0.10 exact intents. Every
+command-model change since E15 moved phrase intent by at most a few points (spk10
+0.062 → 0.082 → 0.113 → 0.082) while words went 0.538 → 0.936, and E28's read-only decoder sweep
+moved field agreement 3/18 → 4/18. **The word→sentence path — segmentation, run-based decoding,
+the grammar's all-or-nothing parse — is the bottleneck, not the classifier.** This is the
+paper's §6.15 and the first item of its limitations. Next levers, in order: the n-best lattice
+parse over existing posteriors (Open questions, below), per-word segmentation diagnostics on the
+125 failing phrases, and the E8 transducer once phrase data is real rather than 392 synthetic
+sentences.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
