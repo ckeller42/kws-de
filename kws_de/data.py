@@ -200,67 +200,6 @@ def _random_shift(clip, rng, max_shift_ms: int = 200):
     return out
 
 
-def make_transition_windows(clips_by_word, rng, n_pairs, gap_ms=250):
-    """Build transition-aware training windows from TRAIN-split word clips only
-    (never test -- see `_build_and_split`, which is the only caller and enforces
-    this by only ever passing it the train-split clips dict).
-
-    Concatenates two random command words with `gap_ms` of silence between them
-    -- the SAME gap `eval._intent_audio` uses to build catalog phrases -- then
-    cuts CLIP_SAMPLES windows two ways:
-      - straddling the boundary (tail-of-A + gap + head-of-B, neither word's
-        center inside the window) -> these are the boundary-transition ghosts
-        the streaming decoder actually sees; labeled "_unknown_" so the model
-        learns "not any single word" instead of guessing one.
-      - centered on one word with the neighbor's audio bleeding in at an edge
-        -> "in-context positive", labeled with the centered word -- matches
-        what streaming actually feeds the model (a word rarely arrives alone
-        in its 1s window).
-
-    Returns (unknown_windows, context_positives):
-      unknown_windows: list[np.ndarray] of CLIP_SAMPLES float32 arrays.
-      context_positives: list[(np.ndarray, str)] of (window, word_label).
-    """
-    words = [w for w, clips in clips_by_word.items() if clips]
-    if not words:
-        return [], []
-    n = config.CLIP_SAMPLES
-    gap = np.zeros(int(config.SAMPLE_RATE * gap_ms / 1000), np.float32)
-
-    def cut(seq, center):
-        """CLIP_SAMPLES window of `seq` centered at sample `center`, zero-padded
-        past either end -- works whether `seq` is longer or shorter than
-        CLIP_SAMPLES, so short clips don't need special-casing."""
-        start = int(round(center)) - n // 2
-        out = np.zeros(n, np.float32)
-        src_start, src_end = max(start, 0), min(start + n, len(seq))
-        if src_end > src_start:
-            dst = src_start - start
-            out[dst : dst + (src_end - src_start)] = seq[src_start:src_end]
-        return out
-
-    unknown_windows = []
-    context_positives = []
-    for _ in range(n_pairs):
-        # distinct words when possible -- an unrelated-word ghost is the
-        # failure mode this targets; only fall back to a repeat if there's
-        # just one command word to draw from.
-        wa, wb = rng.choice(words, size=2, replace=len(words) < 2)
-        clip_a = clips_by_word[wa][int(rng.integers(0, len(clips_by_word[wa])))]
-        clip_b = clips_by_word[wb][int(rng.integers(0, len(clips_by_word[wb])))]
-        a = np.asarray(clip_a, np.float32).ravel()
-        b = np.asarray(clip_b, np.float32).ravel()
-        seq = np.concatenate([a, gap, b])
-        len_a, len_gap = len(a), len(gap)
-
-        jitter = int(rng.integers(-len_gap // 2, len_gap // 2 + 1)) if len_gap else 0
-        unknown_windows.append(cut(seq, len_a + len_gap / 2 + jitter))
-        context_positives.append((cut(seq, len_a / 2), wa))
-        context_positives.append((cut(seq, len_a + len_gap + len(b) / 2), wb))
-
-    return unknown_windows, context_positives
-
-
 VAN_SNRS = (0, 5, 10)  # dB — cabin-ish, noisier than the general snrs= default
 
 
@@ -272,15 +211,23 @@ def van_augmentation_enabled() -> bool:
     return bool(os.environ.get("KWS_NOISE_DIR")) and bool(os.environ.get("KWS_RIR_DIR"))
 
 
+_VAN_FILES: dict[tuple[str, str], tuple[list[Path], list[Path]]] = {}
+
+
 def _van_noise_and_rir(rng):
-    """One random noise clip (KWS_NOISE_DIR) and one random room IR (KWS_RIR_DIR) for
-    this whole build — one of each, reused across every real clip, not one per clip."""
+    """One random noise clip (KWS_NOISE_DIR) and one random room IR (KWS_RIR_DIR), drawn
+    fresh from `rng` on every call — `build_dataset` calls it once per REAL clip, so each
+    clip gets its own cabin instead of one pair shared across the whole build. The two
+    wav lists are globbed once per directory pair and kept in `_VAN_FILES`."""
     import soundfile as sf
 
-    noise_dir, rir_dir = Path(os.environ["KWS_NOISE_DIR"]), Path(os.environ["KWS_RIR_DIR"])
-    noises, rirs = sorted(noise_dir.glob("*.wav")), sorted(rir_dir.glob("*.wav"))
-    if not noises or not rirs:
-        raise FileNotFoundError(f"no .wav files under {noise_dir} or {rir_dir}")
+    dirs = os.environ["KWS_NOISE_DIR"], os.environ["KWS_RIR_DIR"]
+    if dirs not in _VAN_FILES:
+        noises, rirs = (sorted(Path(d).glob("*.wav")) for d in dirs)
+        if not noises or not rirs:
+            raise FileNotFoundError(f"no .wav files under {dirs[0]} or {dirs[1]}")
+        _VAN_FILES[dirs] = (noises, rirs)
+    noises, rirs = _VAN_FILES[dirs]
     noise, _ = sf.read(noises[int(rng.integers(0, len(noises)))], dtype="float32")
     rir, _ = sf.read(rirs[int(rng.integers(0, len(rirs)))], dtype="float32")
     return noise, rir
@@ -293,8 +240,6 @@ def build_dataset(
     snrs=(20, 10, 0),
     labels=None,
     commands=None,
-    transition_unknown=None,
-    transition_positives=None,
     synthetic=None,
 ):
     """Build (X, y) from raw clips. `labels`/`commands` default to the v1 vocab
@@ -315,20 +260,16 @@ def build_dataset(
     its definition) plus a few pure-zero clean samples so clean input alone
     doesn't uniquely signal any one class.
 
-    `transition_unknown`/`transition_positives` (from `make_transition_windows`,
-    train-split only) are already-cut CLIP_SAMPLES windows with deliberate
-    boundary geometry, so they skip `_random_shift` (which would destroy that
-    geometry) but still get the same clean+per-snr noise augmentation.
-
     Van-cabin augmentation (`van_augmentation_enabled()`, opt-in via
     KWS_NOISE_DIR/KWS_RIR_DIR) adds `len(VAN_SNRS)` extra rows per REAL (non-`perturbed`)
-    clip: one room IR convolved in, mixed with one noise sample at 0/5/10 dB — see
-    `kws_de.augment.van_augment`. Off by default, so `_origin_flags` must be told the
-    same way (`van_augmentation_enabled()`) to keep its row count in sync.
+    clip: a room IR drawn per clip convolved in, mixed with a noise clip drawn per clip
+    at 0/5/10 dB — see `_van_noise_and_rir` and `kws_de.augment.van_augment`. Off by
+    default, so `_origin_flags` must be told the same way (`van_augmentation_enabled()`)
+    to keep its row count in sync.
     """
     labels = list(labels) if labels is not None else config.LABELS
     commands = list(commands) if commands is not None else config.COMMANDS
-    van_noise, van_rir = _van_noise_and_rir(rng) if van_augmentation_enabled() else (None, None)
+    van = van_augmentation_enabled()
     X, y = [], []
 
     def add(sig, label):
@@ -351,18 +292,13 @@ def build_dataset(
             for snr in snrs:
                 noise = noises[int(rng.integers(0, len(noises)))]
                 add(mix_at_snr(_random_shift(pclip, rng), noise, snr, rng), label)
-        elif van_noise is not None:  # REAL clip (rec:/MSWC): van-cabin variety
+        elif van:  # REAL clip (rec:/MSWC): van-cabin variety, its own (noise, RIR) pair
+            van_noise, van_rir = _van_noise_and_rir(rng)
             for snr in VAN_SNRS:
                 add(van_augment(_random_shift(clip, rng), van_noise, van_rir, snr, rng), label)
 
     def flags_for(label):
         return (synthetic or {}).get(label) or []
-
-    def add_fixed_window(sig, label):
-        add(sig, label)
-        for snr in snrs:
-            noise = noises[int(rng.integers(0, len(noises)))]
-            add(mix_at_snr(sig, noise, snr, rng), label)
 
     for cmd in commands:
         flags = flags_for(cmd)
@@ -371,10 +307,6 @@ def build_dataset(
     flags = flags_for("_unknown_")
     for i, clip in enumerate(clips.get("_unknown_", [])):
         add_word_clip(clip, "_unknown_", perturbed=bool(flags[i]) if i < len(flags) else False)
-    for win in transition_unknown or []:
-        add_fixed_window(win, "_unknown_")
-    for win, label in transition_positives or []:
-        add_fixed_window(win, label)
     n_sil = max(1, len(clips.get("_unknown_", [])))
     for _ in range(n_sil):
         noise = noises[int(rng.integers(0, len(noises)))]
@@ -401,7 +333,6 @@ def main() -> None:  # pragma: no cover - thin I/O wrapper (manual/integration)
         help="max MSWC examples to scan (stream is alphabetical by keyword; German "
         "'a'/'b' words alone can exceed 300k, so a real run may need to raise this)",
     )
-    ap.add_argument("--build", action="store_true", help="speaker-split + augment cached clips")
     ap.add_argument(
         "--v2", action="store_true", help="use the v2 slot-command vocab instead of v1 COMMANDS"
     )
@@ -421,8 +352,6 @@ def main() -> None:  # pragma: no cover - thin I/O wrapper (manual/integration)
     v2 = args.v2 or args.v3
     words = command_words() if v2 else None
     cache_name = "raw_clips_v3.pkl" if args.v3 else ("raw_clips_v2.pkl" if v2 else "raw_clips.pkl")
-    labels = config.COMMAND_LABELS if v2 else None
-    out_prefix = "features_v3" if args.v3 else ("features_v2" if v2 else "features")
     if args.fetch:
         _fetch_and_cache(
             safety_cap=args.safety_cap,
@@ -431,8 +360,6 @@ def main() -> None:  # pragma: no cover - thin I/O wrapper (manual/integration)
             mswc_root=Path(args.mswc_root) if args.v3 else None,
             n_unknown=2000 if args.v3 else 600,
         )
-    if args.build:
-        _build_and_split(cache_name=cache_name, words=words, labels=labels, out_prefix=out_prefix)
 
 
 def _fetch_and_cache(
@@ -803,68 +730,3 @@ def _origin_flags(clips_ws: dict, snrs, words=None, perturb_tts: bool = False) -
     n_clean_sil = max(1, n_sil // 10)
     flags.extend([False] * n_clean_sil)
     return np.asarray(flags, dtype=bool)
-
-
-def _build_and_split(
-    test_frac: float = 0.2,
-    seed: int = 0,
-    cache_name: str = "raw_clips.pkl",
-    words=None,
-    labels=None,
-    out_prefix: str = "features",
-) -> None:  # pragma: no cover
-    """TTS-fill thin words, speaker-disjoint split the cached raw clips, then
-    augment + extract features, saving data/{out_prefix}_train.npz and
-    data/{out_prefix}_test.npz (the latter also carries an ``is_tts`` row flag
-    so eval can isolate real-speech-only accuracy). `words`/`labels` default to
-    the v1 vocab; pass `command_words()`/`config.COMMAND_LABELS` for v2.
-    """
-    words = list(words) if words is not None else config.COMMANDS
-    rng = np.random.default_rng(seed)
-    with open(config.DATA_DIR / cache_name, "rb") as fh:
-        cached = pickle.load(fh)
-    with open(config.DATA_DIR / "noise.pkl", "rb") as fh:
-        noises = pickle.load(fh)
-
-    clips_with_speakers = cached["clips"]
-    tts_added = _fill_with_tts(clips_with_speakers, words=words)
-    if tts_added:
-        with open(config.DATA_DIR / cache_name, "wb") as fh:
-            pickle.dump(cached, fh)
-        print(f"[tts] added: {tts_added}")
-    # after the cache is persisted: device recordings are re-read every build, never cached
-    merged = merge_recordings(clips_with_speakers)
-    if merged:
-        print(f"[recordings] merged: {merged}")
-
-    snrs = (20, 10, 0)
-    train_ws, test_ws = split_by_speaker(clips_with_speakers, rng, test_frac, keep_speaker=True)
-    train_clips = {k: [c for c, _ in v] for k, v in train_ws.items()}
-    test_clips = {k: [c for c, _ in v] for k, v in test_ws.items()}
-
-    # Transition-aware training data (see make_transition_windows docstring):
-    # built from TRAIN-split command-word clips ONLY, never test, to avoid
-    # leakage. ~2000 boundary-straddling "_unknown_" negatives + ~4000
-    # word-in-context positives (2 per pair) -- teaches the model what
-    # inter-word transition audio looks like, which isolated-word clips never
-    # show it.
-    command_train_clips = {w: train_clips[w] for w in words if train_clips.get(w)}
-    trans_unknown, trans_positive = make_transition_windows(command_train_clips, rng, n_pairs=600)
-
-    X_train, y_train = build_dataset(
-        train_clips,
-        noises,
-        rng,
-        snrs=snrs,
-        labels=labels,
-        commands=words,
-        transition_unknown=trans_unknown,
-        transition_positives=trans_positive,
-    )
-    X_test, y_test = build_dataset(
-        test_clips, noises, rng, snrs=snrs, labels=labels, commands=words
-    )
-    is_tts_test = _origin_flags(test_ws, snrs, words=words)
-    np.savez(config.DATA_DIR / f"{out_prefix}_train.npz", X=X_train, y=y_train)
-    np.savez(config.DATA_DIR / f"{out_prefix}_test.npz", X=X_test, y=y_test, is_tts=is_tts_test)
-    print(f"[build] train X={X_train.shape} test X={X_test.shape}")

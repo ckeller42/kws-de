@@ -5,6 +5,7 @@ is the only caller that writes its output to `data/manifest.json`.
 """
 
 import hashlib
+import os
 from datetime import UTC, datetime
 
 import numpy as np
@@ -25,10 +26,12 @@ def build_manifest(
     "tts:"/"rec:"/plain-mswc), each split additionally gets "sources" (counts by
     origin) and "speakers" (sorted numeric ids of device recordings only, "rec:"
     stripped) — provenance for QC-approved device recordings mixed into the
-    build."""
+    build. "van_dirs" records KWS_NOISE_DIR / KWS_RIR_DIR (None when unset), so a
+    build without van-cabin augmentation is visible in its manifest."""
     out: dict = {
         "seed": seed,
         "built_at": datetime.now(UTC).isoformat(),
+        "van_dirs": [os.environ.get("KWS_NOISE_DIR"), os.environ.get("KWS_RIR_DIR")],
         "labels": list(labels),
         "mfcc": {
             "n_mfcc": config.N_MFCC,

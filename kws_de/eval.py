@@ -1109,7 +1109,7 @@ def main() -> None:  # pragma: no cover - I/O wrapper (manual/integration)
     with open(config.DATA_DIR / "noise.pkl", "rb") as fh:
         noises = pickle.load(fh)
     origin = _origin_counts(cached_clips)
-    split_rng = np.random.default_rng(0)  # must match kws_de.data._build_and_split's seed
+    split_rng = np.random.default_rng(0)  # the legacy v1 build's split seed
     _, test_clips_raw = split_by_speaker(cached_clips, split_rng, test_frac=0.2)
 
     snr_points = [40.0, 20.0, 10.0, 0.0]

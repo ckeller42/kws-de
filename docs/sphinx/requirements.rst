@@ -688,8 +688,8 @@ QC-approved, dataset-ready audio: :doc:`pipeline` covers the full flow.
    :status: implemented
 
    ``kws_de.data.merge_recordings`` folds the QC-approved tree into the
-   cached clip dict on every ``kws-dataset build`` (and every
-   ``kws-data --build``), not only on the build that created the cache:
+   cached clip dict on every ``kws-dataset build``, not only on the build
+   that created the cache:
    approved word clips become clips of speaker ``rec:<spkNN>`` for their
    label, approved negatives become ``_unknown_`` material via
    ``negative_windows``. Previous ``rec:`` entries are dropped first, so a
