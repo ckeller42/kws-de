@@ -15,6 +15,7 @@ if "--qat" in sys.argv and os.environ.get("TF_USE_LEGACY_KERAS") != "1":
     os.execv(sys.executable, [sys.executable, "-m", "kws_de.train", *sys.argv[1:]])
 
 import argparse  # noqa: E402
+import math  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -67,18 +68,25 @@ def train(
     validation_data=None,
     callbacks=None,
     width=32,
+    cosine=False,
 ):
     """Fit `model` (default: a fresh `build_dscnn`) on (X, y). `validation_data`/
     `callbacks` are passed straight through to `model.fit` (e.g. a `ModelCheckpoint`
     to select the best-val-accuracy epoch) -- kws_de.benchmark reuses this for the
     architecture zoo instead of duplicating the class-weight/fit logic. `width` is
-    forwarded to `build_dscnn` when `model` is not given."""
+    forwarded to `build_dscnn` when `model` is not given. `cosine` decays Adam's
+    default 1e-3 learning rate to 0 over the whole run (CosineDecay) instead of
+    holding it flat."""
     tf.keras.utils.set_random_seed(seed)
     X = np.asarray(X, np.float32)[..., None]
     y = np.asarray(y)
     if model is None:
         model = build_dscnn(num_classes=num_classes, width=width)
-    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    optimizer = "adam"
+    if cosine:
+        steps = epochs * math.ceil(len(y) / config.BATCH_SIZE)
+        optimizer = tf.keras.optimizers.Adam(tf.keras.optimizers.schedules.CosineDecay(1e-3, steps))
+    model.compile(optimizer=optimizer, loss="sparse_categorical_crossentropy", metrics=["accuracy"])
     cw = _class_weights(y) if class_weight else None
     if validation_data is not None:
         Xv, yv = validation_data
@@ -174,6 +182,13 @@ def main() -> None:  # pragma: no cover - I/O wrapper
         "class weighting, so real speech is over-represented relative to synthetic TTS "
         "clips (default 1, no-op)",
     )
+    ap.add_argument("--seed", type=int, default=0, help="training seed (default 0)")
+    ap.add_argument(
+        "--cosine",
+        action="store_true",
+        help="cosine-decay the float-phase learning rate from 1e-3 to 0 over --epochs "
+        "(QAT fine-tune unchanged)",
+    )
     args = ap.parse_args()
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     prefix = args.prefix or ("features_v2" if args.v2 else "features")
@@ -195,14 +210,21 @@ def main() -> None:  # pragma: no cover - I/O wrapper
         checkpoint = tf.keras.callbacks.ModelCheckpoint(
             ckpt, save_best_only=True, save_weights_only=True, monitor="val_accuracy", mode="max"
         )
+        progress = tf.keras.callbacks.LambdaCallback(
+            on_epoch_end=lambda e, logs: print(
+                f"epoch {e + 1}: val_accuracy {logs['val_accuracy']:.4f}"
+            )
+        )
         model, history = train(
             X,
             y,
             epochs=args.epochs,
+            seed=args.seed,
             num_classes=num_classes,
             width=args.width,
+            cosine=args.cosine,
             validation_data=None if val is None else (val["X"], val["y"]),
-            callbacks=None if val is None else [checkpoint],
+            callbacks=None if val is None else [checkpoint, progress],
         )
         if val is not None:
             va = history["val_accuracy"]
@@ -213,7 +235,7 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     print(f"final train accuracy: {history['accuracy'][-1]:.4f}")
 
     if args.qat:
-        qmodel, qhistory = train_qat(model, X, y, epochs=args.qat_epochs)
+        qmodel, qhistory = train_qat(model, X, y, epochs=args.qat_epochs, seed=args.seed)
         # SavedModel dir, not `.keras`: tfmot's QuantizeWrapperV2 layers fail to
         # reload from the `.keras` zip format (variable-name mismatch on
         # reload, a known tfmot/Keras-3-format interaction) but round-trip

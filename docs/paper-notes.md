@@ -3431,6 +3431,126 @@ clears 0/32 again. The new npz/manifest are left in place as the current build (
 `*.pre-run4` files are E35's); the exports live under `<models>/run4/` and
 `<models>/run4-qe10/`, never at the canonical path. No device, no flashing.
 
+### E40 — run 5: seed variance of the deployed recipe + 80 epochs flat/cosine (2026-09-07, host-only, exp/run5-seeds-cosine)
+
+E39 ended on two open questions: (a) is run 4's −0.022 aggregate / +2 false accepts
+against the deployed model a real regression or single-seed noise, and (b) is the
+40-epoch float phase under-trained. This entry answers both on the host, same recipe
+throughout (`--width 48 --qat --qat-epochs 20 --real-weight 3`), scoring against the
+deployed `command_v3_w48_qat.tflite@86b7105e` (E37: aggregate 0.936, 0/32, spk18
+0.778). Worktree off `origin/main` at `625474a` (PR #84 merged); `KWS_NOISE_DIR` (210
+wavs) / `KWS_RIR_DIR` (270 wavs) as in E39.
+
+**Two small `kws-train` additions** (`kws_de/train.py`). `--seed N` (default 0) is now
+passed through to `train()` and `train_qat()`, which already took `seed=` — E39 noted the
+CLI had no way to set it. `--cosine` swaps the float phase's `"adam"` for
+`Adam(CosineDecay(1e-3, epochs * ceil(rows / BATCH_SIZE)))` — Adam's default initial LR,
+decayed to 0 over the whole run; the QAT fine-tune (`Adam(1e-5)`) is untouched. No
+scheduler abstraction, no config; one test
+(`test_cosine_decays_learning_rate_to_near_zero`: a 3-epoch toy run with `cosine=True`
+ends with LR < 1e-4). `kws-train` also prints `epoch N: val_accuracy X` per epoch (a
+`LambdaCallback` next to the E38 checkpoint) so a log answers (b) without re-running.
+
+**Backups and restore.** Before any build: `raw_clips_v3.pkl`, `features_v3_{train,val,
+test}.npz` and `manifest_v3.json` copied to `*.pre-run5` (the run-4 seed-0 build, E39).
+After the last scoring, the four npz/manifest files were restored from `*.pre-run5` and
+verified byte-identical (`cmp`), so the repo's baseline data is exactly E39's again. The
+canonical `models/command_v3_w48_qat.tflite` hashed `86b7105e` before and after;
+`firmware/main/gen/` untouched. `raw_clips_v3.pkl` is the one file left changed: the
+seed-1 build's `_fill_with_tts` topped `Dach` up from 296 to 300 clips (`[tts] Dach: 296
+real clips, synthesizing 4 more`, `[tts] added: {'Dach': 4}`, +134 KB), the seed-2 and
+seed-0 rebuilds added nothing. Its pre-run5 copy sits alongside.
+
+**Part A — seed variance.** `kws-dataset build --cache raw_clips_v3.pkl --prefix
+features_v3 --seed N` (46–65 s each), then `kws-train --v2 --prefix features_v3 --width 48
+--qat --qat-epochs 20 --real-weight 3 --seed N --out command_v3_w48_qat_run5_s{N}.keras`
+(epochs 40), `kws-export --v2 --qat --width 48 --prefix features_v3 --model
+command_v3_w48_qat_run5_s{N}.keras --out <models>/run5-s{N}/`, scored via
+`scripts/recipe-grid.py`'s `score()`/`append_row()` (rows `run5_s{1,2}_w48_rw3_qe20`).
+Seed 0 is E39's `run4_w48_rw3_qe20` row, reused. Note what the dataset seed moves: the
+split is speaker-disjoint and TTS voices count as speakers, so seed 1 gives train/val/test
+= 44,260 / 3,792 / 8,454 (train TTS 3,892 clips vs seed 0's 3,120) and seed 2 gives
+38,884 / 8,657 / 8,964, against seed 0's 38,734 / 6,425 / 11,315. All 373 device clips of
+spk01/02/10/18/19/20 are train-side in every seed. So "seed" here = split + augmentation
+draws + init, and each seed's INT8 test accuracy is against its own test split (not
+comparable across rows).
+
+| | seed 0 (run 4, E39) | seed 1 | seed 2 | mean ± range/2 |
+|---|---|---|---|---|
+| sha256 | `b8df37db` | `0a2543e8` | `38bed244` | |
+| INT8 test acc (own split) | 0.7158 | 0.5974 | 0.6817 | n/a |
+| best epoch / val acc | 40/40, 0.6577 | 39/40, 0.5891 | 33/40, 0.6691 | |
+| spk01 (n=13) | 0.923 | 0.923 | 0.923 | 0.923 ± 0.000 |
+| spk02 (n=38) | 0.974 | 1.000 | 0.974 | 0.982 ± 0.013 |
+| spk10 (n=146) | 0.938 | 0.932 | 0.938 | 0.936 ± 0.003 |
+| spk18 (n=36) | 0.750 | 0.722 | 0.861 | 0.778 ± 0.069 |
+| spk19 (n=16) | 0.812 | 0.812 | 0.750 | 0.792 ± 0.031 |
+| spk20 (n=20) | 0.900 | 0.850 | 0.900 | 0.883 ± 0.025 |
+| **aggregate (n=233)** | 0.914 | 0.910 | **0.931** | **0.919 ± 0.011** |
+| false accepts (n=32) | 2 (spk10 2/19) | 1 (spk18 1/3) | **0** | 1.0, range 0–2 |
+| deploy rule | FAIL | FAIL | **PASS** | |
+| train wall-clock | 1,223 s | 1,317 s | 1,226 s | |
+
+**Variance bar.** Over three seeds the aggregate spans 0.910–0.931 (range 0.021) and the
+false-accept count takes every value 0, 1, 2 — on a different speaker each time. That is
+exactly the size of E39's run-4-vs-deployed delta (−0.022 aggregate, +2 false accepts),
+so E39's "does per-clip van aug hurt?" question cannot be answered by one seed:
+run 4's shortfall is one draw from a distribution whose width is the effect being
+tested. The deploy rule's ±0.02 aggregate differences and 0-vs-1 false-accept differences
+between single runs are inside seed noise; a real recipe difference needs either ≥ 3
+seeds per arm or a margin larger than ~0.02 / 2 FA. spk18 is the noisiest speaker
+(0.722–0.861 on n=36, ±2.5 words); spk01/spk10 barely move. Seed 2 clears the rule (0/32,
+spk18 0.861, aggregate 0.931) but is still 0.005 below the deployed 0.936 (one word of
+233), so the standing model is not beaten. The deployed E37 model itself is one seed of
+the pre-E38 build; its 0.936 / 0/32 should be read with the same ±0.011 / 0–2 bar.
+
+**Part B — 80 epochs, flat vs cosine.** Seed-0 rebuild first (`--seed 0`, same prefix;
+train/val/test 38,758 / 6,433 / 11,315 — run 4's split plus the 4 Dach TTS clips × 8
+augmentation rows, so not byte-identical to run 4's npz; the `*.pre-run5` restore at the
+end puts run 4's back). Then two runs, both `--seed 0 --epochs 80` on this build,
+`run5_e80_flat` (constant LR) and `run5_e80_cos` (`--cosine`), exported to
+`<models>/run5-e80-flat/` and `<models>/run5-e80-cos/`.
+
+| | run 4 (40 ep, E39) | `run5_e80_flat` | `run5_e80_cos` | deployed `86b7105e` |
+|---|---|---|---|---|
+| sha256 | `b8df37db` | `1cf0435e` | `f7483c99` | `86b7105e` |
+| INT8 test acc (own split) | 0.7158 | 0.7125 | 0.7064 | 0.6936 (n=11,291) |
+| best epoch / val acc | 40/40, 0.6577 | 35/80, 0.6695 | 68/80, 0.6785 | n/a |
+| float / QAT final train acc | 0.7305 / 0.7463 | 0.7696 / 0.7404 | 0.7617 / 0.7425 | |
+| spk01 / spk02 / spk10 | 0.923 / 0.974 / 0.938 | 0.923 / 0.947 / 0.911 | 0.923 / 1.000 / 0.945 | 1.000 / 1.000 / 0.952 |
+| spk18 / spk19 / spk20 | 0.750 / 0.812 / 0.900 | 0.778 / 0.812 / 0.950 | 0.806 / 0.688 / 0.900 | 0.778 / 0.688 / 0.800 |
+| **aggregate (n=233)** | 0.914 | 0.897 | **0.931** | **0.936** |
+| false accepts (n=32) | 2 (spk10) | 1 (spk10 1/19) | 1 (spk10 1/19) | **0** |
+| deploy rule | FAIL | FAIL | FAIL | (reference) |
+| train wall-clock | 1,223 s | 2,115 s | 2,031 s | |
+
+Per-epoch `val_accuracy` (flat; epoch 1, then every 5th of 80): 0.085, 0.527, 0.555,
+0.590, 0.632, 0.629, 0.614, 0.670 (ep 35, best), 0.638, 0.656, 0.634, 0.611, 0.650, 0.667,
+0.662, 0.647, 0.659 — a plateau at 0.61–0.67 from epoch ~28 with ±0.03 epoch-to-epoch
+jitter (last 20 epochs span 0.626–0.667); the best epoch (35) is inside the 40 the recipe
+already runs. Cosine: 0.075, 0.553, 0.555, 0.622, 0.617, 0.635, 0.652, 0.661, 0.652,
+0.668, 0.661, 0.667, 0.675, 0.671, 0.673, 0.674, 0.673 (best 68, 0.6785) — the decay
+flattens the tail (last 20 epochs within 0.667–0.679) and lands
+0.009 higher on val than flat's best, but the scoreboard does not follow: aggregate 0.931
+equals seed 2's 40-epoch run and one spk10 false accept remains. **40 epochs is not
+under-trained**: doubling the float phase costs +900 s and moves nothing outside the Part A
+noise bar (flat 0.897 is the *low* end of it). `--cosine` is a harmless tail-smoother
+worth keeping as a flag, not a lever.
+
+**Answer to the report question.** No candidate both passes the deploy rule and beats
+`86b7105e` on aggregate at 0 false accepts: seed 2 (0.931, 0/32) is the closest and is
+one word short. The deployed model stays. What this entry does settle is the yardstick:
+single-seed differences below ~0.02 aggregate / 2 false accepts are noise on this
+scoreboard, which retroactively makes E36's `qe10`-vs-`qe20` false-accept flip and E39's
+run-4-vs-deployed verdict both "within the bar". Anyone re-opening the per-clip-van-aug
+question should run 3 seeds per arm and compare means.
+
+**Housekeeping.** `scripts/recipe-grid.csv` gained four rows (`run5_s1_w48_rw3_qe20`,
+`run5_s2_w48_rw3_qe20`, `run5_e80_flat`, `run5_e80_cos`; `git_sha` auto-filled with the
+pre-commit `625474a`). Exports live under `<models>/run5-*/`, never at the canonical
+path. `pytest -q tests/test_train.py` 5 passed; `ruff check` / `ruff format --check`
+clean. No device, no flashing, no deploy.
+
 ### E41 — sentence-level (end-to-end phrase) performance of the deployed run-3 model (2026-09-07, host-only)
 
 (E40 is reserved for the run-5 seed-variance entry.) Every command-model comparison since E15

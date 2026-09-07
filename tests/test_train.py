@@ -48,3 +48,14 @@ def test_upweight_real_noop_when_no_real_rows():
     Xw, yw = upweight_real(X, y, is_tts, 5)
     assert np.array_equal(Xw, X)
     assert np.array_equal(yw, y)
+
+
+def test_cosine_decays_learning_rate_to_near_zero():
+    rng = np.random.default_rng(0)
+    n = 60
+    X = rng.standard_normal((n, config.N_FRAMES, config.N_MFCC)).astype(np.float32)
+    y = (np.arange(n) % config.NUM_CLASSES).astype(np.int64)
+    model, _ = train(X, y, epochs=3, seed=0, cosine=True)
+    lr = model.optimizer.learning_rate
+    lr = lr(model.optimizer.iterations) if callable(lr) else lr  # Keras 2 returns the schedule
+    assert float(lr) < 1e-4
