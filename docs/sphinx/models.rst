@@ -59,20 +59,36 @@ one of exactly two labels, never mixed — ``held-out`` or
      - 0.538 (n=13), *user-customised*
      - 0.605 (n=38), *user-customised*
      - 0/10, *user-customised*
-   * - v3 QAT, **width 48** (3 speakers; **deployed**, 2026-09-04)
-     - **93.6 %**
+   * - v3 QAT, **width 48** (3 speakers; was deployed, 2026-09-04)
+     - 93.6 %
      - 25,832 B
-     - **0.923** (n=13), *user-customised*
-     - **0.895** (n=38), *user-customised*
+     - 0.923 (n=13), *user-customised*
+     - 0.895 (n=38), *user-customised*
      - 0/10, *user-customised*
+   * - v3 QAT, width 48, field-take rebuild + ``rw3qe20`` recipe (4 speakers; **deployed**, 2026-09-06)
+     - 69.4 %\ [#run3acc]_
+     - 25,832 B
+     - **1.000** (n=13), *user-customised*
+     - **1.000** (n=38), *user-customised*
+     - 0/32, *mixed held-out/user-customised*
+
+.. [#run3acc] Own-era INT8 test-set accuracy, not cross-comparable with the
+   rows above it — the rebuilt ``features_v3`` test split (E35,
+   ``docs/paper-notes.md``) is a different split than the one the earlier
+   rows were scored against.
 
 The last row is the model on the device — ``KWS_MODEL_ID
-"command_v3_w48_qat.tflite@8fa81d08 2026-09-04"``, 25,832 B: the same
-DS-CNN with its channel count raised from 32 to 48, so 11,111 parameters
-and 4,234,704 MACs against 5,879 and 2,070,496. On the CoreS3 that costs a
-**46–47 ms recognise step** against a 100 ms budget (from 31 ms), with the
-command evaluation at 42.2 ms and 45,431 B of internal RAM still free when
-the recogniser starts. Invoke time rose 1.55x on 2.05x the MACs — wider is
+"command_v3_w48_qat.tflite@86b7105e 2026-09-06"``, 25,832 B: same DS-CNN,
+same width (32 → 48 channels), same 11,111 parameters and 4,234,704 MACs
+against 5,879 and 2,070,496 — only the weights changed, retrained on a
+rebuilt ``features_v3`` that folds in a real field session (E35) with the
+grid-search recipe ``--qat-epochs 20 --real-weight 3`` (E36). Device
+timing and memory are unaffected (same architecture): **46–47 ms
+recognise step** against a 100 ms budget (from 31 ms), command evaluation
+at 42.2 ms and 45,431 B of internal RAM still free when the recogniser
+starts, measured on the row above — not yet re-measured on-device for
+this retrain (``device: pending``, ``docs/paper-notes.md`` E37). Invoke
+time rose 1.55x on 2.05x the MACs over the width-32 model — wider is
 cheaper per MAC here, because 48 channels fill esp-nn's SIMD lanes and the
 fixed per-op costs do not grow with the arithmetic.
 

@@ -3219,6 +3219,82 @@ measurement (the recognise-step latency is architecture-bound, so E16/E18's ~55.
 estimate should still hold, but this was not verified on hardware) is the natural
 follow-up before any deploy decision.
 
+### E37 — deploying run-3 `rw3qe20`: field-take retrain, grid recipe (2026-09-06/07, host-only)
+
+E35's deploy candidate promoted. `rw3qe20` (`--width 48 --qat --qat-epochs 20
+--real-weight 3` on E35's field-take rebuild of `features_v3`, train=38,646) cleared
+the standing deploy rule by the widest margin yet (aggregate 0.936, spk18 0.778, 0/32
+false accepts) and E36 independently found the same recipe on the pre-rebuild data —
+two host-only threads agreeing is what E35 flagged as the deploy candidate. This entry
+does the deploy, following #54/E18's procedure: same architecture, so no docs sweep
+beyond the identifying stamp and one comparison table.
+
+**Export.** `kws-export --firmware --qat --prefix features_v3 --model
+command_v3_w48_qat_run3_rw3qe20.keras --width 48`, loading the QAT SavedModel
+(`command_v3_w48_qat_run3_rw3qe20_qat/`) E35 trained. `--out` was left at its default
+(`$KWS_DATA_ROOT/models`), which is the canonical path this time — E35 deliberately
+exported to an isolated `models/run3-rw3qe20/` directory to avoid touching canonical
+files during a host-only recipe search; this entry's job is exactly to make that swap.
+The pre-export canonical `command_v3_w48_qat.tflite` / `_data.h` / `_metadata.json` and
+the `command_v3_w48_qat/` SavedModel directory were backed up as `*.pre-run3rw3` /
+`.pre-run3rw3-dir` before the export ran. `kws-codegen firmware/main/gen/model_data.h
+--name command --out firmware/main/gen` regenerated `command_infer.{c,h}` and
+`command_smoke_vectors.h` from the new weights.
+
+| | old (E35 table's "deployed w48") | new (deployed) |
+|---|---|---|
+| `KWS_MODEL_ID` | `command_v3_w48_qat.tflite@8fa81d08 2026-09-04` | `command_v3_w48_qat.tflite@86b7105e 2026-09-06` |
+| size | 25,832 B | 25,832 B (unchanged) |
+| width / params / MACs | 48 / 11,111 / 4,234,704 (unchanged) | 48 / 11,111 / 4,234,704 (unchanged) |
+| INT8 test accuracy (own-era test set) | 61.78 % (n=11,291) | 69.36 % (n=11,291) |
+| aggregate real-voice words (n=233) | 0.785 | **0.936** |
+| false accepts (n=32) | 0/32 | 0/32 |
+
+No architecture change — same MACs, same bytes, same quantisation shape — so
+`recognise.cc`'s `static_assert`s and the arena/scratch macros are untouched by
+construction, confirmed rather than assumed: `COMMAND_INFER_ARENA_BYTES` 47,040 B,
+`COMMAND_INFER_SCRATCH_BYTES` 29,824 B, both identical to E18. The wake pair
+(`hey_bus.tflite@4aaa2f98`, round 7, E34) is untouched — `kws-export --firmware`
+rewrites the wake headers unconditionally, so this was verified by sha256 rather than
+assumed: `wake_model_data.h` / `wake_model_config.h` byte-identical before and after.
+
+**Checks.** `kws-fwgen --check firmware/main/gen` and `kws-codegen
+firmware/main/gen/model_data.h --name command --check firmware/main/gen`: exit 0, no
+drift warning. `make -C firmware/test`: `command smoke: 0/368 bytes differ`, `wake
+smoke: 0/64 steps differ`, host tests OK. `pytest -q`'s
+`test_whole_command_model_matches_the_interpreter` (which builds and runs
+`test_command_parity`): `command parity: 0/1564 bytes differ` (68 real `features_v3`
+clips + 4 synthetic, arena 47,040 B) — same clip count and byte total as E18, since
+the model shape is unchanged. Full suite: 370 passed, 1 skipped, 1 xfailed. `ruff
+check` / `ruff format --check`: clean. `markdownlint-cli@0.42.0 --config
+.markdownlint.json`: clean. `sphinx-build -W --keep-going` on `docs/sphinx`: clean but
+for the pre-existing "doxygen XML absent" warning (no `doxygen` binary on this
+host — the same gap `docs.yml`'s CI job papers over by installing it first; not
+introduced by this deploy). ESP-IDF v5.5.5 Docker, default build: total image
+1,025,659 B (`.bss` 140,024 B DIRAM), unchanged architecture so no memory-shape
+surprise expected and none found.
+
+**Promotion.** Canonical `command_v3_w48_qat.{tflite,_data.h,_metadata.json}` under
+`$KWS_DATA_ROOT/models` now hold the `rw3qe20` export (the `kws-export --firmware`
+call above wrote them directly, since `--out` defaults to the canonical models dir);
+the pre-deploy versions live alongside as `*.pre-run3rw3`. `data/manifest_v3_qat.json`
+— flagged stale in E35 (dated before the field-take rebuild, so it still labelled
+spk18 `held-out`) — refreshed from the current `data/manifest_v3.json` (the E35
+rebuild's manifest, `built_at` 2026-09-06T18:16:55Z, train=38,646); the pre-refresh
+file kept as `manifest_v3_qat.json.pre-run3rw3`. Future `compare_command_models.py` /
+`kws-eval --qat` runs will now classify spk18 the way E35's prose already explained it
+should be read.
+
+**Not done, out of scope for this host-only session.** No device — flashing and the
+on-device recognise-step/memory measurement are left as `device: pending`; the
+architecture is unchanged from E18's measured 46–47 ms step / 45,431 B free internal,
+so the estimate carries over, but E16/E18 already recorded once that a MAC-ratio
+estimate for *this* architecture undershot by 25 % on a real width change — a retrain
+at fixed width is a much smaller extrapolation, but it is still an estimate, not a
+measurement. E36's own `w48_rw3_qe20` grid-CSV row and its `firmware/main/gen`
+untouched-hash check are unaffected by this entry — they describe the pre-deploy
+state, correctly.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
