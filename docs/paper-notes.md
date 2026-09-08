@@ -4453,6 +4453,88 @@ list (same way `heller`/`dunkler` are single multi-syllable classes today), add 
 to `COMMANDS`/`COMMAND_LABELS`, retrain, re-export, regenerate `gen/`, and the grammar/intent
 wiring landed here needs no further changes to recognize them live.
 
+### E52 — deploy rule redefined: guided-only aggregate, spk18 clause dropped (2026-09-09, host-only, fix/deploy-rule-guided-only)
+
+E49 left the standing deploy rule (E27/E28: aggregate real-voice words >= 0.785, 0 false accepts,
+spk18 > 0.333) broken by construction: E48's guided/context bucket split emptied `approved/words/`
+for spk10 and spk18 entirely (100 % of their word clips are context-origin), so `spk18_words` is
+not merely low, it is undefined on the current tree, and `scripts/recipe-grid.py`'s `passes()`
+(`float(row["spk18_words"]) > 0.333`) can never pass a real candidate again. E49 flagged this as a
+coordinator call and made no change. Decision made now: **redefine the rule to the guided-only
+isolated-word aggregate, spk18 clause dropped — not replaced with a different per-speaker floor.**
+
+**What changed.** `scripts/recipe-grid.py`'s `passes()`:
+
+```diff
+ def passes(row: dict) -> bool:
+-    """The standing deploy rule (E27/E28): aggregate real-voice words >= 0.785, no false
+-    accepts, and the least-represented speaker (spk18) above the deployed 1/3 floor."""
+-    return (
+-        float(row["aggregate_words"]) >= 0.785
+-        and int(row["false_accepts"]) == 0
+-        and float(row["spk18_words"]) > 0.333
+-    )
++    """The deploy rule, redefined E52 (was E27/E28): aggregate GUIDED-ONLY isolated-word
++    accuracy (`approved/words/`, single-word takes only -- not `approved/context/`, see
++    E48) >= 0.785, and no false accepts. The original spk18 floor is dropped, not
++    replaced: E48's guided/context split left spk18 (and spk10) with zero guided-only
++    word clips, so `spk18_words` is permanently unmeasurable on the current tree (E49),
++    not merely low -- no other per-speaker floor was already available to reuse."""
++    return float(row["aggregate_words"]) >= 0.785 and int(row["false_accepts"]) == 0
+```
+
+No per-speaker floor replaces spk18's: none already existed elsewhere in the codebase that was
+trivially reusable, and inventing a new one was explicitly out of scope for this change. No
+scoring-pipeline change was needed — `kws_de.eval.eval_recordings`'s `isolated` figure already
+reads only `approved/words/*/*.wav` (E48/E49), which is automatically guided-only; `passes()`'s
+own `aggregate_words` input was already that number. This is a `passes()`/documentation change
+only, exactly as anticipated. (Separately noted, unchanged by this entry: `recipe-grid.py`'s
+`score()` restricts its per-speaker aggregation to the hardcoded `SPEAKERS = ("spk01", "spk02",
+"spk10", "spk18")` tuple, which excludes spk22 — the new guided speaker that has existed since
+just after E48. This under-counts `recipe-grid.py`'s own `aggregate_words` for any future grid run
+against the current tree; `scripts/compare_command_models.py` has no such restriction and is
+unaffected. E49 already flagged this staleness as bigger than a few lines and the coordinator's
+call — still true, still not fixed here.)
+
+**Both models scored under the redefined rule** (`scripts/compare_command_models.py`, deployed
+`86b7105e` vs `run7_s0` `ff9915d9`, current approved tree — identical run and inputs to E49, only
+the pass/fail rule differs):
+
+| | deployed `86b7105e` | run7_s0 `ff9915d9` |
+|---|---|---|
+| spk01 words (n=13) | 1.000 | 0.846 |
+| spk02 words (n=38) | 1.000 | 0.974 |
+| spk22 words (n=23) | 0.696 | 0.696 |
+| **aggregate guided-only words (n=74)** | **0.905** | **0.865** |
+| false accepts (n=85) | 0/85 | 0/85 |
+| **redefined `passes()`** | **PASS** | **PASS** |
+
+Both now pass the redefined rule (deployed always would have; run7_s0 now does too, since the
+unmeasurable spk18 clause is gone rather than silently failing it). Under the old rule neither was
+even evaluable — `spk18_words` is `nan` for both, so `float("nan") > 0.333` is `False` and the old
+`passes()` would fail every current candidate including the currently-deployed model itself.
+
+**Deploy decision: NOT deployed — rule redefinition only.** Standing policy is "deploy the winning
+model without asking" once a candidate clears the rule AND beats the currently-deployed model.
+run7_s0 clears the redefined rule, but its guided-only aggregate (0.865) is *below* deployed's
+(0.905) on the one metric the rule measures — it does not beat deployed, it regresses on it. No
+candidate change. Canonical `command_v3_w48_qat.*` and `firmware/main/gen/` are untouched
+(`86b7105e` unchanged); no export/codegen/parity/Docker verification was run since nothing is
+deployed. `run7_s0`'s clear win is on sentence-level exact-intent (E49: 0.130 vs 0.077, Küche/Dach
+in-context recognition far better) — a different axis than what this rule measures. Redefining the
+gate to a sentence-level metric instead (or supplementing it with one) remains the coordinator's
+call, same as E49 left it; not decided here.
+
+**Note for the record, no action taken:** the vocabulary term `Kühlschrank` is kept as-is, not
+renamed to `Kühlbox` (the California app's own term for the same appliance) — a closed decision by
+the coordinator, logged here only so it is not silently re-proposed. Nothing in the current
+codebase proposes this rename, so no code change was needed.
+
+**Not done here:** no retrain, no dataset rebuild, no fix to `recipe-grid.py`'s stale `SPEAKERS`
+tuple (flagged above, E49's same unfixed staleness), no firmware export/codegen/parity/Docker
+verification (moot, nothing deployed). `uv run --no-sync pytest -q` and `ruff check` both pass
+unchanged (host-only, `KWS_NOISE_DIR`/`KWS_RIR_DIR` unset).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
