@@ -91,8 +91,10 @@ static void log_fire(const char *word, float conf)
 /* Duty accounting, logged once per 10 s of wall time.
  *
  * The always-on recognise mode is a measurement baseline, not a deployment:
- * the recogniser costs ~46 ms of CPU per 100 ms step, so running it
- * continuously is ~460 ms of inference per wall second. Assist mode gates it
+ * the recogniser costs ~46 ms of CPU per 100 ms step (a fixed period since
+ * the vTaskDelayUntil change; the vTaskDelay(100)-after-work loop before it
+ * ran ~146 ms steps and read ~315 ms), so running it continuously is
+ * ~460 ms of inference per wall second. Assist mode gates it
  * behind a wake fire, and the gap between the two lines this prints is exactly
  * what the wake-gated design buys. Both modes emit the same line so they can be
  * compared straight out of the log.
@@ -239,6 +241,7 @@ static void recognise_task(void *)
        the several `continue`s below cannot skip it. */
     int64_t prev_us = 0, step_us = 0;
     bool prev_active = false;
+    TickType_t next_step = xTaskGetTickCount();
 
     for (;;) {
         int64_t now_us = esp_timer_get_time();
@@ -255,14 +258,26 @@ static void recognise_task(void *)
             uint32_t now = audio_write_pos();
             frame_start = now > KWS_SAMPLE_RATE ? now - KWS_SAMPLE_RATE : 0;
             primed = true;
+            next_step = xTaskGetTickCount();
 #if CONFIG_KWS_INFER_GENERATED && CONFIG_KWS_INFER_PARITY_LOG
             s_parity_pending = true;                       /* one parity line per mode entry */
 #endif
         }
-        vTaskDelay(pdMS_TO_TICKS(100));                    /* ~10 Hz cadence */
+        /* Fixed 100 ms period, not vTaskDelay(100) after ~46 ms of work: that
+           ran the loop at ~146 ms per step, so the stream decoder's
+           KWS_MIN_CONSECUTIVE (2 steps) needed ~290 ms of stable top-1 while
+           an in-context word's top-1 plateau is ~200 ms wide, and the device
+           dropped words the host decoder (100 ms stride, kws_de/eval.py)
+           keeps. If a step overran the period (a fire opening recognise.log
+           through FATFS), restart the period from now rather than firing
+           catch-up steps back to back over the same audio. */
+        TickType_t now_ticks = xTaskGetTickCount();
+        if ((int32_t)(now_ticks - next_step) > (int32_t)pdMS_TO_TICKS(100)) next_step = now_ticks;
+        vTaskDelayUntil(&next_step, pdMS_TO_TICKS(100));
         int64_t t0 = esp_timer_get_time();
         /* Streaming front-end: push only the frames that arrived since the last
-           step (~5 per 100 ms) instead of recomputing all 49 from a 1 s buffer —
+           step (~5 per 100 ms; no minimum, a step with fewer just re-scores
+           the window) instead of recomputing all 49 from a 1 s buffer —
            a ~10x cut in front-end work. Frame t covers [start, start+KWS_WIN)
            with start advancing by KWS_HOP, the same layout as mfcc_compute(), so
            the features are bit-identical (the host test checks streaming == one-shot). */
@@ -311,13 +326,14 @@ static void recognise_task(void *)
         int fired = stream_push(&stream, probs);
         if (fired >= 0 && s_off_at_us) {
             /* Windowed (assist) session only — s_off_at_us is 0 outside one.
-               Dropped as if nothing fired: it must not reach window_intent/
+               A "...Bus" artefact (assist_gate.h says which labels) is
+               dropped as if nothing fired: it must not reach window_intent/
                window_words (field capture's device prediction) or the
                confirmation tone below, and the run it belonged to stays
                marked fired (see assist_gate.h) so a genuine later command on
                a different label still gets its own chance to fire. */
             int64_t since_open_ms = (esp_timer_get_time() - s_win_open_us) / 1000;
-            if (assist_gate_in_wake_tail(since_open_ms)) {
+            if (assist_gate_in_wake_tail(since_open_ms, KWS_LABELS[fired])) {
                 ESP_LOGI(TAG, "assist: dropped tail fire %s %.2f, %lld ms into the window (< %d)",
                          KWS_LABELS[fired], (double)probs[fired], (long long)since_open_ms,
                          ASSIST_WAKE_TAIL_MS);

@@ -58,12 +58,15 @@ int main(void)
     assert(!assist_gate_tick(&g, near_wrap + ASSIST_WINDOW_MS));
     assert(g.open_ms_total == ASSIST_WINDOW_MS);
 
-    /* #64: a command fire inside the wake-word tail is dropped, one shortly
-       after is accepted. */
-    assert(assist_gate_in_wake_tail(400));
-    assert(!assist_gate_in_wake_tail(500));
-    assert(assist_gate_in_wake_tail(ASSIST_WAKE_TAIL_MS - 1));
-    assert(!assist_gate_in_wake_tail(ASSIST_WAKE_TAIL_MS));
+    /* #64: the "...Bus" artefact (`aus`/`_unknown_`) inside the wake-word tail
+       is dropped, one shortly after is accepted; a real first word ("Licht"
+       starts before the fire in most field takes) passes even in the tail. */
+    assert(assist_gate_in_wake_tail(400, "aus"));
+    assert(assist_gate_in_wake_tail(400, "_unknown_"));
+    assert(!assist_gate_in_wake_tail(400, "Licht"));
+    assert(!assist_gate_in_wake_tail(500, "aus"));
+    assert(assist_gate_in_wake_tail(ASSIST_WAKE_TAIL_MS - 1, "aus"));
+    assert(!assist_gate_in_wake_tail(ASSIST_WAKE_TAIL_MS, "aus"));
 
     printf("test_assist_gate OK\n");
     return 0;

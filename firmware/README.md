@@ -243,11 +243,13 @@ while this mode is active, so what you see is the wake model alone.
   Assistent as well as the toggle let exactly that leak into a take. A command
   still recognised under capture simply passes silently — the owed tone is
   dropped, not deferred to a later window.
-- **A command fire inside the first `ASSIST_WAKE_TAIL_MS` (450 ms) of a
-  window is dropped, not recognised.** The window's first classification is a
-  ~1 s retrospective slice that reaches back before the window opened, so it
-  can score the tail of "...Bus" itself as a word (issue #64); the window
-  still runs the full 2.5 s either way.
+- **An `aus` or `_unknown_` fire inside the first `ASSIST_WAKE_TAIL_MS`
+  (450 ms) of a window is dropped, not recognised.** The window's first
+  classification is a ~1 s retrospective slice that reaches back before the
+  window opened, so it can score the tail of "...Bus" itself as `aus` (issue
+  #64). Other words pass even that early: the first command word starts
+  before the wake fire in most field takes. The window still runs the full
+  2.5 s either way.
 
 ## Regenerating headers
 

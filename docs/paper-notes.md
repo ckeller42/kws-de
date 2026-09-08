@@ -3850,6 +3850,55 @@ would tell whether +0.04 aggregate is real or a seed-0 coincidence.
 export under `<models>/ctxmix/`, never at the canonical path; diagnostic CSVs + summaries kept in
 the session scratch, not committed. No device, no flashing, no deploy.
 
+### E44 — firmware: recogniser cadence 146 → 100 ms, wake-tail drop made class-targeted (2026-09-08, host-only, fix/recogniser-cadence)
+
+Two device-side reasons the host decoder numbers (E41–E43, all replayed at a 100 ms stride) never
+transferred to the CoreS3, both found by reading `recognise.cc` against `kws_de/eval.py`, neither
+touching the model:
+
+**1. Cadence.** The recognise task loop was `vTaskDelay(100)` *after* ~46 ms of work, so its real
+stride was ≈ 146 ms (the step trace's "front-end … over 6 new frames" at a 20 ms hop is 120–140 ms
+of audio per step; 100 ms would push 5). Every decoder constant is in steps: `KWS_MIN_CONSECUTIVE`
+2 needed ≈ 290 ms of stable top-1 on the device against 200 ms on the host, while E41's
+in-context top-1 plateau is 1–2 windows (≈ 100–200 ms) wide — so the device drops words the host
+keeps, and `KWS_SMOOTH_WIN` 3 averaged over 440 ms instead of 300. Fix: `vTaskDelayUntil` with a
+fixed `pdMS_TO_TICKS(100)` period (46 ms of work fits; a step that overruns the period, e.g. a
+fire opening `recognise.log` through FATFS, restarts the period from now rather than running
+catch-up steps back to back over the same audio, which would feed duplicate posteriors into the
+hangover). The front-end's push loop takes whatever frames arrived (no minimum; `mstate.count <
+KWS_N_FRAMES` only gates the warm-up), so 5 instead of 6–7 new frames per step changes nothing
+there. `wake.cc` has its own loop and is untouched. The `KWS_DUTY` line in continuous recognise
+mode should now read ≈ 460 ms of inference per wall second (≈ 315 before, same 46 ms step at the
+longer stride) — the paper's duty figure for the always-on baseline moves accordingly; assist
+mode's per-window cost is unchanged (window length is wall time).
+
+**2. Wake-tail drop.** `ASSIST_WAKE_TAIL_MS` 450 (#64) dropped *every* command fire in the first
+450 ms of the window because the "...Bus" tail read as `aus`. Measured before changing: from the
+QC outputs of all sessions (`words.csv` Whisper spans of the first vocabulary word per approved
+field take; the fire's position in the take = `ms − window_ms` of `sessions.csv`, i.e. the
+pre-roll; "Bus" end = the wake clip's length − `WAKE_TAIL_S`, paired via `written.txt`):
+
+| gap | n | median | p25 | p75 | min | max | share < 450 ms | share < 300 ms |
+|---|---|---|---|---|---|---|---|---|
+| wake fire → first command word onset (field) | 33 | **−300 ms** | −400 | +440 | −1169 | +2780 | 25/33 (0.76) | 22/33 (0.67) |
+| "Bus" end → first command word onset (field) | 24 | 200 ms | 160 | 245 | 80 | 2640 | 19/24 | 19/24 |
+
+The first command word starts a median 300 ms *before* the wake fire lands (the wake detector
+fires ≈ 500 ms after "Bus" ends on these takes, not the 140 ms the #64 comment assumed; speakers
+leave 160–245 ms between "Bus" and the command). With the classifier's peak at word centre +
+0.5 s (E41), a first word that starts at −300 ms peaks at ≈ +300 ms and fires at +400–450 ms — inside
+the tail, and earlier still at the fixed 100 ms cadence. The blanket drop therefore discards the
+first word of ~3 in 4 field interactions on the device (the host replays of E41–E43 have no such
+drop, so their first-word figures are unaffected). Shortening the tail to the p25
+gap is meaningless (p25 is negative) and starting the stream ring at the fire would cut the first
+word's onset out of the window entirely. Chosen rule, the smallest that still blocks the ghost:
+inside the tail, drop only fires whose label is `aus` (12 of 17 first words in the #64 takes) or
+`_unknown_` (would otherwise become an `intent_rescore` slot); no valid intent starts with either
+(`intent.c`: device word first). `assist_gate_in_wake_tail(ms, label)`, host test extended.
+
+**Device: pending** (flash + a field session at the new cadence; expect the first-word fired
+share and the field agreement to move, and the `KWS_DUTY` recognise-mode line to read ≈ 460).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
