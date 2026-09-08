@@ -4212,6 +4212,109 @@ shrinks from 401 mixed clips to 51 guided ones on the real tree) rather than a m
 correct for what "isolated" claims to measure, but the sample size drop and whether `context/`
 should get its own eval bucket is the coordinator's call, not made here.
 
+### E49 — first clean retrain after the cutter+bucket fixes: does `approved/context/` actually help? (2026-09-08, host-only, exp/run7-clean-retrain)
+
+E45/E47 fixed the word cutter (compound-splitting, onset/valley snap, wake-floor); E48 then split
+`approved/words/` into guided-only (structurally clean isolated words) vs. `approved/context/`
+(word clips cut from real sentence/field/elicit takes — the majority of the tree, 605 of 656 real
+word clips at E48's writeup). `data/manifest_v3_qat.json` and `data/features_v3_*.npz` predate all
+three fixes, so this is the first retrain to actually exercise the corrected data. Backed up
+`data/features_v3_{train,val,test}.npz`, `manifest_v3.json`, `manifest_v3_qat.json`,
+`raw_clips_v3.pkl` as `*.pre-run7`; this build is the new baseline, backups are not restored.
+
+**Residual gap confirmed and fixed.** E48 flagged that `kws_de.dataset.force_rec_to_train` and
+`kws_de.manifest.build_manifest` still only match the `rec:` (guided) speaker prefix, not `ctx:`
+(context, added when `merge_recordings` itself was fixed in the same PR). Context clips were
+never excluded from training or from real-weighting (`is_tts` only checks the `tts:` prefix, so a
+`ctx:` clip is `~is_tts` exactly like a `rec:` one) — the actual gap is narrower: `--recordings-
+split train`'s promise that "every device speaker's clips go to train" only held for `rec:`
+speakers. A `ctx:` speaker's clips could land in val/test via the ordinary speaker-disjoint draw
+and stay there, unlike a `rec:` speaker who is always forced into train. Confirmed by an A/B
+rebuild on the identical approved tree: **without** the fix, `force_rec_to_train` moves 109 clips
+and `val` ends up with 12,040 rows; **with** the fix it moves 145 and `val` drops to 11,788 — a
+252-row difference, i.e. 252 real context rows that used to sit in val/test now correctly train
+like guided recordings do. Fix (`kws_de/dataset.py`, `kws_de/manifest.py`, ~16+11 lines incl.
+docstrings): both `startswith("rec:")` checks extended to `startswith(("rec:", "ctx:"))`. New test
+`test_force_rec_to_train_moves_ctx_clips_too` (`tests/test_data_v3_provenance.py`).
+
+**Rebuild** (`kws-dataset build --cache raw_clips_v3.pkl --prefix features_v3 --seed 0`, ~50 s):
+`[recordings] merged: {..., '_unknown_': 190}` — 679 real word clips across labels (51 guided +
+~628 context, the E48 count of 605 plus a handful from a session ingested since its writeup) + 190
+negative windows. `[recordings] moved 145 device clips into train]`. `[dataset] built seed=0:
+train=44078, val=11788, test=4206` (pre-run7 stale build: train=39682, val=6433, test=11315 — not
+a clean comparison, that build predates the cutter/bucket fixes). `manifest_v3.json`: train
+recording=869 (was 505 pre-run7), val/test recording=0 (context clips no longer stranded), 7
+distinct device speakers now in train.
+
+**Scoreboard** (`scripts/compare_command_models.py`, deployed `86b7105e` vs `run7_s0` `ff9915d9`,
+current approved tree, default stale `manifest_v3_qat.json` — i.e. it labels held-out/in-training
+per the *deployed* model's own provenance, not run7's; **not apples-to-apples** for that reason).
+E48 emptied `approved/words/` for spk10 and spk18 entirely (100% of their word clips are
+context-origin), so the historical 4-speaker isolated-word aggregate (spk01/spk02/spk10/spk18,
+n=233) can no longer be computed — `scripts/recipe-grid.py`'s hardcoded `SPEAKERS = ("spk01",
+"spk02", "spk10", "spk18")` and its `passes()` (`float(row["spk18_words"]) > 0.333`) are stale in
+the same way, unfixed here (out of scope: bigger than "a few lines", the coordinator's call same
+as E48 left it). The closest clean like-for-like figure is the current guided-only isolated-word
+set, n=74 (spk01 13 + spk02 38, matching E48's 51, plus 23 new spk22 guided clips from a session
+ingested after E48's writeup):
+
+| | deployed `86b7105e` | run7_s0 `ff9915d9` |
+|---|---|---|
+| own-era INT8 test acc | 0.7188 (n=11,315) | 0.5328 (n=4,206) — sizes not comparable, the fix moved real rows train-ward |
+| spk01 words (n=13, in-training) | 1.000 | 0.846 |
+| spk02 words (n=38, in-training) | 1.000 | 0.974 |
+| spk22 words (n=23, held-out) | 0.696 | 0.696 |
+| **aggregate guided-only words (n=74)** | **0.905** | **0.865** |
+| false accepts (all speakers, n=85) | 0/85 | 0/85 |
+| e2e phrase exact-intent (247 clips) | 0.077 (19/247) | **0.130 (32/247)** |
+
+Guided-only word accuracy for run7_s0 is a hair *below* deployed (spk01/spk02 both regress
+slightly), but real-sentence exact-intent is up 69% relative — consistent with the working
+hypothesis that context-origin training rows trade a little clean-isolated-word margin for a
+better match to how the words are actually spoken.
+
+**Sentence diag** (scratch `sentence_diag.py`, 247 approved phrase clips, deployed vs run7_s0) —
+the direct test of whether the corrected clips help the words E41/E45 flagged as broken:
+
+| | deployed | run7_s0 |
+|---|---|---|
+| Küche fired(decoder)/expected | 1/37 (3%) | **33/37 (89%)** |
+| Küche ever top-1 | 1/37 | **33/37** |
+| Dach fired(decoder)/expected | 0/34 (0%) | **26/34 (76%)** |
+| Dach ever top-1 | 3/34 (9%) | **33/34 (97%)** |
+| zone=Küche/Dach exact / oracle(raw t=0.3) | 1/71 (0.01) / 2/71 (0.03) | 3/71 (0.04) / **20/71 (0.28)** |
+| nwords=2 exact / oracle | 16/111 (0.14) / 55/111 (0.50) | 27/111 (0.24) / 67/111 (0.60) |
+| nwords=3 exact / oracle | 3/136 (0.02) / 18/136 (0.13) | 5/136 (0.04) / 34/136 (0.25) |
+| argmax-only oracle (all 247) | 66/247 (0.27) | 88/247 (0.36) |
+
+Küche and Dach essentially never fired in context for the deployed model (E41's original finding)
+and now fire the great majority of the time — the clearest, largest effect in this entry, and
+exactly the outcome E45/E47/E48 aimed at. Overall exact-intent and oracle ceiling both improve too
+(oracle ceiling nearly doubles for the Küche/Dach zone), but stay well below 1.0 for reasons E42/E43
+already established (device threshold/timing, not a data problem) and are unaffected by this run.
+
+**Deploy decision: NOT deployed.** Against the standing rule (aggregate >= 0.785, 0 false accepts,
+spk18 > 0.333): the first two clear the bar (0.865 aggregate, 0/85 FA). The third is **not
+measurable** — spk18 has zero guided-only word clips left after E48's bucket split, so "spk18 word
+accuracy" is undefined on the current tree, not merely low. Separately, on the one like-for-like
+metric that *is* computable (guided-only isolated-word aggregate, same approved tree, both
+models), run7_s0 is worse than deployed (0.865 vs 0.905) — it does not clearly beat the current
+model on that axis, even though it clearly beats it on the axis this whole experiment was run to
+test (sentence-level exact-intent, Küche/Dach in-context recognition). Given one rule component is
+unmeasurable and the directly-comparable word-accuracy metric regresses, this does not meet the
+"clearly beats the current model" bar the standing policy requires for an unattended deploy.
+Canonical `command_v3_w48_qat.*` and `firmware/main/gen/` are untouched (hash-verified: canonical
+`.tflite` sha256 `86b7105e...` unchanged); run7_s0's export lives only under
+`$KWS_DATA_ROOT/models/run7-s0/`. This is a coordinator call: redefine what "beats deployed" means
+now that spk18/spk10 have no guided data (e.g. switch the gate to sentence-level exact-intent,
+which run7_s0 clearly wins), or gather guided single-word takes for spk10/spk18 so the old-style
+aggregate is measurable again.
+
+**Not done here:** no firmware export/codegen/parity/Docker verification (deploy-only steps, moot
+since nothing is deployed); no fix to `scripts/recipe-grid.py`'s hardcoded speaker list or
+`passes()` (same E48-caused staleness, bigger than a few lines); no change to which figure the
+standing deploy rule uses (flagged above, not decided here).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

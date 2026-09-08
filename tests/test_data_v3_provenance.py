@@ -131,6 +131,20 @@ def test_force_rec_to_train_moves_device_clips_out_of_val_and_test():
     assert test["Licht"] == []
 
 
+def test_force_rec_to_train_moves_ctx_clips_too():
+    """E48 context clips (ctx:) are cut from the same device speakers' takes as
+    rec: clips and must get the same forced-into-train treatment (the residual
+    gap this run's dataset rebuild closes)."""
+    from kws_de.dataset import force_rec_to_train
+
+    c = np.zeros(config.CLIP_SAMPLES, np.float32)
+    train = {"Licht": [(c, "mswc:a")]}
+    val = {"Licht": [(c, "ctx:spk10"), (c, "mswc:b")]}
+    assert force_rec_to_train(train, val) == 1
+    assert [s for _, s in train["Licht"]] == ["mswc:a", "ctx:spk10"]
+    assert [s for _, s in val["Licht"]] == ["mswc:b"]
+
+
 def test_build_merges_recordings_and_trains_on_device_speakers(tmp_path, monkeypatch):
     """End to end over `dataset.build`: cache with no rec: clips + an approved tree ->
     the manifest's TRAIN split carries the device speaker and counts it as a recording."""

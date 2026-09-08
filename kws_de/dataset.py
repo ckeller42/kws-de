@@ -55,19 +55,21 @@ def load_split(name: str, prefix: str = "features"):
 
 
 def force_rec_to_train(train: dict, *others: dict) -> int:
-    """Move every device-recording (`rec:`) clip out of `others` into `train`.
+    """Move every device-recording (`rec:`/`ctx:`) clip out of `others` into `train`.
 
     The product is a personalised device: a speaker records their own voice so
     the model learns it, so by default their clips belong in the training split
     (`kws-dataset build --recordings-split train`). With only one or two device
     speakers the global speaker-disjoint draw can otherwise put all of them in
-    val/test, training on none of them. `--recordings-split auto` skips this and
-    leaves them to the draw. Returns the number of clips moved."""
+    val/test, training on none of them. Context clips (`ctx:`, E48) are cut from
+    the same device speakers' takes and get the same treatment. `--recordings-
+    split auto` skips this and leaves them to the draw. Returns the number of
+    clips moved."""
     moved = 0
     for other in others:
         for label, items in other.items():
-            keep = [(c, s) for c, s in items if not s.startswith("rec:")]
-            rec = [(c, s) for c, s in items if s.startswith("rec:")]
+            keep = [(c, s) for c, s in items if not s.startswith(("rec:", "ctx:"))]
+            rec = [(c, s) for c, s in items if s.startswith(("rec:", "ctx:"))]
             if rec:
                 train.setdefault(label, []).extend(rec)
                 other[label] = keep
@@ -186,8 +188,8 @@ def main() -> None:  # pragma: no cover - CLI wrapper
         choices=["train", "auto"],
         default="train",
         help="where QC-approved device recordings go: 'train' (default) forces every "
-        "rec: speaker into the train split (personalised, in-training model); 'auto' "
-        "leaves them to the global speaker-disjoint draw",
+        "rec:/ctx: speaker into the train split (personalised, in-training model); "
+        "'auto' leaves them to the global speaker-disjoint draw",
     )
     args = ap.parse_args()
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
