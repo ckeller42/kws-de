@@ -5,6 +5,7 @@ import numpy as np
 from kws_de import config, tts
 from kws_de.data import (
     _origin_flags,
+    _random_shift,
     _tts_combo_plan,
     build_dataset,
     passing_voices,
@@ -16,6 +17,22 @@ from kws_de.data import (
 
 def _clip(rng):
     return rng.standard_normal(config.CLIP_SAMPLES).astype(np.float32)
+
+
+def test_random_shift_500_keeps_length_and_stays_within_bounds():
+    rng = np.random.default_rng(0)
+    clip = np.zeros(config.CLIP_SAMPLES, np.float32)
+    mid = config.CLIP_SAMPLES // 2
+    clip[mid] = 1.0  # a single spike so the shift is observable
+    max_shift = config.SAMPLE_RATE // 2  # 500 ms
+    seen = set()
+    for _ in range(50):
+        out = _random_shift(clip, rng, max_shift_ms=500)
+        assert out.shape == (config.CLIP_SAMPLES,)
+        shift = int(np.argmax(out)) - mid
+        assert abs(shift) <= max_shift
+        seen.add(shift)
+    assert max(abs(s) for s in seen) > config.SAMPLE_RATE // 5  # beyond the 200 ms default
 
 
 def test_build_dataset_shapes_and_labels():
