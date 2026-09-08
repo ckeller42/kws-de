@@ -17,6 +17,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 /** How long the recogniser stays enabled after a wake fire, in ms. */
 #define ASSIST_WINDOW_MS 2500
@@ -32,9 +33,14 @@
  *  the full ASSIST_WINDOW_MS.
  *  450, not 300: on the CoreS3 the artefact's own fire (the recogniser's
  *  fixed ~150-400 ms scheduling-plus-inference latency on window entry, not
- *  phrase content) lands at 374-386 ms, so 300 ms let it through; real
- *  commands in the same replay fired no earlier than 531 ms, so 450 clears
- *  the artefact with margin on both sides. */
+ *  phrase content) lands at 374-386 ms, so 300 ms let it through.
+ *  The drop is class-targeted, not blanket: Whisper spans over the field
+ *  takes put the first command word's onset at a median 300 ms BEFORE the
+ *  wake fire (25 of 33 takes start < 450 ms after it), so a real first word
+ *  fires inside the tail too and a blanket drop discards it. Only the
+ *  artefact's own classes are dropped there: `aus` (12 of 17 first words in
+ *  the #64 takes) and `_unknown_` (would become a rescore slot). No valid
+ *  intent starts with either (intent.c: device word first). */
 #define ASSIST_WAKE_TAIL_MS 450
 
 #ifdef __cplusplus
@@ -44,12 +50,15 @@ extern "C" {
 /**
  * @brief Should a command fire this soon after the window opened be dropped (#64)?
  * @param ms_since_open Milliseconds between the window opening and the fire.
- * @return true while still inside the wake-word tail (drop it); host-tested
- *         directly since recognise.cc's own loop needs real hardware.
+ * @param label The fired label.
+ * @return true for an `aus`/`_unknown_` fire still inside the wake-word tail
+ *         (drop it); host-tested directly since recognise.cc's own loop needs
+ *         real hardware.
  */
-static inline bool assist_gate_in_wake_tail(int64_t ms_since_open)
+static inline bool assist_gate_in_wake_tail(int64_t ms_since_open, const char *label)
 {
-    return ms_since_open < ASSIST_WAKE_TAIL_MS;
+    return ms_since_open < ASSIST_WAKE_TAIL_MS &&
+           (strcmp(label, "aus") == 0 || strcmp(label, "_unknown_") == 0);
 }
 
 /** @brief Gate state. Zero-initialise; `open_until_ms` is only meaningful while `open`. */
