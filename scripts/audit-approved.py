@@ -6,24 +6,31 @@ a whole. This does, and it is the check that would have caught #58 before a wake
 round trained on the result:
 
 * every clip readable, 16 kHz mono PCM_16, and inside its set's duration band
-  (wake 0.4-2.6 s, words ~1 s, phrases 0.5-9.8 s, negatives up to 9.8 s);
+  (wake 0.4-2.6 s, words/context ~1 s, phrases 0.5-9.8 s, negatives up to 9.8 s);
 * no phrase or negative that still contains the wake phrase — the field-derived
   ones are transcribed and matched against `qc._WAKE_RE`. Guided clips were
   already matched against their prompt at QC time, so they are not re-transcribed;
-* `index.csv` rows and files one-to-one, in both directions;
-* speaker directories named `spkNN`;
-* counts per set, per speaker and per source (guided session vs field session);
-* (report-only, E47) every word clip re-transcribed and flagged when Whisper
-  hears >= 2 vocabulary words in it, or the label word's own span isn't within
-  +/-150 ms of the clip's centre — a cutter regression that clips readable by
-  the other checks above would still miss.
+* `index.csv` rows and files one-to-one, in both directions (words/context are
+  the label directory itself, so there is no index.csv for either);
+* speaker directories named `spkNN` (words/context are label directories instead);
+* counts per set, per speaker and per source (guided session vs field session) -
+  `approved/words/` and `approved/context/` (E48) are reported as separate sets
+  throughout, never combined;
+* (report-only, E47/E48) every word clip (both trees) re-transcribed and
+  flagged when Whisper hears >= 2 vocabulary words in it, or the label word's
+  own span isn't within +/-150 ms of the clip's centre — a cutter regression
+  that clips readable by the other checks above would still miss, split guided
+  vs context since context clips are expected to flag more often (E47's "not
+  fixable by cutting" — a fast, compact sentence puts a real neighbour word in
+  the fixed 1 s window regardless of centring).
 
 A clip's source is its QC stamp: a session whose `qc.csv` holds any `set=field`
 row is a field session, and every path in that stamp's `written.txt` is
-field-derived. Clips written before stamps were kept report as `unknown`. A
-word clip's finer source (guided/sentences/field/elicit) comes from the same
-stamp's `words.csv`, which records the take each segmented word clip was cut
-from; a word with no `words.csv` row is a bare guided take ("guided").
+field-derived. Clips written before stamps were kept report as `unknown`.
+`approved/words/<label>/` holds only guided single-word takes (E48: `kws_de.qc`
+writes a word clip there only when the take's own `set` was `words`); every
+other word clip - cut out of a guided sentence, or a field/elicit take - is
+context and lives in `approved/context/<label>/` instead.
 
 Usage:
   uv run --no-sync python scripts/audit-approved.py [--no-transcribe] [<approved>]
@@ -45,11 +52,19 @@ import soundfile as sf
 from kws_de import config
 from kws_de.qc import _WAKE_RE, normalise, vocab
 
-SETS = ("words", "phrases", "negatives", "wake")
-# (min, max) seconds. words: segmented clips are exactly config.CLIP_SAMPLES,
-# bare word takes are raw ~1 s recordings, so the band is around 1 s rather than at it.
+SETS = ("words", "context", "phrases", "negatives", "wake")
+# words/context are the two word-clip buckets (E48): "words" is a guided
+# single-word take, "context" is a word cut out of a sentence/field/elicit
+# take (kws_de.qc.run_qc) - same clip shape (segment_word's CLIP_SAMPLES
+# window, or a raw guided take), so they share a duration band and every
+# other per-clip check below; they are only ever reported/counted separately.
+WORD_SETS = ("words", "context")
+# (min, max) seconds. words/context: segmented clips are exactly
+# config.CLIP_SAMPLES, bare guided word takes are raw ~1 s recordings, so the
+# band is around 1 s rather than at it.
 DURATION_S = {
     "words": (0.5, 2.0),
+    "context": (0.5, 2.0),
     "wake": (0.4, 2.6),  # a field-cut clip carries the 2.5 s pre-roll budget in front of the phrase
     "phrases": (0.5, 9.8),
     "negatives": (0.3, 9.8),
@@ -79,37 +94,6 @@ def transcriber_or_none(enabled: bool):
     from kws_de.qc import whisper_transcriber
 
     return whisper_transcriber()
-
-
-def word_kind(src: str) -> str:
-    if "/_phrase_/" in src:
-        return "sentences"
-    if "/_elicit_/" in src:
-        return "elicit"
-    if "/field/" in src:
-        return "field"
-    return "guided"
-
-
-def word_sources(recordings: Path, approved: Path) -> dict[str, str]:
-    """approved-relative word clip path -> "sentences"/"elicit"/"field"/"guided",
-    from every stamp's `words.csv` (each row's `src` take path decides the kind,
-    mirroring `kws_de.qc.run_qc`'s directory conventions). A word clip with no
-    row here is a bare guided take ("guided")."""
-    out: dict[str, str] = {}
-    qc_dir = recordings / "qc"
-    for stamp in sorted(d for d in qc_dir.iterdir() if d.is_dir()) if qc_dir.is_dir() else []:
-        wcsv = stamp / "words.csv"
-        if not wcsv.exists():
-            continue
-        with wcsv.open() as fh:
-            for r in csv.DictReader(fh):
-                try:
-                    rel = str(Path(r["out_file"]).relative_to(approved))
-                except ValueError:
-                    continue  # written under a different approved tree; not this run's
-                out[rel] = word_kind(r["src"])
-    return out
 
 
 WORD_CENTRE_TOL_MS = 150
@@ -143,11 +127,10 @@ def main() -> int:
 
     problems: list[str] = []
     src = sources(recordings)
-    word_src = word_sources(recordings, approved)
     per_set: dict[str, collections.Counter] = {s: collections.Counter() for s in SETS}
     per_source: collections.Counter = collections.Counter()
     field_speech: list[Path] = []  # field-derived phrases/negatives, to transcribe
-    word_clips: list[tuple[Path, str, str]] = []  # (wav, label, kind), to content-check
+    word_clips: list[tuple[Path, str, str]] = []  # (wav, label, bucket="words"/"context")
 
     for name in SETS:
         root = approved / name
@@ -155,8 +138,8 @@ def main() -> int:
             continue
         for wav in sorted(root.rglob("*.wav")):
             rel = str(wav.relative_to(approved))
-            group = wav.parent.name  # spkNN for phrases/negatives/wake, a label for words
-            if name != "words" and not SPEAKER_RE.match(group):
+            group = wav.parent.name  # spkNN for phrases/negatives/wake, a label for words/context
+            if name not in WORD_SETS and not SPEAKER_RE.match(group):
                 problems.append(f"{rel}: speaker dir {group!r} is not spkNN")
             try:
                 info = sf.info(wav)
@@ -177,11 +160,11 @@ def main() -> int:
             per_source[(name, kind)] += 1
             if name in ("phrases", "negatives") and kind == "field":
                 field_speech.append(wav)
-            if name == "words":
-                word_clips.append((wav, group, word_src.get(rel, "guided")))
+            if name in WORD_SETS:
+                word_clips.append((wav, group, name))
 
         idx = root / "index.csv"
-        if name == "words":
+        if name in WORD_SETS:
             continue  # the label directory is the index; there is no index.csv
         listed = set()
         if idx.exists():
@@ -237,14 +220,17 @@ def main() -> int:
         print(f"{name:10} {kind:8} {n:4}")
 
     print(
-        "\n## Word content check (report-only, E47 — never affects the exit code: "
+        "\n## Word content check (report-only, E47/E48 — never affects the exit code: "
         ">=2 vocabulary words heard, or the label word not within "
-        f"+/-{WORD_CENTRE_TOL_MS} ms of the clip's centre)\n"
+        f"+/-{WORD_CENTRE_TOL_MS} ms of the clip's centre; guided = approved/words/ "
+        "(a dedicated single-word take), context = approved/context/ (cut from a "
+        "sentence/field/elicit take))\n"
     )
-    for kind in ("guided", "sentences", "field", "elicit"):
-        n = word_totals.get(kind, 0)
+    for name in WORD_SETS:
+        n = word_totals.get(name, 0)
         if n:
-            print(f"{kind:10} {word_flags.get(kind, 0):4} / {n:4} flagged")
+            label = "guided" if name == "words" else name
+            print(f"{label:10} {word_flags.get(name, 0):4} / {n:4} flagged")
 
     print(f"\n{len(problems)} problems\n")
     for p in problems:

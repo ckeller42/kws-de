@@ -4101,6 +4101,117 @@ the cut is finally where it should be.
 rebuild, no retrain — a scratch-dir dry run only, per this task's scope; the coordinator
 schedules the tree re-cut after a policy decision on the 3-clip wake-phrase residual above.
 
+### E48 — split `approved/words/` into guided vs. context buckets (2026-09-08, host-only, feat/context-word-bucket)
+
+E47's own audit numbers already said this: a "correctly centred" 1 s word window from a
+sentence/field/elicit take hears a second vocabulary word 92-93 % of the time (up from 81 % on
+the old cutter) — not a cutter defect, the training data's real content. 80-93 % of every
+`approved/words/<label>/` clip that came from a sentence/field/elicit take (as opposed to a
+dedicated single-word take) carries 2-3 vocabulary words in its 1 s window regardless of how
+precisely it is centred. Only guided single-word takes are structurally clean isolated words, and
+they are a small minority: 51 of 401 word clips in the tree before this change. Training treated
+all 401 as equivalent "word" examples with no way to tell them apart.
+
+**Fix.** Two buckets instead of one, split by the take's own origin (`kws_de.qc.run_qc` always
+knew this — it is which of the two branches wrote the clip, not a new classifier):
+
+- `approved/words/<label>/` — guided single-word takes only (`Take.set == "words"`). Zero
+  behaviour change for this path: same directory, same filename scheme, same `_next_no`
+  numbering, same bookkeeping.
+- `approved/context/<label>/` (new) — every word clip `run_qc`'s "sentences" branch cuts out of
+  a guided sentence *or* a field/elicit take. This branch is, by construction, the only writer of
+  `words.csv` rows, so "has a `words.csv` row" and "is context-origin" were always the same fact;
+  the fix is a one-line destination change (`approved / "context" / lab` instead of
+  `approved / "words" / lab`) plus splitting the `words_written` counter into
+  `words_guided_written` / `words_context_written` for the QC report.
+- `kws_de/recordings.py`'s `load_recordings` takes a `prefix` (default `rec:`); `kws_de.data.
+  merge_recordings` now folds BOTH trees into the training clip dict, tagging context clips
+  `ctx:<speaker>` instead of `rec:<speaker>` — inspectable and filterable (e.g. `s.startswith
+  ("ctx:")`) without a schema change, while `is_tts`/`--real-weight` are untouched (a context clip
+  is `~is_tts`, exactly like a guided one, so today's training treats the two buckets identically
+  until a future change opts in to weighting them apart).
+- `scripts/audit-approved.py` reports `words` and `context` as two entries of its `SETS` tuple
+  throughout (per-label counts, per-source counts, the word-content check) instead of one
+  combined `words` count; the now-redundant `word_kind`/`word_sources` helpers (guided vs.
+  sentences/field/elicit, inferred from `words.csv`'s `src` path) are deleted — which tree a clip
+  physically lives in already says guided vs. context.
+
+**Migration** (`scripts/migrate-context-words.py`, one-time, run once against the real
+`$KWS_DATA_ROOT`): every `words.csv` row across all 8 QC stamps names a clip that is context-origin
+by the same construction argument above, so the script does not re-cut anything — it moves each
+row's `out_file` from `words/<label>/` to `context/<label>/` (located by its "approved/…" path
+suffix, not the historical absolute prefix, so it also works against a scratch copy) and rewrites
+that row's `out_file` plus the matching line of the stamp's `written.txt`. Dry-run rehearsed first
+against a scratch copy of the real tree, then run for real:
+
+| | moved | words/ before -> after | context/ before -> after |
+|---|---|---|---|
+| all labels | 350 | 401 -> 51 | 0 -> 350 |
+
+Per label (guided remaining / context moved): Licht 4/116, an 2/29, aus 1/22, Küche 0/20,
+Kühlschrank 7/10, Dach 0/19, Außen 5/17, heller 0/17, dunkler 4/14, Lesen 1/16, hundert 5/12,
+fünfzig 4/12, fünfundzwanzig 2/13, fünfundsiebzig 4/9, Heizung 3/9, Aufstelldach 2/4, kälter 2/3,
+zu 2/2, leise 2/2, auf 1/2, wärmer 0/2. Guided-only labels sum to 51 (matches the pre-change
+count exactly); `approved/`'s total `.wav` count (634, all sets) is identical before and after,
+and every moved file's sha256 was re-checked post-move against its pre-move hash — 0 mismatches.
+Nothing was deleted; four labels (Dach, heller, Küche, wärmer) end up with an empty
+`approved/words/` directory because every clip filed for them so far happened to be context-origin
+(no dedicated single-word take of them has been recorded yet).
+
+**New session, exercising the new cutter and the new bucket split together**
+(`incoming/2026-09-08-1143`, 149 takes: spk22 98 sentences + 40 negatives, spk21 5 wake + 5
+field, spk20 1 field): 138 approved, 11 rejected (2 `hey-bus` too_long, 3 `hey-bus` wrong_word —
+spk21's guided wake takes came out badly on this session; 5 field takes too_quiet; 1 sentence
+take a mishearing: "Lichter heller" for "Licht Dach heller"). 255 context word clips written (0
+guided — this session has no bare single-word takes), 2 words skipped (one segmentation gap,
+`aufstelldach-zu`, both takes). 1 of 6 field takes approved (parsable: 0; 1 false alarm at both
+gates — the field speaker's utterance did not carry a recognisable command). Re-transcribing all
+255 new context clips (`word_content_flags`, the same >=2-vocabulary-words check the whole-tree
+audit runs): 198/255 = 77.6 % multi-word content — lower than E47's 5-stamp dry-run figure
+(92-93 %) but still the clear majority, consistent with E47's "not fixable by cutting" finding:
+these are read *sentences* (`Licht Dach heller`, `Aufstelldach zu`, ...), and a fast three-word
+command routinely puts a second real word inside the label's fixed 1 s window no matter how the
+cutter centres it.
+
+**Whole-tree audit after the new session** (`scripts/audit-approved.py`, full run, no
+`--no-transcribe`, 28.5 min: 656 word clips + 190 field-derived phrase/negative clips
+re-transcribed): 0 format/duration/index/speaker-dir problems, 0 wake-phrase leaks into
+phrases/negatives. Per set/source (guided session vs. field session):
+
+| set | total | guided | field |
+|---|---|---|---|
+| words | 51 | 51 | - |
+| context | 605 | 270 | 335 |
+| phrases | 236 | 101 | 135 |
+| negatives | 84 | 29 | 55 |
+| wake | 51 | 10 | 41 |
+
+`words` 51 (unchanged by this session — it has no bare single-word takes); `context` 605 (350
+migrated + 255 new). Word-content check, split by bucket: **guided 47/51 flagged (92 %)**,
+**context 577/605 flagged (95 %)**. The guided number is a surprise worth naming rather than
+burying: it is NOT evidence the 51 guided clips are bad data, and NOT something this change
+caused (the guided write path is an unmodified byte-copy of the raw take, exactly as before this
+PR — only the destination directory changed for the *other* branch). It is the audit's
+"offcentre" half of the check assuming a word sits within ±150 ms of a clip's own centre, which
+is true by construction for a `segment_word`-cut context clip but never was for a guided clip —
+that is a **raw, uncut device take** (0.5-2.0 s per `DURATION_S`, not a centred 1 s window), so
+the label word lands wherever the speaker happened to say it. This is a pre-existing property of
+the check (the old, pre-E48 code already bucketed "guided" separately and would have shown the
+same rate), not a regression from this PR; the check would need a guided-specific centring rule
+to be meaningful for that bucket, which is out of this change's scope.
+
+**Not done here:** no dataset rebuild, no retrain (`kws_de.dataset.force_rec_to_train` and
+`kws_de.manifest`'s speaker/source reporting still only recognise the `rec:` prefix, not `ctx:` —
+harmless today since neither runs, but a residual for whoever does the next rebuild: context
+clips would currently draw into the ordinary speaker-disjoint split rather than being forced to
+train like guided device recordings are). `--real-weight` semantics are unchanged; teaching it
+(or a new knob) to treat `ctx:` differently is a follow-up, not part of this change.
+`kws_de.eval.eval_recordings`'s isolated-word figure still reads only `approved/words/*/*.wav`
+unchanged, which is now automatically a purer guided-only isolated-word accuracy number (n
+shrinks from 401 mixed clips to 51 guided ones on the real tree) rather than a mix — arguably more
+correct for what "isolated" claims to measure, but the sample size drop and whether `context/`
+should get its own eval bucket is the coordinator's call, not made here.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

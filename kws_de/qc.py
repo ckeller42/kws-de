@@ -774,8 +774,8 @@ def _next_no(d: Path, prefix: str) -> str:
     already there. Independent of the source take number, so different write
     sources (bare word vs. phrase-segmented word) or different sessions
     (stamps) for the same speaker/slug/label can never collide on one path.
-    Used for approved/words/<label>/<speaker>_<NNN>.wav (prefix=speaker) and
-    approved/{phrases,negatives}/<speaker>/<slug>_<NNN>.wav (prefix=slug).
+    Used for approved/{words,context}/<label>/<speaker>_<NNN>.wav (prefix=speaker)
+    and approved/{phrases,negatives}/<speaker>/<slug>_<NNN>.wav (prefix=slug).
     ponytail: rescans the dir on every call (O(files-in-dir) per write); fine
     at recording-pipeline volumes — cache per (d, prefix) within a run if this
     shows up in profiling."""
@@ -816,7 +816,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
 
     takes = read_sessions(incoming)
     rows, words_rows, written, gap_files = [], [], [], []
-    n_words = n_skipped = n_wake = 0
+    n_words_guided = n_words_context = n_skipped = n_wake = 0
     # "field takes" is EVERY field row in the session, approved or not; approved
     # is reported next to it, never instead of it. kws_de.eval.field_figures
     # counts the same way off qc.csv, so the two reports agree on one session.
@@ -1023,7 +1023,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(t.file.read_bytes())
             written.append(str(dst.relative_to(approved)))
-            n_words += 1
+            n_words_guided += 1
         elif t.set == "sentences":
             slug = _slug_of(t.file)
             d = approved / "phrases" / t.speaker
@@ -1054,7 +1054,12 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 if lab is None:  # unmapped token: skip this clip, don't mislabel
                     n_skipped += 1
                     continue
-                wd = approved / "words" / lab
+                # E48: cut from a sentence/field/elicit take, so another vocabulary
+                # word usually sits right next to this one in the 1 s window
+                # (docs/paper-notes.md E47/E48) - context-origin, not an isolated
+                # word. Filed separately from guided/ so training and audit can
+                # tell the two apart.
+                wd = approved / "context" / lab
                 out = wd / f"{t.speaker}_{_next_no(wd, t.speaker)}.wav"
                 out.parent.mkdir(parents=True, exist_ok=True)
                 sf.write(out, segment_word(sig, sr, s, e, floor_s), sr, subtype="PCM_16")
@@ -1069,7 +1074,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                         "out_file": str(out),
                     }
                 )
-                n_words += 1
+                n_words_context += 1
         elif t.set == "wake":
             d = approved / "wake" / t.speaker
             dst = d / f"{t.speaker}_{_next_no(d, t.speaker)}.wav"
@@ -1151,9 +1156,10 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         elicit_section = ""
     (qc_dir / "report.md").write_text(
         f"# QC {incoming.name}\n\n{len(rows)} takes, {approved_n} approved, "
-        f"{len(rejects)} rejected, {n_words} word clips written, "
+        f"{len(rejects)} rejected, {n_words_guided} guided word clips + "
+        f"{n_words_context} context (sentence/field/elicit) word clips written, "
         f"{n_skipped} word clips skipped, {n_wake} wake clips written "
-        "(word and wake counts mix guided takes with field-derived and "
+        "(wake counts mix guided takes with field-derived and "
         "elicit-derived clips; the Field/Elicit sections below separate "
         "them).\n\n## Rejects\n\n"
         + "".join(
@@ -1170,7 +1176,9 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         "takes": len(rows),
         "approved": approved_n,
         "rejected": len(rejects),
-        "words_written": n_words,
+        "words_written": n_words_guided + n_words_context,
+        "words_guided_written": n_words_guided,
+        "words_context_written": n_words_context,
         "words_skipped": n_skipped,
         "wake_written": n_wake,
         "field_takes": n_field,  # every field row, approved or not

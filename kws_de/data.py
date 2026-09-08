@@ -29,28 +29,36 @@ def merge_recordings(clips_ws: dict, root: Path | None = None) -> dict[str, int]
     build, not just the one that created the cache. QC output changes between
     builds (a new session is ingested and approved); the cached MSWC/TTS clips do
     not, so the recordings are re-read here instead of being baked into the
-    pickle. Previous ``rec:`` entries are dropped first, so a re-build replaces
-    them rather than duplicating them.
+    pickle. Previous ``rec:``/``ctx:`` entries are dropped first, so a re-build
+    replaces them rather than duplicating them.
 
-    `root` is the recordings directory (default ``config.DATA_DIR/"recordings"``);
-    approved word clips under ``approved/words/<label>/`` become clips of speaker
-    ``rec:<spk>`` for that label, approved negatives become ``_unknown_`` material
-    via `negative_windows`. No-op returning ``{}`` when the approved tree is
-    absent, which keeps v1/v2 builds byte-identical. Returns {label: n merged}."""
+    `root` is the recordings directory (default ``config.DATA_DIR/"recordings"``).
+    Two word trees are merged, kept distinguishable by speaker-id prefix so a
+    consumer can tell them apart (or filter to one) without a schema change:
+    ``approved/words/<label>/`` (guided single-word takes) becomes speaker
+    ``rec:<spk>``; ``approved/context/<label>/`` (E48: word clips cut from a
+    sentence/field/elicit take — real usage but with another vocabulary word
+    often right next to the label in the 1 s window) becomes ``ctx:<spk>``.
+    Approved negatives become ``_unknown_`` material via `negative_windows`.
+    No-op returning ``{}`` when neither tree exists, which keeps v1/v2 builds
+    byte-identical. Returns {label: n merged} (words + context combined)."""
     from kws_de.recordings import load_recordings
 
     root = Path(root) if root is not None else config.DATA_DIR / "recordings"
-    words_dir = root / "approved" / "words"
-    if not words_dir.is_dir():
+    word_trees = {"rec:": root / "approved" / "words", "ctx:": root / "approved" / "context"}
+    if not any(d.is_dir() for d in word_trees.values()):
         return {}
     for lbl, items in clips_ws.items():
-        clips_ws[lbl] = [(c, s) for c, s in items if not s.startswith("rec:")]
-    labels = sorted(d.name for d in words_dir.iterdir() if d.is_dir())
+        clips_ws[lbl] = [(c, s) for c, s in items if not s.startswith(("rec:", "ctx:"))]
     merged: dict[str, int] = {}
-    for w, items in load_recordings(words_dir, labels).items():
-        if items:
-            clips_ws.setdefault(w, []).extend(items)
-            merged[w] = len(items)
+    for prefix, d in word_trees.items():
+        if not d.is_dir():
+            continue
+        labels = sorted(x.name for x in d.iterdir() if x.is_dir())
+        for w, items in load_recordings(d, labels, prefix=prefix).items():
+            if items:
+                clips_ws.setdefault(w, []).extend(items)
+                merged[w] = merged.get(w, 0) + len(items)
     neg_root = root / "approved" / "negatives"
     if neg_root.is_dir():
         wins = negative_windows(neg_root)

@@ -26,9 +26,16 @@ def centre(sig: np.ndarray, n: int = config.CLIP_SAMPLES) -> np.ndarray:
     return np.pad(sig, (pad // 2, pad - pad // 2))
 
 
-def load_recordings(root: Path, words: list[str]) -> dict[str, list[tuple[np.ndarray, str]]]:
+def load_recordings(
+    root: Path, words: list[str], prefix: str = "rec:"
+) -> dict[str, list[tuple[np.ndarray, str]]]:
     """For each word in `words`, load `root/<word>/*` (skipped if absent),
-    trim leading/trailing silence and centre in a CLIP_SAMPLES window."""
+    trim leading/trailing silence and centre in a CLIP_SAMPLES window.
+
+    `prefix` tags the speaker id (default `rec:`, real+guided); `data.py`'s
+    `merge_recordings` passes `ctx:` for `approved/context/` (E48: word clips
+    cut from a sentence/field/elicit take, not a dedicated single-word one) so
+    the two origins stay distinguishable downstream."""
     import librosa  # pragma: no cover
 
     root = Path(root)
@@ -44,5 +51,5 @@ def load_recordings(root: Path, words: list[str]) -> dict[str, list[tuple[np.nda
             sig, _ = librosa.load(p, sr=config.SAMPLE_RATE, mono=True)  # pragma: no cover
             trimmed, _ = librosa.effects.trim(sig, top_db=30)
             speaker = p.stem.rsplit("_", 1)[0]
-            clips[w].append((centre(trimmed), f"rec:{speaker}"))
+            clips[w].append((centre(trimmed), f"{prefix}{speaker}"))
     return clips
