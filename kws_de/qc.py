@@ -258,14 +258,86 @@ def _split_glued(tok: str, v: set[str]) -> list[str]:
     return out
 
 
-def word_spans(tr: Transcript) -> list[tuple[str, float, float]]:
+# Speech-energy profile a word span is snapped to (E47): 20 ms frames every 10 ms,
+# a frame above SPEECH_DBFS is speech. Whisper's first-word start reads 0 in a
+# quarter of the sentence spans (68 % of the compound ones) although the speaker
+# starts ~280 ms in, so a clip centred on the raw span holds silence on the left
+# and the neighbour word on the right.
+# ponytail: fixed threshold (the audit's); make it take-relative if a quiet session shows up.
+SPEECH_DBFS = -35.0
+_HOP_S = 0.01
+SNAP_S = 0.2  # a span edge moves at most this far to the nearest onset/offset
+VALLEY_DB = 8.0  # prominence a dip inside a compound needs to be the boundary
+
+
+def energy_profile(sig: np.ndarray) -> np.ndarray:
+    """dBFS RMS per 10 ms hop over 20 ms frames; frame i covers [i, i+2) hops."""
+    hop = int(config.SAMPLE_RATE * _HOP_S)
+    n = max(0, (len(sig) - 2 * hop) // hop + 1)
+    idx = np.arange(n)[:, None] * hop + np.arange(2 * hop)
+    return 20 * np.log10(np.sqrt(np.mean(sig[idx] ** 2, axis=1)) + 1e-9) if n else np.zeros(0)
+
+
+def snap_words(tr: Transcript, prof: np.ndarray) -> Transcript:
+    """Move every word span's start/end to the nearest speech onset/offset within
+    SNAP_S. A start of 0 is Whisper's clamp, not a time: it goes to the first
+    onset before the span ends (the take's first sample when speech is already
+    running there). A span that still holds no speech at all is dropped — it is a
+    hallucination (a prompt echo such as "Hey Bus" over pre-roll silence), and
+    neither a word clip nor a wake clip can be cut from it."""
+    loud = prof > SPEECH_DBFS
+    on = (np.flatnonzero(loud[1:] & ~loud[:-1]) + 1) * _HOP_S
+    off = (np.flatnonzero(loud[:-1] & ~loud[1:]) + 1) * _HOP_S
+
+    def nearest(cands: np.ndarray, t: float) -> float | None:
+        near = cands[np.abs(cands - t) < SNAP_S]
+        return float(near[np.argmin(np.abs(near - t))]) if len(near) else None
+
+    out = []
+    floor = 0.0  # a later word's onset can never be an EARLIER word's own onset:
+    # two onsets can sit equidistant from Whisper's (wrong) raw start, and without
+    # this a second word can snap backwards onto the first word's own boundary.
+    for w in tr.get("words", []):
+        s, e = float(w["start"]), float(w["end"])
+        cands = on[on >= floor]
+        if s <= 0.0:
+            ahead = cands[cands < e]
+            s2 = float(ahead[0]) if len(ahead) else None
+        else:
+            s2 = nearest(cands, s)
+        s = s if s2 is None else s2
+        e2 = nearest(off[off > s], e)
+        e = e if e2 is None or e2 <= s else e2
+        floor = max(floor, e)
+        lo = int(s / _HOP_S)
+        if not np.any(loud[lo : max(int(e / _HOP_S), lo + 1)]):
+            log.info("%r %.2f-%.2f holds no speech: span dropped", w["word"], s, e)
+            continue
+        out.append({**w, "start": s, "end": e})
+    return {**tr, "words": out}
+
+
+def _valleys(prof: np.ndarray, s: float, e: float) -> list[float]:
+    """Seconds of every dip of at least VALLEY_DB prominence in the smoothed
+    profile between `s` and `e` (80 ms margins, so a span's own edges never count)."""
+    from scipy.signal import find_peaks
+
+    lo, hi = int((s + 0.08) / _HOP_S), int((e - 0.08) / _HOP_S)
+    if hi - lo < 3 or hi > len(prof):
+        return []
+    sm = np.convolve(prof[lo:hi], np.ones(3) / 3, mode="same")
+    pk, _ = find_peaks(-sm, prominence=VALLEY_DB)
+    return [(lo + p + 1) * _HOP_S for p in pk]  # frame centre
+
+
+def word_spans(tr: Transcript, prof: np.ndarray | None = None) -> list[tuple[str, float, float]]:
     """One `(normalised token, start, end)` per token in a transcript's word
     spans — THE place every word clip takes its timing from, guided sentence
     or field/elicit take alike. A welded compound ("Lichtküche", E41: 28 % of
     the read sentences carry one, and Küche/Dach had 1 and 0 real clips) is
-    split by `_split_glued`, and its single span is divided among the parts in
-    proportion to their letter counts: Whisper's timestamps are per word, not
-    per character, so the boundary inside the compound is an estimate."""
+    split by `_split_glued`; each boundary inside it is the energy valley nearest
+    the letter-proportional cut when `prof` (energy_profile) shows one, else that
+    cut itself: Whisper's timestamps are per word, not per character."""
     v = vocab()
     out: list[tuple[str, float, float]] = []
     for w in tr.get("words", []):
@@ -273,11 +345,17 @@ def word_spans(tr: Transcript) -> list[tuple[str, float, float]]:
         if not toks:
             continue
         s, e = float(w["start"]), float(w["end"])
+        valleys = _valleys(prof, s, e) if prof is not None and len(toks) > 1 else []
         per_letter = (e - s) / sum(len(t) for t in toks)
-        for t in toks:
-            cut = s + per_letter * len(t)
-            out.append((t, s, cut))
-            s = cut
+        bounds, prop = [s], s
+        for t in toks[:-1]:
+            prop += per_letter * len(t)
+            cands = [x for x in valleys if x > bounds[-1]]
+            cut = min(cands, key=lambda x: abs(x - prop)) if cands else max(prop, bounds[-1])
+            if cut in valleys:
+                valleys.remove(cut)
+            bounds.append(cut)
+        out.extend(zip(toks, bounds, bounds[1:] + [e], strict=True))
     return out
 
 
@@ -648,13 +726,17 @@ def write_qc_csv(rows: list[QcRow], path: Path) -> None:
             w.writerow(asdict(r))
 
 
-def segment_word(sig: np.ndarray, sr: int, start_s: float, end_s: float) -> np.ndarray:
-    """1 s window (config.CLIP_SAMPLES) centred on the word span, zero-padded at edges."""
+def segment_word(
+    sig: np.ndarray, sr: int, start_s: float, end_s: float, floor_s: float = 0.0
+) -> np.ndarray:
+    """1 s window (config.CLIP_SAMPLES) centred on the word span, zero-padded at
+    the edges and left of `floor_s` — a field take's command_start, so the window
+    never reaches back into "Hey Bus" (E47: 17 word clips carried the phrase)."""
     n = config.CLIP_SAMPLES
     centre = int(round((start_s + end_s) / 2 * sr))
     lo = centre - n // 2
     out = np.zeros(n, dtype=np.float32)
-    src_lo, src_hi = max(lo, 0), min(lo + n, len(sig))
+    src_lo, src_hi = max(lo, int(floor_s * sr), 0), min(lo + n, len(sig))
     if src_hi > src_lo:
         out[src_lo - lo : src_hi - lo] = sig[src_lo:src_hi]
     return out
@@ -778,6 +860,11 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             n_elicit += 1
         if row.verdict != "approve":
             continue
+        sig, sr = sf.read(t.file, dtype="float32", always_2d=True)
+        sig = sig[:, 0]
+        prof = energy_profile(sig)
+        tr = snap_words(tr, prof)
+        floor_s = 0.0  # a guided take's word windows stop at its first sample
         if t.set in ("field", "elicit"):
             if t.set == "field":
                 n_field_approved += 1
@@ -791,6 +878,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             # filing starts, so remember which branch we're in before that happens.
             is_elicit = t.set == "elicit"
             split = field_wake_split(tr)
+            floor_s = split.command_start
             # Whisper, not the device, decides whether the speaker really said
             # "Hey Bus" in this take — which is what makes the two counts below
             # meaningful. Note this is "was the phrase in the take", NOT "was a
@@ -809,11 +897,10 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             if split.wake_end is not None:
                 # the wake phrase is a real "Hey Bus" positive: file it exactly
                 # where the guided wake set goes, so it trains the wake model too
-                sig, sr = sf.read(t.file, dtype="float32", always_2d=True)
                 d = approved / "wake" / t.speaker
                 dst = d / f"{t.speaker}_{_next_no(d, t.speaker)}.wav"
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                sf.write(dst, sig[: int(split.wake_end * sr), 0], sr, subtype="PCM_16")
+                sf.write(dst, sig[: int(split.wake_end * sr)], sr, subtype="PCM_16")
                 written.append(str(dst.relative_to(approved)))
                 _append_index(
                     approved / "wake" / "index.csv",
@@ -938,8 +1025,6 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             written.append(str(dst.relative_to(approved)))
             n_words += 1
         elif t.set == "sentences":
-            sig, sr = sf.read(t.file, dtype="float32", always_2d=True)
-            sig = sig[:, 0]
             slug = _slug_of(t.file)
             d = approved / "phrases" / t.speaker
             dst = d / f"{slug}_{_next_no(d, slug)}.wav"
@@ -954,7 +1039,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 },
             )
             need = required_tokens(t.prompt, "sentences")
-            spans = word_spans(tr)
+            spans = word_spans(tr, prof)
             pos = 0
             for i, tok in enumerate(need):
                 while pos < len(spans) and not _matches(tok, spans[pos][0]):
@@ -972,7 +1057,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 wd = approved / "words" / lab
                 out = wd / f"{t.speaker}_{_next_no(wd, t.speaker)}.wav"
                 out.parent.mkdir(parents=True, exist_ok=True)
-                sf.write(out, segment_word(sig, sr, s, e), sr, subtype="PCM_16")
+                sf.write(out, segment_word(sig, sr, s, e, floor_s), sr, subtype="PCM_16")
                 written.append(str(out.relative_to(approved)))
                 words_rows.append(
                     {
@@ -1107,11 +1192,19 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
     }
 
 
-# Only the words Whisper actually mangles (the light-level numerals + the wake word) -
-# the full command vocabulary caused prompt-echo hallucination on weak/ambiguous audio
-# (Whisper regurgitating chunks of the prompt as the "transcript"), including false
-# rejects on genuinely clean negatives.
-_QC_PROMPT = ", ".join([*config.LIGHT_LEVELS, "Prozent", config.WAKE_WORD]) + "."
+# The whole command vocabulary, each word once, plus the wake word. Without the
+# vocabulary Whisper large-v3 welds "Licht Küche" into one token in EVERY read
+# sentence (E45); with it 47/47 audited takes come apart (E47). An early prompt of
+# this kind echoed itself on weak audio (false rejects on clean negatives) — the
+# guard is `snap_words`: a span with no speech energy under it is dropped, so an
+# echoed "Hey Bus" over pre-roll silence can neither become a wake clip nor move
+# command_start. Built from config so a vocabulary change cannot leave it stale.
+_VOCAB_WORDS = config.DEVICES + config.ZONES + config.ACTIONS
+_QC_PROMPT = (
+    f"{config.WAKE_WORD}. "
+    + ". ".join(" ".join(_VOCAB_WORDS[i : i + 3]) for i in range(0, len(_VOCAB_WORDS), 3))
+    + "."
+)
 _PAD_SAMPLES = config.SAMPLE_RATE // 2  # 500 ms of silence on each side
 
 
@@ -1143,6 +1236,8 @@ def whisper_transcriber(
             initial_prompt=_QC_PROMPT,
         )
         offset = _PAD_SAMPLES / config.SAMPLE_RATE
+        # A start clamped to 0 is a first word Whisper placed at the padded
+        # audio's very beginning; `snap_words` reads 0 as "unknown" and finds it.
         words = [
             {
                 "word": w["word"].strip(),

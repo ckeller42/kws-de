@@ -12,16 +12,26 @@ round trained on the result:
   already matched against their prompt at QC time, so they are not re-transcribed;
 * `index.csv` rows and files one-to-one, in both directions;
 * speaker directories named `spkNN`;
-* counts per set, per speaker and per source (guided session vs field session).
+* counts per set, per speaker and per source (guided session vs field session);
+* (report-only, E47) every word clip re-transcribed and flagged when Whisper
+  hears >= 2 vocabulary words in it, or the label word's own span isn't within
+  +/-150 ms of the clip's centre — a cutter regression that clips readable by
+  the other checks above would still miss.
 
 A clip's source is its QC stamp: a session whose `qc.csv` holds any `set=field`
 row is a field session, and every path in that stamp's `written.txt` is
-field-derived. Clips written before stamps were kept report as `unknown`.
+field-derived. Clips written before stamps were kept report as `unknown`. A
+word clip's finer source (guided/sentences/field/elicit) comes from the same
+stamp's `words.csv`, which records the take each segmented word clip was cut
+from; a word with no `words.csv` row is a bare guided take ("guided").
 
 Usage:
   uv run --no-sync python scripts/audit-approved.py [--no-transcribe] [<approved>]
 
-Exits 1 when anything failed, so it can gate a data pull.
+Exits 1 when anything failed (the checks above the word-content one); the
+word-content check is report-only and never changes the exit code — it is a
+per-clip heuristic (a short command word can legitimately sit near another
+one in a fast compound), not a hard pass/fail gate like format or duplication.
 """
 
 import collections
@@ -33,7 +43,7 @@ from pathlib import Path
 import soundfile as sf
 
 from kws_de import config
-from kws_de.qc import _WAKE_RE, normalise
+from kws_de.qc import _WAKE_RE, normalise, vocab
 
 SETS = ("words", "phrases", "negatives", "wake")
 # (min, max) seconds. words: segmented clips are exactly config.CLIP_SAMPLES,
@@ -71,6 +81,59 @@ def transcriber_or_none(enabled: bool):
     return whisper_transcriber()
 
 
+def word_kind(src: str) -> str:
+    if "/_phrase_/" in src:
+        return "sentences"
+    if "/_elicit_/" in src:
+        return "elicit"
+    if "/field/" in src:
+        return "field"
+    return "guided"
+
+
+def word_sources(recordings: Path, approved: Path) -> dict[str, str]:
+    """approved-relative word clip path -> "sentences"/"elicit"/"field"/"guided",
+    from every stamp's `words.csv` (each row's `src` take path decides the kind,
+    mirroring `kws_de.qc.run_qc`'s directory conventions). A word clip with no
+    row here is a bare guided take ("guided")."""
+    out: dict[str, str] = {}
+    qc_dir = recordings / "qc"
+    for stamp in sorted(d for d in qc_dir.iterdir() if d.is_dir()) if qc_dir.is_dir() else []:
+        wcsv = stamp / "words.csv"
+        if not wcsv.exists():
+            continue
+        with wcsv.open() as fh:
+            for r in csv.DictReader(fh):
+                try:
+                    rel = str(Path(r["out_file"]).relative_to(approved))
+                except ValueError:
+                    continue  # written under a different approved tree; not this run's
+                out[rel] = word_kind(r["src"])
+    return out
+
+
+WORD_CENTRE_TOL_MS = 150
+_V = vocab()
+
+
+def word_content_flags(wav: Path, label: str, transcriber) -> tuple[bool, bool]:
+    """(multi, offcentre) for one word clip: `multi` is Whisper hearing >= 2
+    vocabulary words in it; `offcentre` is the label word (or edit-distance
+    match) not found within WORD_CENTRE_TOL_MS of the clip's own centre — the
+    label word missing entirely counts as offcentre too."""
+    tr = transcriber(wav)
+    info = sf.info(wav)
+    centre_ms = 1000 * info.frames / info.samplerate / 2
+    flat = [(t, w) for w in tr.get("words", []) for t in normalise(w["word"])]
+    multi = sum(1 for t, _ in flat if t in _V) >= 2
+    lab = normalise(label)[0]
+    hit = next((w for t, w in flat if t == lab), None)
+    offcentre = hit is None or abs(
+        (float(hit["start"]) + float(hit["end"])) / 2 * 1000 - centre_ms
+    ) > (WORD_CENTRE_TOL_MS)
+    return multi, offcentre
+
+
 def main() -> int:
     args = sys.argv[1:]
     transcribe = "--no-transcribe" not in args
@@ -80,9 +143,11 @@ def main() -> int:
 
     problems: list[str] = []
     src = sources(recordings)
+    word_src = word_sources(recordings, approved)
     per_set: dict[str, collections.Counter] = {s: collections.Counter() for s in SETS}
     per_source: collections.Counter = collections.Counter()
     field_speech: list[Path] = []  # field-derived phrases/negatives, to transcribe
+    word_clips: list[tuple[Path, str, str]] = []  # (wav, label, kind), to content-check
 
     for name in SETS:
         root = approved / name
@@ -112,6 +177,8 @@ def main() -> int:
             per_source[(name, kind)] += 1
             if name in ("phrases", "negatives") and kind == "field":
                 field_speech.append(wav)
+            if name == "words":
+                word_clips.append((wav, group, word_src.get(rel, "guided")))
 
         idx = root / "index.csv"
         if name == "words":
@@ -129,7 +196,7 @@ def main() -> int:
         for orphan in sorted(listed - on_disk):
             problems.append(f"{orphan}: {name}/index.csv row, no file")
 
-    tr = transcriber_or_none(transcribe and bool(field_speech))
+    tr = transcriber_or_none(transcribe and bool(field_speech or word_clips))
     if tr is not None:
         print(f"transcribing {len(field_speech)} field-derived phrase/negative clips...")
         for wav in field_speech:
@@ -143,8 +210,22 @@ def main() -> int:
                 problems.append(
                     f"{wav.relative_to(approved)}: contains the wake phrase — heard {text!r}"
                 )
-    elif field_speech:
-        print(f"(skipped transcribing {len(field_speech)} field-derived clips)")
+        print(f"transcribing {len(word_clips)} word clips (content check, report-only)...")
+        word_flags: collections.Counter = collections.Counter()
+        word_totals: collections.Counter = collections.Counter()
+        for wav, label, kind in word_clips:
+            word_totals[kind] += 1
+            multi, offcentre = word_content_flags(wav, label, tr)
+            if multi or offcentre:
+                word_flags[kind] += 1
+    elif field_speech or word_clips:
+        print(
+            f"(skipped transcribing {len(field_speech)} field-derived and "
+            f"{len(word_clips)} word clips)"
+        )
+        word_flags = word_totals = collections.Counter()
+    else:
+        word_flags = word_totals = collections.Counter()
 
     print("\n## Counts per set and speaker\n")
     for name in SETS:
@@ -154,6 +235,16 @@ def main() -> int:
     print("\n## Counts per set and source\n")
     for (name, kind), n in sorted(per_source.items()):
         print(f"{name:10} {kind:8} {n:4}")
+
+    print(
+        "\n## Word content check (report-only, E47 — never affects the exit code: "
+        ">=2 vocabulary words heard, or the label word not within "
+        f"+/-{WORD_CENTRE_TOL_MS} ms of the clip's centre)\n"
+    )
+    for kind in ("guided", "sentences", "field", "elicit"):
+        n = word_totals.get(kind, 0)
+        if n:
+            print(f"{kind:10} {word_flags.get(kind, 0):4} / {n:4} flagged")
 
     print(f"\n{len(problems)} problems\n")
     for p in problems:
