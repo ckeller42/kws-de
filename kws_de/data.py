@@ -203,6 +203,39 @@ def _random_shift(clip, rng, max_shift_ms: int = 200):
 VAN_SNRS = (0, 5, 10)  # dB — cabin-ish, noisier than the general snrs= default
 
 
+def _trimmed(clip):
+    """Leading/trailing silence off (same call as `kws_de.recordings.load_recordings`)."""
+    import librosa
+
+    sig = np.asarray(clip, np.float32).ravel()
+    out, _ = librosa.effects.trim(sig, top_db=30)
+    return out if len(out) else sig
+
+
+def _context_window(target, left, right, rng):
+    """`[left] + gap + target + gap + [right]` (each gap 50–200 ms of silence, either
+    neighbour optional but not both) -> the 1 s window centred on `target` and the 1 s
+    window centred on the gap after it (before it when there is no right neighbour).
+    Zero-padded where the sequence runs out. Clips are silence-trimmed already."""
+
+    def gap():
+        return np.zeros(
+            int(rng.integers(config.SAMPLE_RATE // 20, config.SAMPLE_RATE // 5 + 1)), np.float32
+        )
+
+    head = [left, gap()] if left is not None else []
+    tail = [gap(), right] if right is not None else []
+    parts = head + [target] + tail
+    t0 = sum(len(p) for p in head)
+    centre = t0 + len(target) // 2
+    gap_centre = t0 + len(target) + len(tail[0]) // 2 if tail else len(head[0]) + len(head[1]) // 2
+    half = config.CLIP_SAMPLES // 2
+    padded = np.pad(np.concatenate(parts), (half, half))
+    return padded[centre : centre + config.CLIP_SAMPLES], padded[
+        gap_centre : gap_centre + config.CLIP_SAMPLES
+    ]
+
+
 def van_augmentation_enabled() -> bool:
     """Van-cabin augmentation for REAL clips (rec:/MSWC) is opt-in: set both
     KWS_NOISE_DIR (recommended: `<mww-train>/data/fma_16k`, or `negative_datasets`)
@@ -242,6 +275,8 @@ def build_dataset(
     commands=None,
     synthetic=None,
     shift_ms: int = 200,
+    context_mix: int = 0,
+    speakers=None,
 ):
     """Build (X, y) from raw clips. `labels`/`commands` default to the v1 vocab
     (`config.LABELS`/`config.COMMANDS`) so existing v1 callers are unaffected;
@@ -268,6 +303,17 @@ def build_dataset(
     at 0/5/10 dB — see `_van_noise_and_rir` and `kws_de.augment.van_augment`. Off by
     default, so `_origin_flags` must be told the same way (`van_augmentation_enabled()`)
     to keep its row count in sync.
+
+    `context_mix=K` (`kws-dataset build --context-mix`) appends, AFTER all the rows above
+    (so they stay byte-identical to a K=0 build), K multi-word rows per command clip:
+    the silence-trimmed clip between 1–2 other trimmed clips of this split (same speaker
+    when that speaker has others, any label — `speakers` is `{label: [speaker_id]}`
+    aligned to `clips` like `synthetic`), 50–200 ms gaps, the 1 s window centred on the
+    target (`_context_window`), labelled with the target word, shifted and mixed at ONE
+    draw from {clean} ∪ `snrs` rather than the whole ladder (row count). The first
+    sequence of each clip also yields the window centred on the gap next to the target,
+    labelled `_unknown_`, so a word-boundary window has a class. Per command clip: K + 1
+    extra rows, all flagged with the target clip's origin in `_origin_flags`.
     """
     labels = list(labels) if labels is not None else config.LABELS
     commands = list(commands) if commands is not None else config.COMMANDS
@@ -318,6 +364,43 @@ def build_dataset(
     n_clean_sil = max(1, n_sil // 10)
     for _ in range(n_clean_sil):
         add(np.zeros(config.CLIP_SAMPLES, np.float32), "_silence_")
+    if context_mix:
+        pool = [
+            (lbl, i) for lbl in [*commands, "_unknown_"] for i in range(len(clips.get(lbl, [])))
+        ]
+        trimmed = {key: _trimmed(clips[key[0]][key[1]]) for key in pool}
+
+        def spk(key):
+            ids = (speakers or {}).get(key[0]) or []
+            return ids[key[1]] if key[1] < len(ids) else None
+
+        by_spk: dict = {}
+        for key in pool:
+            by_spk.setdefault(spk(key), []).append(key)
+
+        def add_context(win, label):
+            snr = ((None,) + tuple(snrs))[int(rng.integers(0, len(snrs) + 1))]
+            sig = _random_shift(win, rng, shift_ms)
+            if snr is not None:
+                sig = mix_at_snr(sig, noises[int(rng.integers(0, len(noises)))], snr, rng)
+            add(sig, label)
+
+        for cmd in commands:
+            for i in range(len(clips.get(cmd, []))):
+                me = (cmd, i)
+                same = [k for k in by_spk[spk(me)] if k != me]
+                others = same if len(same) >= 2 else [k for k in pool if k != me]
+                for j in range(context_mix):
+                    n = min(int(rng.integers(1, 3)), len(others))
+                    pick = [
+                        trimmed[others[int(x)]] for x in rng.choice(len(others), n, replace=False)
+                    ]
+                    if n == 1:
+                        pick = [pick[0], None] if rng.random() < 0.5 else [None, pick[0]]
+                    win, gap_win = _context_window(trimmed[me], pick[0], pick[1], rng)
+                    add_context(win, cmd)
+                    if j == 0:
+                        add_context(gap_win, "_unknown_")
     return np.asarray(X, np.float32), np.asarray(y, np.int64)
 
 
@@ -705,14 +788,18 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
     return added
 
 
-def _origin_flags(clips_ws: dict, snrs, words=None, perturb_tts: bool = False) -> np.ndarray:
+def _origin_flags(
+    clips_ws: dict, snrs, words=None, perturb_tts: bool = False, context_mix: int = 0
+) -> np.ndarray:
     """Boolean array flagging TTS-synthesized origin (speaker id prefix "tts:"),
     aligned row-for-row to build_dataset's output for the same clips/snrs — must
     mirror build_dataset's iteration order (commands then unknown, each clip's
     clean copy + one row per snr, then silence, then clean silence) exactly.
     With `perturb_tts`, TTS clips count twice (build_dataset's perturbed copy). A REAL
     clip also picks up `len(VAN_SNRS)` extra (False) rows when van augmentation is
-    enabled (`van_augmentation_enabled()`) — must track build_dataset's own check."""
+    enabled (`van_augmentation_enabled()`) — must track build_dataset's own check.
+    `context_mix=K` appends build_dataset's K + 1 context rows per command clip (after
+    the silence rows), flagged with that clip's origin."""
     words = list(words) if words is not None else config.COMMANDS
     per_clip = 1 + len(snrs)
     van_rows = len(VAN_SNRS) if van_augmentation_enabled() else 0
@@ -732,4 +819,8 @@ def _origin_flags(clips_ws: dict, snrs, words=None, perturb_tts: bool = False) -
     flags.extend([False] * n_sil)
     n_clean_sil = max(1, n_sil // 10)
     flags.extend([False] * n_clean_sil)
+    if context_mix:
+        for cmd in words:
+            for _clip, spk in clips_ws.get(cmd, []):
+                flags.extend([spk.startswith("tts:")] * (context_mix + 1))
     return np.asarray(flags, dtype=bool)

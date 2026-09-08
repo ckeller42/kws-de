@@ -3720,6 +3720,136 @@ transducer) rather than more augmentation on the 1 s classifier. An intermediate
 `<models>/shift500/`, never at the canonical path; diagnostic CSVs + summaries kept in the
 session scratch, not committed. No device, no flashing, no deploy.
 
+### E43 — single-variable test: do multi-word context windows fix the in-context word miss? (2026-09-08, host-only, exp/context-mix)
+
+E42 refuted "the model has learnt *where* the word sits". The surviving hypothesis from E41's
+per-window diagnostic was about *what else* is in the window: every training row holds exactly
+one word plus silence/noise, so when a neighbour word enters the 1 s window the classifier sees
+a mixture it was never asked to separate and confuses the target with same-slot words
+(`Licht` → `Außen`/`Lesen` in 51 % of the windows that fully contain `Licht`, 58 % for the
+control), worst for the
+middle word of a 3-word sentence (exact-intent 0.04 vs 0.16 for 2-word, oracle 0.11 vs 0.55).
+Prediction: training on windows that contain the target *with* neighbouring words raises the
+±0.3–0.4 s shoulders of the offset curve, lifts unpadded phrase exact-intent clearly above the
+deployed 14/139, and keeps isolated words inside E40's seed band (0.919 ± 0.011, FA ≤ 2). One
+variable, control reused from E42, same seed, nothing else moved.
+
+**Code.** `kws-dataset build --context-mix K` (default 0 = previous behaviour). For each command
+clip of the *train* split, `kws_de.data.build_dataset` appends K rows: the silence-trimmed clip
+(`librosa.effects.trim(top_db=30)`, as `recordings.py`) between 1–2 other trimmed clips of the
+same split (same speaker when that speaker has ≥ 2 others, otherwise any; any label incl.
+`_unknown_`), 50–200 ms silent gaps, the 1 s window centred on the target (`_context_window`,
+zero-padded past the sequence ends), labelled with the target word, `_random_shift`ed ±200 ms
+and mixed at ONE draw from {clean, 20, 10, 0 dB} instead of the full ladder — the full ladder
+(7 rows per context sequence) would have tripled the train set. The first sequence of each
+clip also yields the window centred on the gap next to the target, labelled `_unknown_`, so a
+word-boundary window has a class. The rows are appended AFTER the existing ones, so the
+38,758 base rows and every val/test row are byte-identical to the K=0 build (test npz `cmp`
+equal to E42's control; INT8 test accuracy therefore comparable). `_origin_flags` mirrors the
+K + 1 rows per clip with the target clip's origin (so `--real-weight 3` triples real-target
+context rows too); `"context_mix"` in the manifest. One test
+(`test_context_mix_appends_target_centred_rows_and_gap_unknowns`: K=1 adds 2 rows per command
+clip, base rows unchanged, flags aligned, window geometry).
+
+**Procedure.** Worktree off `origin/main` at `4df9e85`; data backed up as `*.pre-ctxmix`, the
+npz + manifest restored byte-identical at the end, `raw_clips_v3.pkl` unchanged. Same `KWS_NOISE_DIR`
+(210) / `KWS_RIR_DIR` (270) as E39–E42. Control = E42's `shift200` row (`1cf0435e`, seed-0
+build 38,758 rows), not retrained. Treatment: `kws-dataset build --cache raw_clips_v3.pkl
+--prefix features_v3 --seed 0 --context-mix 2` (52 s; train 52,201 = 38,758 + 4,481 command
+clips × (2 target + 1 gap) rows, i.e. 1.35× the control and under the 2× cap; `_unknown_`
+3,689 → 8,170 rows; val/test 6,433 / 11,315 unchanged), `kws-train --v2 --prefix features_v3
+--width 48 --qat --qat-epochs 20 --real-weight 3 --seed 0 --out
+command_v3_w48_qat_ctxmix.keras` (1,700 s vs 1,287 s), `kws-export … --out <models>/ctxmix/`
+(canonical `command_v3_w48_qat.tflite` still `86b7105e`, `firmware/main/gen/` untouched),
+scored with `scripts/recipe-grid.py`'s `score()` (row `ctxmix2_w48_rw3_qe20`),
+`scripts/compare_command_models.py`, and the E41/E42 per-window diagnostic.
+
+| | deployed `86b7105e` (E41) | control shift 200 (E42) | treatment context-mix 2 |
+|---|---|---|---|
+| sha256 / bytes | `86b7105e` / 25,832 | `1cf0435e` / 25,800 | `8f3156e9` / 25,800 |
+| train rows | (other era) | 38,758 | 52,201 |
+| best epoch / val acc (same single-word val rows) | n/a | 35/40, 0.6695 | 39/40, 0.6474 |
+| float / QAT final train acc | | 0.7330 / 0.7404 | 0.6680 / 0.6785 (harder rows) |
+| INT8 test acc (identical test rows) | 0.7188 | 0.7125 | 0.7127 |
+| spk01 / spk02 / spk10 / spk18 words | 1.000 / 1.000 / 0.952 / 0.778 | 0.923 / 0.947 / 0.911 / 0.778 | 0.923 / 1.000 / 0.932 / **0.889** |
+| spk19 / spk20 words (outside the rule) | 0.688 / 0.800 | 0.812 / 0.950 | 0.812 / 0.900 |
+| **aggregate words (n=233)** | **0.936** | 0.897 | **0.936** |
+| false accepts (n=32) | 0 | 1 (spk10 1/19) | 1 (spk10 1/19) |
+| deploy rule (`passes()`) | (reference) | FAIL (FA) | FAIL (FA) |
+| isolated words, all six speakers (n=269, diag) | 0.911 | 0.896 | 0.926 |
+| **phrase exact-intent, unpadded (n=139)** | 0.101 (14) | 0.058 (8) | 0.079 (11) |
+| phrase exact-intent, 0.7 s silence prepended | 0.40 (55) | 0.35 (49) | 0.38 (53) |
+| phrase exact-intent, 0.7 s padded both ends | 0.57 (79) | 0.48 (67) | 0.52 (72) |
+| oracle ceiling raw t=0.3 / t=0.5 | 0.32 / 0.29 | 0.28 / 0.24 | 0.29 / 0.25 |
+| oracle ceiling smoothed t=0.3 / t=0.5 | 0.28 / 0.19 | 0.23 / 0.14 | 0.25 / 0.14 |
+| argmax-only oracle | 0.29 | 0.25 | 0.26 |
+| failure classes OK / MISS / SUB / INS / MULTI | 14 / 91 / 2 / 1 / 31 | 8 / 96 / 3 / 1 / 31 | 11 / 96 / 1 / 1 / 30 |
+| why expected words miss: fired / never top-1 / hangover / below thr | 52 / 34 / 9 / 4 % | 50 / 39 / 6 / 5 % | 51 / 36 / 7 / 6 % |
+| in-context peak raw median / run width median | 0.86 / 2 win | 0.84 / 2 win | 0.87 / 2 win |
+| isolated-word stream peak raw median / run width | 0.97 / 7 win | 0.90 / 5 win | 0.96 / 7 win |
+| exact-intent 2-word (n=67) / 3-word (n=72) | 0.16 (11) / 0.04 (3) | 0.10 (7) / 0.01 (1) | 0.15 (10) / 0.01 (1) |
+| oracle raw t=0.3, 2-word / 3-word | 0.55 / 0.11 | 0.51 / 0.07 | 0.54 / 0.06 |
+| 3-word: first / **middle** / last word fired | 0.28 / **0.42** / 0.88 | 0.28 / **0.46** / 0.82 | 0.21 / **0.47** / 0.88 |
+| 2-word: first / last word fired | 0.48 / 0.57 | 0.43 / 0.52 | 0.45 / 0.55 |
+
+Per expected word, fired (decoder) / ever raw top-1 / isolated acc (n), deployed → control →
+treatment: Licht 40/58/0.84 (76) → 38/49/0.86 → 34/50/0.92; an 14/23/0.96 (26) → 14/23/1.00 →
+14/23/1.00; aus 14/19/0.84 (19) → 14/15/0.68 → 14/18/0.74; Küche 1/1 → 1/1 → 1/1 (n=20
+expected, 1 isolated clip); Dach 0/3 → 0/1 → 0/0 (n=19, no isolated clips); Außen 15/16/0.95
+(22) → 16/16/0.95 → 17/17/0.95; Lesen 14/15/1.00 (12) → 16/16/1.00 → 16/16/1.00.
+
+**Offset curve** (guided takes, Whisper spans; cell = mean raw p(word) / share of windows where the
+word is raw top-1; offset = window end − (word centre + 0.5 s), 0 = training layout):
+
+| offset (s) | −0.5 | −0.4 | −0.3 | −0.2 | −0.1 | 0.0 | +0.1 | +0.2 | +0.3 | +0.4 | +0.5 | +0.6 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| deployed (E41) | 0.01/0 % | 0.04/3 % | 0.27/22 % | 0.56/62 % | 0.78/85 % | **0.83/91 %** | 0.74/82 % | 0.66/72 % | 0.43/45 % | 0.39/39 % | 0.33/37 % | 0.23/29 % |
+| control shift 200 (E42) | 0.01/0 % | 0.02/0 % | 0.19/15 % | 0.45/55 % | 0.76/82 % | **0.83/90 %** | 0.74/81 % | 0.62/67 % | 0.41/42 % | 0.38/39 % | 0.34/38 % | 0.23/30 % |
+| treatment context-mix 2 | 0.01/0 % | 0.02/0 % | 0.16/12 % | 0.46/52 % | 0.81/88 % | **0.85/91 %** | 0.79/86 % | 0.67/72 % | 0.42/44 % | 0.40/42 % | 0.34/36 % | 0.24/30 % |
+
+Per word, control → treatment: Licht +0.1: 0.96/100 % → 0.96/100 %, +0.3: 0.08/5 % → 0.07/5 %;
+Außen 0.0: 0.83/94 % → 0.87/94 %, +0.3: 0.24/25 % → 0.19/12 %; aus 0.0: 0.64/60 % → 0.64/70 %,
++0.4: 0.96/100 % → 0.90/100 %; an 0.0: 0.84/90 % → 0.91/100 %, −0.3: 0.22/17 % → 0.23/17 %;
+Lesen 0.0: 0.90/100 % → 0.92/100 %, +0.3: 0.12/9 % → 0.21/18 %. Confusion while `Licht` is fully
+inside the window (41 windows): control Außen 34 % / Lesen 24 % / Licht 5 % → treatment Außen
+37 % / Lesen 24 % / Licht 5 % — unchanged. `aus` inside the window: aus 60 % → 66 %, Außen
+32 % → 21 %; `Lesen`: 71 % → 85 %.
+
+**Verdict: refuted.** Unpadded phrase exact-intent 8 → 11 of 139 (0.058 → 0.079), below the
+deployed 14 it had to beat clearly, and the 3-word sentences — the specific prediction — stay
+at 1/72 with the middle word firing in 47 % (control 46 %, deployed 42 %) and the first word
+*less* often (28 % → 21 %). The +0.3/+0.4 s shoulders do not move (42/39 % → 44/42 %, mean p
+0.41/0.38 → 0.42/0.40; the criterion was "clearly above ~40 %"); the whole curve is the
+control's within ±3 points, the centre included. The `Licht → Außen/Lesen` confusion that
+motivated the experiment is unchanged (58 % → 61 % of the windows holding `Licht`). Oracle ceilings
+move by one clip (raw t=0.3 0.28 → 0.29), the counterfactuals by 3–5 clips (prepend 0.35 →
+0.38, pad both 0.48 → 0.52), every one still below the deployed model's. What the context rows
+*did* buy is isolated words: aggregate 0.897 → 0.936 (+9 of 233; spk18 0.778 → 0.889, spk10
+0.911 → 0.932, spk02 0.947 → 1.000), six-speaker isolated 0.896 → 0.926 — the deployed model's
+level, reached from the seed-0 build that E40 places at the bottom of its band, and the
+isolated-stream run width 5 → 7 windows. The isolated criterion (≥ 0.908, FA ≤ 2) is met with
+room; the two phrase criteria are not. Deploy rule: FAIL on the same single spk10 false accept
+as the control (1/32), which is the rule's zero-FA clause, not the accuracy floor; on E40's
+yardstick it would be a candidate for isolated words only. Not deployed.
+
+**Reading.** Multi-word context in the training window makes the classifier a better
+*single-word* classifier (it learns to ignore a neighbour that is not centred) but not a
+better *streaming* one: the decoder's problem is the windows where the target is NOT centred,
+and those windows now carry an explicit competing label — the gap-centred `_unknown_` rows
+teach "boundary ⇒ unknown", the target-centred rows teach "centred ⇒ word", and the net effect
+on a window at +0.3 s is nil. The offset curve is now flat across three independent
+interventions (deployed era, ±500 ms shift, context mix): it is the model's positional
+resolution at 25.8 kB, not a data artefact. With E41/E42 this closes the "fix it in the 1 s
+classifier's training data" branch; the levers left are decoder-side (E28's threshold 0.3 /
+hangover 1 re-evaluated on the phrase set, n-best over posteriors) or a wider-context model
+(two-window input or the E8 transducer). The isolated-word gain is a separate, cheap finding
+worth a seed check before it is used: a context-mix build at seeds 1/2 against E40's band
+would tell whether +0.04 aggregate is real or a seed-0 coincidence.
+
+**Housekeeping.** `scripts/recipe-grid.csv` gained `ctxmix2_w48_rw3_qe20` (`8f3156e9`, FAIL);
+export under `<models>/ctxmix/`, never at the canonical path; diagnostic CSVs + summaries kept in
+the session scratch, not committed. No device, no flashing, no deploy.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

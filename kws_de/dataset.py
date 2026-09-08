@@ -21,13 +21,15 @@ from kws_de.data import (
 from kws_de.manifest import build_manifest
 
 
-def assemble(clips_ws, noises, rng, labels, commands, shift_ms=200):
+def assemble(clips_ws, noises, rng, labels, commands, shift_ms=200, context_mix=0):
     """Raw (clip, speaker) dict for one split -> (X, y, is_tts). Wraps build_dataset
     (features + labels) and _origin_flags (per-row real/TTS origin, same iteration
     order) -- neither is duplicated here, just composed. TTS clips get one perturbed
-    copy (build_dataset `synthetic`), mirrored in the flags."""
+    copy (build_dataset `synthetic`), mirrored in the flags; `context_mix` rows
+    (build_dataset) likewise."""
     clips = {lbl: [c for c, _ in items] for lbl, items in clips_ws.items()}
     synthetic = {lbl: [s.startswith("tts:") for _, s in items] for lbl, items in clips_ws.items()}
+    speakers = {lbl: [s for _, s in items] for lbl, items in clips_ws.items()}
     X, y = build_dataset(
         clips,
         noises,
@@ -36,8 +38,12 @@ def assemble(clips_ws, noises, rng, labels, commands, shift_ms=200):
         commands=commands,
         synthetic=synthetic,
         shift_ms=shift_ms,
+        context_mix=context_mix,
+        speakers=speakers,
     )
-    is_tts = _origin_flags(clips_ws, snrs=(20, 10, 0), words=commands, perturb_tts=True)
+    is_tts = _origin_flags(
+        clips_ws, snrs=(20, 10, 0), words=commands, perturb_tts=True, context_mix=context_mix
+    )
     return X, y, np.asarray(is_tts, bool)
 
 
@@ -75,6 +81,7 @@ def build(  # pragma: no cover - I/O
     out_prefix: str = "features",
     recordings_split: str = "train",
     shift_ms: int = 200,
+    context_mix: int = 0,
 ):
     """Dataset build, deterministic from one seed given the cached raw clips (Piper TTS
     synthesis itself is stochastic per call, so newly-filled clips are persisted back to
@@ -86,7 +93,9 @@ def build(  # pragma: no cover - I/O
     `features_v3`). QC-approved device recordings are merged in on EVERY build
     (`kws_de.data.merge_recordings`), not baked into the cache, and with
     `recordings_split="train"` (the default) their speakers all go to the train split —
-    see `force_rec_to_train`. Returns the manifest dict."""
+    see `force_rec_to_train`. `context_mix` (multi-word context rows, see
+    `kws_de.data.build_dataset`) applies to the train split only — val/test stay
+    single-word rows. Returns the manifest dict."""
     words = command_words()
     labels = config.COMMAND_LABELS
     # pickle: our own gitignored local cache written by kws_de.data, never untrusted input.
@@ -119,14 +128,25 @@ def build(  # pragma: no cover - I/O
     speakers = {}
     for i, (name, ws) in enumerate((("train", tr_ws), ("val", va_ws), ("test", te_ws))):
         X, y, is_tts = assemble(
-            ws, noises, np.random.default_rng(seed + 1 + i), labels, words, shift_ms=shift_ms
+            ws,
+            noises,
+            np.random.default_rng(seed + 1 + i),
+            labels,
+            words,
+            shift_ms=shift_ms,
+            context_mix=context_mix if name == "train" else 0,
         )
         np.savez(config.DATA_DIR / f"{out_prefix}_{name}.npz", X=X, y=y, is_tts=is_tts)
         splits[name] = (X, y, is_tts)
         speakers[name] = [s for items in ws.values() for _, s in items]
 
     manifest = build_manifest(
-        splits, seed=seed, labels=labels, speakers=speakers, shift_ms=shift_ms
+        splits,
+        seed=seed,
+        labels=labels,
+        speakers=speakers,
+        shift_ms=shift_ms,
+        context_mix=context_mix,
     )
     suffix = out_prefix.removeprefix("features")
     (config.DATA_DIR / f"manifest{suffix}.json").write_text(
@@ -140,7 +160,7 @@ def build(  # pragma: no cover - I/O
 
 def main() -> None:  # pragma: no cover - CLI wrapper
     """`kws-dataset build [--seed N] [--cache raw_clips_v3.pkl] [--prefix features_v3]
-    [--recordings-split train|auto] [--shift-ms N]`."""
+    [--recordings-split train|auto] [--shift-ms N] [--context-mix K]`."""
     ap = argparse.ArgumentParser(prog="kws-dataset")
     ap.add_argument("command", choices=["build"])
     ap.add_argument("--seed", type=int, default=0)
@@ -150,6 +170,14 @@ def main() -> None:  # pragma: no cover - CLI wrapper
         default=200,
         dest="shift_ms",
         help="max random time-shift of each word row in ms, either direction (default 200)",
+    )
+    ap.add_argument(
+        "--context-mix",
+        type=int,
+        default=0,
+        dest="context_mix",
+        help="K multi-word context rows per train word clip (+1 gap-centred _unknown_ "
+        "row each; default 0 = off, see kws_de.data.build_dataset)",
     )
     ap.add_argument("--cache", default="raw_clips_merged.pkl", help="raw clip cache under data/")
     ap.add_argument("--prefix", default="features", help="output npz prefix (features_v3 ...)")
@@ -169,4 +197,5 @@ def main() -> None:  # pragma: no cover - CLI wrapper
         out_prefix=args.prefix,
         recordings_split=args.recordings_split,
         shift_ms=args.shift_ms,
+        context_mix=args.context_mix,
     )

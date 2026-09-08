@@ -20,6 +20,7 @@ def build_manifest(
     labels: list[str],
     speakers: dict[str, list[str]] | None = None,
     shift_ms: int = 200,
+    context_mix: int = 0,
 ) -> dict:
     """`splits` maps "train"/"val"/"test" -> (X, y, is_tts). Returns a
     JSON-serialisable dict: seed, built_at (ISO-8601 UTC, when this manifest was
@@ -33,10 +34,12 @@ def build_manifest(
     stripped) — provenance for QC-approved device recordings mixed into the
     build. "van_dirs" records KWS_NOISE_DIR / KWS_RIR_DIR (None when unset), so a
     build without van-cabin augmentation is visible in its manifest. "shift_ms" is
-    the ±time-shift range of the clean/noisy word rows (`kws-dataset build --shift-ms`)."""
+    the ±time-shift range of the clean/noisy word rows (`kws-dataset build --shift-ms`);
+    "context_mix" the K of `--context-mix` (0 = no multi-word context rows)."""
     out: dict = {
         "seed": seed,
         "shift_ms": shift_ms,
+        "context_mix": context_mix,
         "built_at": datetime.now(UTC).isoformat(),
         "van_dirs": [os.environ.get("KWS_NOISE_DIR"), os.environ.get("KWS_RIR_DIR")],
         "labels": list(labels),
