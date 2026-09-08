@@ -19,7 +19,20 @@ def parse(events: list[str]) -> Intent | Rejection:
     toks = [e for e in events if e not in ("_unknown_", "_silence_")]
     device = zone = action = None
     for t in toks:
-        if t in config.DEVICES:
+        if t in config.LIGHT_COMPOUNDS:
+            # A fused Licht+zone compound ("Küchenlicht") sets device+zone in one
+            # token -- see config.LIGHT_COMPOUNDS' docstring for why this is not
+            # yet reachable from a real recognition (pending retrain), but the
+            # grammar itself is ready and falls through to the same device/action
+            # checks below as "Licht <zone>" would.
+            if device is not None:
+                return Rejection(f"duplicate device: {t}")
+            if zone is not None:
+                return Rejection(f"duplicate zone: {t}")
+            if action is not None:
+                return Rejection("device out of order")
+            device, zone = "Licht", config.LIGHT_COMPOUNDS[t]
+        elif t in config.DEVICES:
             if device is not None:
                 return Rejection(f"duplicate device: {t}")
             if zone is not None or action is not None:

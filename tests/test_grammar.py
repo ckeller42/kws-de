@@ -57,3 +57,31 @@ def test_level_invalid_for_non_light_rejected():
     from kws_de.grammar import Rejection
 
     assert isinstance(parse(["Heizung", "fünfzig"]), Rejection)
+
+
+def test_light_compound_kueche_valid():
+    assert parse(["Küchenlicht", "an"]) == Intent("Licht", "Küche", "an")
+
+
+def test_light_compound_aussen_valid():
+    assert parse(["Außenlicht", "aus"]) == Intent("Licht", "Außen", "aus")
+
+
+def test_light_compound_lesen_valid():
+    assert parse(["Leselicht", "an"]) == Intent("Licht", "Lesen", "an")
+
+
+def test_light_compound_brightness_valid():
+    assert parse(["Küchenlicht", "heller"]) == Intent("Licht", "Küche", "heller")
+
+
+def test_light_compound_alone_missing_action_rejected():
+    assert isinstance(parse(["Küchenlicht"]), Rejection)
+
+
+def test_light_compound_duplicate_device_rejected():
+    assert isinstance(parse(["Licht", "Küchenlicht", "an"]), Rejection)
+
+
+def test_light_compound_zone_conflict_rejected():
+    assert isinstance(parse(["Küchenlicht", "Küche", "an"]), Rejection)

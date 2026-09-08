@@ -32,6 +32,21 @@ static const unsigned kDeviceActions[N_DEVICES] = {
     (1u << 2) | (1u << 3),                                                                            /* Aufstelldach */
 };
 
+/* kws_de.config.LIGHT_COMPOUNDS: fused Licht+zone words ("Küchenlicht" ->
+   "Küche"), matched here as literal strings rather than via KWS_LABELS --
+   they are not yet a trained class (KWS_MODEL_NUM_CLASSES is still 23, see
+   the _Static_assert in recognise.cc), so the device can never actually emit
+   one until the next retrain adds them (docs/paper-notes.md E50). This table
+   keeps the C port in lockstep with kws_de.grammar.parse() for that day; it
+   is unreachable in production until then. "Dach" has no natural compound --
+   see config.LIGHT_COMPOUNDS' comment -- so it is not in this table. */
+static const struct { const char *word; const char *zone; } kLightCompounds[] = {
+    {"Küchenlicht", "Küche"},
+    {"Außenlicht", "Außen"},
+    {"Leselicht", "Lesen"},
+};
+#define N_LIGHT_COMPOUNDS (sizeof kLightCompounds / sizeof kLightCompounds[0])
+
 static int label_index(const char *tok)
 {
     for (int i = 0; i < KWS_NUM_LABELS; i++)
@@ -51,6 +66,21 @@ intent_t intent_parse(const char *words)
     int device_idx = -1, action_idx = -1;
     const char *zone = NULL;
     for (char *tok = strtok(buf, " "); tok; tok = strtok(NULL, " ")) {
+        const char *compound_zone = NULL;
+        for (size_t ci = 0; ci < N_LIGHT_COMPOUNDS; ci++) {
+            if (strcmp(tok, kLightCompounds[ci].word) == 0) {
+                compound_zone = kLightCompounds[ci].zone;
+                break;
+            }
+        }
+        if (compound_zone) {
+            if (device_idx >= 0) return kInvalid;         /* duplicate device */
+            if (zone) return kInvalid;                    /* duplicate zone */
+            if (action_idx >= 0) return kInvalid;         /* device out of order */
+            device_idx = 0;                               /* Licht -- see device_takes_zone() */
+            zone = compound_zone;
+            continue;
+        }
         int idx = label_index(tok);
         if (idx < 0 || idx == KWS_UNKNOWN_INDEX || idx == KWS_SILENCE_INDEX) {
             if (idx < 0) return kInvalid; /* unknown token: reject */

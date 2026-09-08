@@ -9,7 +9,7 @@ typedef struct {
     const char *action;
 } intent_case_t;
 
-#define INTENT_CASE_COUNT 19
+#define INTENT_CASE_COUNT 26
 static const intent_case_t INTENT_CASES[INTENT_CASE_COUNT] = {
   {"Licht an", true, "Licht", NULL, "an"},
   {"Licht Küche an", true, "Licht", "Küche", "an"},
@@ -30,4 +30,11 @@ static const intent_case_t INTENT_CASES[INTENT_CASE_COUNT] = {
   {"Licht _unknown_ Küche an", true, "Licht", "Küche", "an"},
   {"_unknown_", false, NULL, NULL, NULL},
   {"", false, NULL, NULL, NULL},
+  {"Küchenlicht an", true, "Licht", "Küche", "an"},
+  {"Außenlicht aus", true, "Licht", "Außen", "aus"},
+  {"Leselicht an", true, "Licht", "Lesen", "an"},
+  {"Küchenlicht heller", true, "Licht", "Küche", "heller"},
+  {"Küchenlicht", false, NULL, NULL, NULL},
+  {"Licht Küchenlicht an", false, NULL, NULL, NULL},
+  {"Küchenlicht Küche an", false, NULL, NULL, NULL},
 };

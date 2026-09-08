@@ -38,6 +38,15 @@ CASES = [
     "Licht _unknown_ Küche an",
     "_unknown_",
     "",
+    # Pending LIGHT_COMPOUNDS (kws_de.config): grammar-ready, not yet a
+    # recognizable label until the next retrain -- see config's comment.
+    "Küchenlicht an",
+    "Außenlicht aus",
+    "Leselicht an",
+    "Küchenlicht heller",
+    "Küchenlicht",
+    "Licht Küchenlicht an",
+    "Küchenlicht Küche an",
 ]
 
 

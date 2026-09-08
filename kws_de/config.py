@@ -64,6 +64,35 @@ ACTIONS = [
     "leise",
     *LIGHT_LEVELS,
 ]
+# Fused Licht+zone compounds a speaker naturally says instead of "Licht <zone>"
+# (e.g. "Küchenlicht an" for "Licht Küche an"). Maps compound word -> the zone
+# it stands for; kws_de.grammar.parse()/firmware/main/intent.c treat the
+# compound as device=Licht + this zone in one token (see both for the wiring).
+#
+# NOT added to COMMAND_LABELS/LABELS: the trained command model only has
+# KWS_MODEL_NUM_CLASSES=23 outputs (firmware/main/gen/model_config.h), and
+# recognise.cc asserts KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES at compile time.
+# Growing COMMAND_LABELS here without retraining would desync kws-fwgen's
+# generated gen/labels.h from that model and break the firmware build. These
+# compounds are grammar-ready but unrecognizable by the device until the next
+# retrain adds them as their own classes (see docs/paper-notes.md E50).
+#
+# "Dach" (the roof-hatch light) is excluded: unlike Küche/Außen/Lesen, German
+# speakers don't have a one-word compound for it -- "Dachlicht" never occurs
+# in SITUATIONS' natural scene text below (grep confirms), where Küchenlicht/
+# Außenlicht/Leselicht already do; the roof light is just "das Licht".
+LIGHT_COMPOUNDS = {"Küchenlicht": "Küche", "Außenlicht": "Außen", "Leselicht": "Lesen"}
+# Guided/elicit prompts for the above -- an/aus only, the idiom's natural
+# form ("Küchenlicht heller" is not how this gets said; brightness stays
+# "Licht Küche heller"). Same status as LIGHT_COMPOUNDS: not yet wired into
+# prompt_sets()/SITUATIONS (kws_de.qc.vocab()/label_for_token only know
+# DEVICES+ZONES+ACTIONS, so they cannot segment or label a token that isn't
+# one of those -- wiring this in now would silently break word-cutting/QC for
+# every take that reads it). Wire in at the retrain that adds LIGHT_COMPOUNDS
+# to COMMAND_LABELS, the same way heller/dunkler etc. are single word classes.
+LIGHT_COMPOUND_PROMPTS = [
+    f"{word} {action}" for word in LIGHT_COMPOUNDS for action in ("an", "aus")
+]
 ZONED_DEVICES = ["Licht"]
 # Per-device allowed actions — grounded in the real controllable functions.
 DEVICE_ACTIONS = {
