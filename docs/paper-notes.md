@@ -4364,6 +4364,95 @@ grammar) was checked and found false, so the idea is not silently re-proposed la
 firmware/test` and `uv run --no-sync pytest -q tests/test_grammar.py tests/test_eval*.py` both
 pass unchanged (host-only, `KWS_NOISE_DIR`/`KWS_RIR_DIR` unset).
 
+### E50 — fused Licht+zone compound vocabulary, grammar-ready pending retrain (2026-09-08, host-only, feat/light-compound-words)
+
+Motivation: German speakers naturally say a fused compound ("Küchenlicht an") instead of the
+scripted device-then-zone form ("Licht Küche an") the guided recorder trains on. The closed-set
+classifier cannot decompose an unseen compound acoustically, so it needs its own class — but this
+task is scoped to wiring the vocabulary/grammar/prompts/tests only, no retrain.
+
+**Verified zone set.** `kws_de.config.ZONES = ["Küche", "Dach", "Außen", "Lesen"]`, all four
+apply to `Licht` only (`ZONED_DEVICES = ["Licht"]`). `git log -p` on `config.py` shows this is the
+*current* (v2) zone set, replacing an earlier `["Küche", "Bad", "Decke", "Außen"]` in
+`b2a4630` ("refactor(v2): ground config vocab + device-specific grammar", commit message: "the
+grounded catalog") — a deliberate re-grounding, not a leftover. `Dach` is real, not a transcription
+artifact: it is not mentioned anywhere near E47 (the word-cutter/transcription-bias work); that
+entire section is about Whisper's compound-gluing during *word cutting*, unrelated to whether
+`Dach` belongs in the zone list at all.
+
+**Compound words chosen — Küchenlicht, Außenlicht, Leselicht; Dach excluded.** All three chosen
+compounds already occur as natural German in `config.SITUATIONS`' scene-description text (not the
+expected-intent column) predating this change: "das Küchenlicht brennt noch", "das Außenlicht kann
+aus", "das Leselicht ist dir zu schwach" (`kws_de/config.py:92,94,96,99,119`) — direct evidence a
+German speaker reaches for these one-word forms. No `SITUATIONS` scene ever says "Dachlicht"
+(`grep` confirms); the two `Dach` scenes instead read "Wo soll das Licht angehen/ausgehen?" —
+generic, no compound. The roof-hatch light apparently just gets called "das Licht" in this
+household, not "das Dachlicht", which is not an idiomatic German compound the way
+kitchen/outside/reading lights are. Excluded on that basis; the zone token `Dach` itself is
+untouched and still reachable via the ordinary "Licht Dach an/aus" form.
+
+**Label/retrain coupling — confirmed, addition scoped to pending/flagged.** Traced the full path
+from `config.COMMAND_LABELS` to the device: `kws_de/firmware_gen.py`'s `generate()` writes
+`gen/labels.h`'s `KWS_NUM_LABELS`/`KWS_LABELS` straight from `len(config.COMMAND_LABELS)` — pure
+vocabulary codegen, no model involved. But `firmware/main/recognise.cc:33` has
+`_Static_assert(KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES, "label count (fwgen) must match model
+output classes (export)")`, and `gen/model_config.h`'s `KWS_MODEL_NUM_CLASSES` is `23` — baked in
+at the last `kws-export --firmware` run of the currently-trained model, independent of
+`config.py`. `kws_de/codegen.py` (the inference-op generator) reads output shape from the `.tflite`
+graph itself, never from `COMMAND_LABELS`, so it would not catch a mismatch — `recognise.cc`'s
+assert is the only guard, and it fires at **compile time**, not generation time: `kws-fwgen
+--check` would still pass (`gen/labels.h` is internally consistent with a *changed*
+`COMMAND_LABELS`), but building the firmware next would fail to compile once `gen/labels.h` was
+regenerated to a live label count of 26. So: growing `COMMAND_LABELS` now, before a retrain that
+actually adds these three classes to the model's output layer, breaks the firmware build. Per the
+task's own escape hatch, the addition lands as **pending, not live**:
+
+- `kws_de/config.py`: new `LIGHT_COMPOUNDS = {"Küchenlicht": "Küche", "Außenlicht": "Außen",
+  "Leselicht": "Lesen"}` dict, deliberately *not* folded into `COMMANDS`/`COMMAND_LABELS`/`LABELS`
+  — `NUM_CLASSES`/`KWS_NUM_LABELS` stay at their current values (7 and 23 respectively) until the
+  next retrain. A comment on the dict names the exact assert above so the next person who touches
+  this doesn't have to re-derive the coupling.
+- `kws_de/grammar.py`'s `parse()`: a new branch recognizes a `LIGHT_COMPOUNDS` token and sets
+  `device, zone = "Licht", <mapped zone>` in one step (duplicate/order-checked exactly like the
+  existing device branch), then falls through to the *same* downstream action/zone-validity checks
+  every other intent uses — no parallel intent-construction path. This is real, tested Python
+  logic today; it is simply unreachable from a live recognition until a retrained model can ever
+  emit one of these three strings as a label.
+- `firmware/main/intent.c`: a small `kLightCompounds[]` string table mirrors the same three words,
+  matched by direct `strcmp` in `intent_parse()`'s tokenizer loop (not via `KWS_LABELS`/
+  `label_index()`, since the words aren't in `gen/labels.h`), setting `device_idx = 0` ("Licht")
+  and `zone` together before falling into the existing validity checks — same structure as
+  `grammar.py`, verified case-for-case by `scripts/gen-intent-cases.py` → `firmware/test/
+  intent_cases.h` → `test_intent.c` (26 cases now, was 19; 0 mismatches).
+- Prompts: new `LIGHT_COMPOUND_PROMPTS = [f"{w} {a}" for w in LIGHT_COMPOUNDS for a in ("an",
+  "aus")]` in `config.py`, built the same way `ACTIONS`/`LIGHT_LEVELS` combine today. Also **not**
+  wired into `firmware_gen.py`'s `prompt_sets()` or into `SITUATIONS`' expected-intent column: both
+  the guided "words" prompt set and the elicit segmentation path go through `kws_de.qc.vocab()`/
+  `label_for_token()`, which only know `DEVICES + ZONES + ACTIONS` — handing either pipeline a
+  compound token today would silently break word-cutting/labelling for any take that reads it (no
+  matching label to snap to, `required_tokens()`'s `elicit` branch returns `[]`). Same coupling as
+  the label count, one layer up the stack. `LIGHT_COMPOUND_PROMPTS` sits ready, commented with the
+  same pending status, for whichever retrain adds these labels to wire in alongside them.
+
+**Tests.** `tests/test_grammar.py`: 7 new cases (each compound → correct zone, brightness action,
+alone → missing-action rejection, compound after an explicit device → duplicate-device rejection,
+compound after an explicit zone → duplicate-zone rejection). `scripts/gen-intent-cases.py`: 7 new
+`CASES` entries, regenerated `firmware/test/intent_cases.h` (19 → 26 cases). Full suite: `uv run
+--no-sync pytest -q` → 385 passed, 1 skipped, 1 xfailed (skip/xfail pre-exist, unrelated to this
+change). `firmware/test`: `make all` → all 11 host binaries build clean under `-Wall -Wextra
+-Werror` and pass, including `test_intent` (0/26 mismatch). `kws-fwgen --check firmware/main/gen`
+exits 0 — confirms `LIGHT_COMPOUNDS`/`LIGHT_COMPOUND_PROMPTS` are inert as far as codegen is
+concerned (neither is read by `firmware_gen.py`), so no generated header went stale.
+
+**Not done here:** no retrain, no change to `firmware/main/gen/*` (nothing under `gen/` needed a
+vocabulary-driven regen — `gen/labels.h`/`gen/prompts.h` are vocabulary-driven but this change
+deliberately does not touch the vocabulary they're generated from; `gen/command_infer.h` is
+model-driven and untouched regardless). Ready for the next data-collection round once a
+label/retrain policy decision is made: wire `LIGHT_COMPOUND_PROMPTS` into `prompt_sets()`'s "words"
+list (same way `heller`/`dunkler` are single multi-syllable classes today), add the three compounds
+to `COMMANDS`/`COMMAND_LABELS`, retrain, re-export, regenerate `gen/`, and the grammar/intent
+wiring landed here needs no further changes to recognize them live.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
