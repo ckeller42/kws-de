@@ -29,8 +29,9 @@ def build_manifest(
     per-split {n, real, tts, per_label_counts, hash} — hash is sha256 of the X
     bytes, so any rebuild can be verified byte-for-byte against a committed
     manifest. With `speakers` (per-split flat list of speaker ids, prefixed
-    "tts:"/"rec:"/plain-mswc), each split additionally gets "sources" (counts by
-    origin) and "speakers" (sorted numeric ids of device recordings only, "rec:"
+    "tts:"/"rec:"/"ctx:"/plain-mswc), each split additionally gets "sources"
+    (counts by origin, "rec:" and "ctx:" both counted as "recording") and
+    "speakers" (sorted numeric ids of device recordings only, "rec:"/"ctx:"
     stripped) — provenance for QC-approved device recordings mixed into the
     build. "van_dirs" records KWS_NOISE_DIR / KWS_RIR_DIR (None when unset), so a
     build without van-cabin augmentation is visible in its manifest. "shift_ms" is
@@ -67,9 +68,11 @@ def build_manifest(
         }
         if speakers is not None:
             spk = speakers.get(name, [])
-            recording = sum(1 for s in spk if s.startswith("rec:"))
+            recording = sum(1 for s in spk if s.startswith(("rec:", "ctx:")))
             tts_n = sum(1 for s in spk if s.startswith("tts:"))
             mswc_n = len(spk) - recording - tts_n
             out["splits"][name]["sources"] = {"tts": tts_n, "recording": recording, "mswc": mswc_n}
-            out["splits"][name]["speakers"] = sorted({s[4:] for s in spk if s.startswith("rec:")})
+            out["splits"][name]["speakers"] = sorted(
+                {s[4:] for s in spk if s.startswith(("rec:", "ctx:"))}
+            )
     return out
