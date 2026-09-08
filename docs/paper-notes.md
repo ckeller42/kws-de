@@ -4315,6 +4315,55 @@ since nothing is deployed); no fix to `scripts/recipe-grid.py`'s hardcoded speak
 `passes()` (same E48-caused staleness, bigger than a few lines); no change to which figure the
 standing deploy rule uses (flagged above, not decided here).
 
+### E51 — verification: does the grammar already default a missing zone to "all zones"? (2026-09-08, host-only, feat/default-zone-grammar)
+
+E41/E43's sentence-level breakdown reads as a case for relaxing the grammar: 2-word commands
+(device+action, no zone) already score far better than 3-word ones (exact-intent 0.16 vs 0.04,
+oracle 0.55 vs 0.11), which looks like it argues for letting a 2-word utterance succeed by
+defaulting the missing zone instead of requiring the fuller 3-word form. Checked before writing
+any code: `kws_de.grammar.parse` (`kws_de/grammar.py`) and its firmware port
+(`firmware/main/intent.c`) **already do exactly this**, and have since `b2a4630` (the v2
+device-specific-grammar refactor, long before E41). Only `Licht` has zones
+(`config.ZONED_DEVICES = ["Licht"]`; `Kühlschrank`/`Heizung`/`Aufstelldach` are zone-less
+singletons and never carry a zone token at all); `parse()` has no "missing zone" rejection
+branch — a recognized `device` + `action` pair with no zone token seen falls straight through to
+`Intent(device, None, action)`, exactly like it always has for the zone-less devices. Worked
+example, unchanged by this entry: `parse(["Licht", "an"])` → `Intent(device="Licht", zone=None,
+action="an")`, both before this entry and after — there is no before/after, the behaviour was
+already correct. The convention for "no zone spoken" is the existing `zone=None` (not a new
+`"alle"` sentinel): `intent_format()` in `firmware/main/intent.c` already renders it by omitting
+the zone (`"Licht -> an"` vs `"Licht Küche -> an"`), the same rendering a zone-less device's
+intent gets — there is no separate downstream consumer of `Intent.zone` in this repo (geo-mqtt/HA
+live in `buspi-config`) to require a different sentinel. `tests/test_grammar.py` already has
+`test_device_action_no_zone` and `test_light_level_without_zone_valid` asserting exactly this;
+`scripts/gen-intent-cases.py`'s `CASES` already includes `"Licht an"` (zoned device, no zone) and
+`"Kühlschrank leise"` (zone-less device); `firmware/test/test_intent.c` already runs those
+through `INTENT_CASES` and reports **0/19 cases mismatch** (`make -C firmware/test`, this entry,
+unchanged). No grammar/firmware/test diff was made — there was nothing to fix.
+
+**Eval-scoring gap (design step 4): none found.** `kws_de.eval.eval_recordings`'s phrase scoring
+compares the decoder's parsed `Intent` against `prompt_intent(r["prompt"])`
+(`kws_de/eval.py:90-97`), which derives the "true" intent by running the **same**
+`kws_de.grammar.parse` over `qc.required_tokens(prompt, "sentences")` mapped through
+`qc.label_for_token` — i.e. the expected intent for a recorded 2-word prompt is computed by the
+identical code path that already yields `zone=None`/all-zones. E41/E43's 2-word numbers (67
+prompts, exact-intent 0.16, oracle 0.55) are therefore already scored against "device+action+
+all-zones" as the target, not against an impossible fuller 3-word form; there is no separate
+"expected intent" concept anywhere in `eval.py` that would need updating for this to show up in
+the sentence-level numbers. The 2-word/3-word gap E41/E43 measured is real, but its cause is
+exactly what E41-E43 already found: streaming-decoder word recognition in context (the target
+word not firing/not top-1 when a neighbour shares the window, worst for a 3-word sentence's
+middle word — E43's per-position table, 0.42-0.47 raw top-1 vs 0.88 for a word at the end), not
+a grammar rejecting valid 2-word utterances. Relaxing the grammar further would not move these
+numbers because the grammar was never the bottleneck here.
+
+**Conclusion:** the design change this entry was scoped to make is a no-op — it already shipped,
+untracked to any single entry, as part of the original v2 grammar design. No retrain, no code
+change; this entry exists to record that the verification was done and the premise (a rejecting
+grammar) was checked and found false, so the idea is not silently re-proposed later. `make -C
+firmware/test` and `uv run --no-sync pytest -q tests/test_grammar.py tests/test_eval*.py` both
+pass unchanged (host-only, `KWS_NOISE_DIR`/`KWS_RIR_DIR` unset).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
