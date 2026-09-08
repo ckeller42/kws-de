@@ -1,5 +1,6 @@
 import csv
 import importlib.util
+import re
 from pathlib import Path
 
 import numpy as np
@@ -571,6 +572,75 @@ def test_run_qc_splits_a_welded_compound_span_into_one_word_clip_per_part(tmp_pa
     assert (words["Küche"]["start_ms"], words["Küche"]["end_ms"]) == ("600", "1000")
     assert (appr / "words" / "Küche" / "spk10_001.wav").exists()
     assert "(none)" in (qcd / "report.md").read_text().split("## Segmentation gaps")[1]
+
+
+def test_qc_prompt_has_every_vocab_word_once_and_the_wake_phrase():
+    # E47: an initial_prompt built from the vocabulary un-glues Whisper's welded
+    # compounds; must be built from config (not hand-typed) and stay short (one
+    # mention per word), so it cannot drift from the vocabulary or bloat.
+    words = config.DEVICES + config.ZONES + config.ACTIONS
+    assert qc._QC_PROMPT.startswith(config.WAKE_WORD)
+    toks = re.findall(r"\w+", qc._QC_PROMPT)
+    for w in words:
+        assert toks.count(w) == 1, w
+
+
+def test_word_spans_cuts_a_glued_span_at_the_energy_valley_not_by_letter_share(tmp_path):
+    # E47: two tone bursts ("Licht" 0.20-0.45s, "Küche" 0.55-0.90s) with a real
+    # silence gap between them; Whisper's span is mocked as one glued token
+    # spanning both (0.0-0.9s, its start clamped to 0 the way a real compound's
+    # often is). The cutter must snap to the silence gap, not split by letters,
+    # and each 1 s clip must centre within 30 ms of its own burst's centre.
+    sr = 16000
+    sig = np.zeros(int(0.95 * sr), dtype=np.float32)
+    sig[int(0.20 * sr) : int(0.45 * sr)] = _tone(ms=250)[: int(0.25 * sr)]
+    sig[int(0.55 * sr) : int(0.90 * sr)] = _tone(ms=350)[: int(0.35 * sr)]
+    inc = tmp_path / "incoming" / "s1"
+    _wav(inc / "spk10" / "_phrase_" / "licht-kueche_001.wav", sig)
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        "spk10,t,Licht Küche,spk10/_phrase_/licht-kueche_001.wav,950,-10,sentences,1,1\n"
+    )
+    tr = {"text": "Lichtküche.", "words": [{"word": "Lichtküche.", "start": 0.0, "end": 0.9}]}
+    qcd, appr = tmp_path / "qc" / "s1", tmp_path / "approved"
+    qc.run_qc(inc, qcd, appr, lambda _p: tr)
+    words = {r["word"]: r for r in csv.DictReader((qcd / "words.csv").open())}
+    assert set(words) == {"Licht", "Küche"}
+    assert (appr / "words" / "Licht" / "spk10_001.wav").exists()
+    assert (appr / "words" / "Küche" / "spk10_001.wav").exists()
+    for word, burst_centre in (("Licht", 0.325), ("Küche", 0.725)):
+        span_centre = (int(words[word]["start_ms"]) + int(words[word]["end_ms"])) / 2000
+        assert abs(span_centre - burst_centre) < 0.03
+
+
+def test_run_qc_word_window_floors_at_field_command_start(tmp_path):
+    # E47: a word span starting BEFORE command_start (Whisper timing slop) must
+    # not pull "Hey Bus" into the word clip — the window floors at command_start,
+    # zero-padding instead.
+    inc = _field_session(tmp_path, "Licht an")
+
+    def transcriber(p: Path):
+        return {
+            "text": "Hey Bus Licht an",
+            "words": [
+                {"word": "Hey", "start": 0.10, "end": 0.35},
+                {"word": "Bus", "start": 0.40, "end": 1.05},  # command_start = 1.05+0.15 = 1.2
+                {"word": "Licht", "start": 1.10, "end": 1.30},  # starts BEFORE command_start
+                {"word": "an", "start": 1.35, "end": 1.55},
+            ],
+        }
+
+    qcd, appr = tmp_path / "qc" / "f1", tmp_path / "approved"
+    qc.run_qc(inc, qcd, appr, transcriber)
+    words = list(csv.DictReader((qcd / "words.csv").open()))
+    out_file = next(w["out_file"] for w in words if w["word"] == "Licht")
+    sig, sr = sf.read(out_file, always_2d=True)
+    sig = sig[:, 0]
+    # span centre (1.10+1.30)/2 = 1.20s == command_start: the left half of the 1 s
+    # window (samples before command_start) must be silent, the right half is real
+    # audio from the take's own (non-silent) tone.
+    assert np.all(sig[: config.CLIP_SAMPLES // 2] == 0)
+    assert not np.all(sig[config.CLIP_SAMPLES // 2 :] == 0)
 
 
 def test_run_qc_isolates_a_transcriber_error_to_one_row(tmp_path):
@@ -1228,10 +1298,7 @@ def test_whisper_transcriber_pads_audio_and_shifts_word_offsets_back(tmp_path, m
     out = tr(wav)
     assert captured["len"] == 800 * 16 + 2 * 8000  # 800ms audio + 500ms pad each side @16kHz
     assert out["words"][0]["start"] == pytest.approx(0.1)
-    # narrow prompt: only the words Whisper actually mangles, not the whole vocabulary
-    assert "Hey Bus" in captured["initial_prompt"]
-    assert "fünfzig" in captured["initial_prompt"]
-    assert "Licht" not in captured["initial_prompt"]
+    assert captured["initial_prompt"] == qc._QC_PROMPT
 
 
 @pytest.mark.skipif(

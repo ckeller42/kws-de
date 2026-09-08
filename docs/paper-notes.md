@@ -3985,6 +3985,122 @@ rebuild. Expected effect: Küche/Dach go from ~0 training examples to spk10-domi
 so the E41 in-context 1/39 miss for these two words is at least partly a data gap, not only
 the positional-resolution ceiling E42/E43 measured.
 
+### E47 — word cutter: vocabulary prompt, onset/valley snap, wake-floor (2026-09-08, host-only, fix/qc-cutter-onset-prompt)
+
+Three more cutter defects, found by a fuller inventory of `approved/words/` acoustics
+(clips.csv/merged.csv over all 401 clips, retranscribed) on top of E45's fix:
+
+1. **Whisper still glues compounds most of the time.** E45's `_QC_PROMPT` only lists the
+   light-level numerals + "Prozent" + the wake word — none of `config.DEVICES`/`ZONES`/`ACTIONS` —
+   so "Licht Küche" keeps arriving as one token; `_split_glued` only recovers the *label*, and the
+   letter-proportional split (E45) still guesses the boundary. Tested on the 47 takes E41/E45
+   flagged as glued: a vocabulary `initial_prompt` (`Hey Bus. Licht Kühlschrank Heizung.
+   Aufstelldach Küche Dach. …`, built from `config.DEVICES + ZONES + ACTIONS`, 3 words/sentence so
+   it stays short) un-glued 47/47 with clean word spans, against 0/47 for the old prompt.
+2. **First-word start clamped to 0.** Whisper's `start` reads 0 for a real onset ≈270-290 ms in —
+   26 % of sentence spans overall, 68 % of the (still-)glued ones — and `whisper_transcriber`'s
+   `max(0.0, start - offset)` just hides the clamp. `qc.word_spans`' letter-proportional compound
+   split inherited the same blind spot.
+3. **Word windows reaching into "Hey Bus".** A field/elicit word span can start before
+   `split.command_start` (Whisper's timing slop on the first post-wake word), pulling wake audio
+   into the 1 s window — 17 clips.
+4. No per-clip content check existed to catch any of this in `approved/` after the fact.
+
+**Fix**, all in `kws_de/qc.py`:
+
+- `_QC_PROMPT` now built from `config.WAKE_WORD` + `config.DEVICES + ZONES + ACTIONS` (one
+  mention each, ~13 words) instead of a hand-typed subset — it cannot drift from the vocabulary.
+- `energy_profile` (10 ms hop / 20 ms window RMS dBFS) + `snap_words`: every Whisper word span's
+  start/end is snapped to the nearest real speech onset/offset within ±200 ms; a start of 0 is
+  treated as "unknown" and matched to the first onset before the span's end, not to 0 itself. A
+  span snapped to a window with **no** speech energy at all is dropped (`words.csv` line + a log
+  line, not filed) — this is also the guard against a prompt-echoed "Hey Bus": an echoed phrase
+  over silence has nothing to snap onto and is silently dropped rather than filed as a wake clip
+  or used to set `command_start`. Onsets are consumed in time order (a `floor` that only advances)
+  so two Whisper spans that are equidistant from a shared bad timestamp can't both snap to the
+  *same* earlier onset — found by hand on "Lichtlesenhundertprozent" (`lesen`'s raw start briefly
+  snapped backward onto `Licht`'s own onset) and fixed before it shipped.
+- `word_spans` now cuts a still-glued compound at the nearest energy valley (≥ 8 dB prominence,
+  80 ms margin off each edge) to the old letter-proportional cut, falling back to the
+  proportional cut only when no valley is found.
+- `segment_word` takes a `floor_s` (the take's `command_start` for field/elicit, 0.0 — the take's
+  own first sample — for a guided sentence); the window is zero-padded left of it instead of
+  reading real audio, so it can no longer reach back into the wake phrase.
+- `scripts/audit-approved.py` re-transcribes every `approved/words/` clip (in addition to its
+  existing field-derived phrase/negative wake-phrase check) and flags one where Whisper hears
+  ≥ 2 vocabulary words in it, or the label word's own span is not within ±150 ms of the clip's
+  centre; printed per source (guided/sentences/field/elicit), **report-only** — chosen over
+  gating because it is a per-clip heuristic (a genuinely short, compact sentence puts two real
+  command words within 150 ms of each other; see "not fixable" below), not a hard defect like
+  format or a duplicate index row.
+
+Tests (`tests/test_qc.py`): the prompt carries the wake phrase and every vocabulary word exactly
+once; a synthetic take with two tone bursts ("Licht" 0.20-0.45 s, "Küche" 0.55-0.90 s, real
+silence between) whose Whisper span is mocked as one glued token 0.0-0.9 s cuts two clips
+centred within 30 ms of the true burst centres; a field take with `command_start` = 1.2 s and a
+word span starting at 1.1 s writes a clip whose first half-second (everything before 1.2 s) is
+silence. All of E45's and the pre-existing tests stay green unchanged.
+
+**Dry run** (host-only; NOT run into `approved/` — a scratch dir, per the coordinator's
+data-quality-gates policy: this fix ships without a tree re-cut, which is scheduled separately).
+Re-cut the 5 stamps E45's four-stamp glue list plus `…09-05-1202` (the source of tier1's 17
+wake-phrase clips) touch, with the real `mlx-community/whisper-large-v3-mlx`, same acoustics as
+the audit, before (current `approved/`, E45's proportional cutter) vs after (this fix):
+
+| | before | after |
+|---|---|---|
+| words written (5 stamps, non-bare) | 333 | 330-332 |
+| >= 2 vocabulary words heard in the clip | 269/333 (81 %) | 305-310/330-332 (92-93 %) |
+| truncated at an edge (speech at the window boundary) | 239/333 (72 %) | 233-235/330-332 (70-71 %) |
+| compound label-centre offset, median (IQR) | 127 ms (52-212) | 7 ms (3-48), n dropped 93→16 |
+| compound clips with a usable energy-valley boundary | 93/93 | 16/16 |
+
+The compound-offset row is the fix's direct target and it lands hard: median error 127 ms → 7 ms.
+The **n** for that row drops from 93 to 16 because the vocabulary prompt (finding 1) stops most
+of these compounds from glueing at all — they no longer need a boundary cut, compound or
+otherwise (e.g. "Licht Dach heller" now arrives as three separate Whisper tokens). The other two
+rows (>= 2 words heard, truncated at an edge) get *worse* on the aggregate numbers, not better —
+see "not fixable" below, this is expected and is the correctly-centred clip finally showing a
+pre-existing property of the source audio that a badly-centred clip had been randomly masking.
+
+**Quarantine** (`quarantine_tier1.txt`/`quarantine_tier2.txt`, 27 + 77 clips from the same
+inventory), re-checked against the fix at the level the original audit measured it (the
+word's own span vs. the source take's energy profile — re-transcribing the tiny 1 s output clip
+in isolation turned out to be an unreliable check: Whisper gives a cropped clip noticeably
+different word timings than the same audio in full-take context, confirmed by hand on several
+clips whose cut is provably correct against the source profile yet "wrong" by that test):
+
+| tier | quarantined | fixed | still bad |
+|---|---|---|---|
+| 1 | 27 | 27 | 0 |
+| 2 | 77 | 77 | 0 |
+
+Tier 1's 17 "wake phrase heard inside field/elicit word clip" clips all stop filing wake-tainted
+audio, but not all get a clean replacement: 14 get a correctly floored, wake-free re-cut; 3 (all
+stamp `…09-05-1202`, speaker spk18) get **no clip at all**. Traced by hand: the vocabulary prompt
+makes Whisper hear a *second*, spurious "Hey Bus" late in those specific takes — verified against
+real (non-silent) energy at that point in the source audio, so the "no speech under the span"
+guard does not catch it — and `field_wake_split`'s pre-existing "start after the LAST wake
+phrase" rule then treats the genuine command between the two phrases as pre-wake material and
+drops it. Filing nothing is still strictly better than the wake-tainted clip these were
+quarantined for (the defect is gone), but the command content is lost — a residual for the
+coordinator, not folded silently into "fixed": `field_wake_split`'s last-phrase rule would need
+to prefer the *first* wake phrase when Whisper hears more than one, which is out of this task's
+scope.
+
+**Not fixable by cutting:** the >= 2-vocabulary-words-heard rate rising from 81 % to 92-93 % is
+multi-word content genuinely present in a fast, compact sentence ("Licht Küche an" said quickly
+puts two command words within the fixed 1 s window's ± 500 ms regardless of how precisely the
+window is centred) — a badly off-centre window happened to dilute this by landing partly in
+dead air. Same story for "truncated at an edge" staying at ~70 %: with words this close together
+in a short sentence, a correctly-centred 1 s window's own edges routinely touch the neighbour.
+Neither number is a cutter defect; both are the training data's own content, now visible because
+the cut is finally where it should be.
+
+**Not done here:** no re-run over the real sessions, no writes to `approved/`, no dataset
+rebuild, no retrain — a scratch-dir dry run only, per this task's scope; the coordinator
+schedules the tree re-cut after a policy decision on the 3-clip wake-phrase residual above.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
