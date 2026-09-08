@@ -4,6 +4,7 @@ import numpy as np
 
 from kws_de import config, tts
 from kws_de.data import (
+    _context_window,
     _origin_flags,
     _random_shift,
     _tts_combo_plan,
@@ -33,6 +34,32 @@ def test_random_shift_500_keeps_length_and_stays_within_bounds():
         assert abs(shift) <= max_shift
         seen.add(shift)
     assert max(abs(s) for s in seen) > config.SAMPLE_RATE // 5  # beyond the 200 ms default
+
+
+def test_context_mix_appends_target_centred_rows_and_gap_unknowns():
+    rng = np.random.default_rng(0)
+    clips = {c: [_clip(rng)] for c in config.COMMANDS}
+    clips["_unknown_"] = [_clip(rng)]
+    noises = [rng.standard_normal(8000).astype(np.float32)]
+    X0, y0 = build_dataset(clips, noises, np.random.default_rng(1), snrs=(20,))
+    X1, y1 = build_dataset(clips, noises, np.random.default_rng(1), snrs=(20,), context_mix=1)
+    n_cmd = len(config.COMMANDS)
+    assert len(y1) == len(y0) + 2 * n_cmd  # K=1 target row + 1 gap row per command clip
+    np.testing.assert_array_equal(X1[: len(y0)], X0)  # base rows byte-identical to K=0
+    extra = sorted(y1[len(y0) :].tolist())
+    want = [config.label_index(c) for c in config.COMMANDS]
+    want += [config.label_index("_unknown_")] * n_cmd
+    assert extra == sorted(want)
+    clips_ws = {lbl: [(c, "tts:x") for c in items] for lbl, items in clips.items()}
+    assert len(_origin_flags(clips_ws, snrs=(20,), context_mix=1)) == len(y1)
+    # window geometry: target centred, gap window straddles target end / neighbour start
+    target, right = np.ones(4000, np.float32), np.ones(3000, np.float32)
+    win, gap = _context_window(target, None, right, rng)
+    assert win.shape == gap.shape == (config.CLIP_SAMPLES,)
+    mid = config.CLIP_SAMPLES // 2
+    assert win[mid - 2000 : mid + 2000].all() and not win[: mid - 2000].any()
+    assert gap[mid - 1700 : mid - 1600].all() and gap[mid + 1600 : mid + 1700].all()
+    assert not gap[mid - 400 : mid + 400].any()  # the 50–200 ms gap itself is silent
 
 
 def test_build_dataset_shapes_and_labels():
