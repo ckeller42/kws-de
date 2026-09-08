@@ -539,6 +539,40 @@ def test_run_qc_segmentation_gap_reported_when_word_spans_miss_a_token(tmp_path)
     assert "licht-kueche-an_001.wav" in report.split("## Segmentation gaps")[1]
 
 
+def test_run_qc_splits_a_welded_compound_span_into_one_word_clip_per_part(tmp_path):
+    # Whisper hears "Licht Küche" as one span "Lichtküche"; the cutter used to
+    # match nothing after "Licht" and file no Küche clip at all (E41: 1 real
+    # Küche clip, 0 Dach). The span is divided by letter count: 5 licht / 5 küche.
+    inc = tmp_path / "incoming" / "s1"
+    _wav(inc / "spk10" / "_phrase_" / "licht-kueche-an_001.wav", _tone(ms=1500))
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        "spk10,t,Licht Küche an,spk10/_phrase_/licht-kueche-an_001.wav,1500,-10,sentences,1,1\n"
+    )
+    tr = {
+        "text": "Lichtküche an.",
+        "words": [
+            {"word": "Lichtküche", "start": 0.2, "end": 1.0},
+            {"word": "an.", "start": 1.1, "end": 1.3},
+        ],
+    }
+    assert qc.word_spans(tr) == [
+        ("licht", 0.2, pytest.approx(0.6)),
+        ("küche", pytest.approx(0.6), pytest.approx(1.0)),
+        ("an", 1.1, 1.3),
+    ]
+
+    qcd, appr = tmp_path / "qc" / "s1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, lambda _p: tr)
+    assert counts["words_written"] == 3 and counts["words_skipped"] == 0
+    words = {r["word"]: r for r in csv.DictReader((qcd / "words.csv").open())}
+    assert set(words) == {"Licht", "Küche", "an"}
+    assert (words["Licht"]["start_ms"], words["Licht"]["end_ms"]) == ("200", "600")
+    assert (words["Küche"]["start_ms"], words["Küche"]["end_ms"]) == ("600", "1000")
+    assert (appr / "words" / "Küche" / "spk10_001.wav").exists()
+    assert "(none)" in (qcd / "report.md").read_text().split("## Segmentation gaps")[1]
+
+
 def test_run_qc_isolates_a_transcriber_error_to_one_row(tmp_path):
     inc = tmp_path / "incoming" / "s1"
     _wav(inc / "spk01" / "licht" / "001.wav", _tone())
