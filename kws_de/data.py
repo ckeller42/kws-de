@@ -413,8 +413,12 @@ def build_dataset(
 
 
 def command_words() -> list[str]:
-    """Slot-command words that need clips (devices + zones + actions)."""
-    return config.DEVICES + config.ZONES + config.ACTIONS
+    """Slot-command words that need clips (devices + zones + actions + the
+    fused Licht+zone compounds, E53 -- these are TTS-only bootstrap classes,
+    see config.LIGHT_COMPOUNDS, so they must be in this list or _fill_with_tts/
+    build_dataset would silently give them zero training rows despite having a
+    valid config.COMMAND_LABELS index)."""
+    return config.DEVICES + config.ZONES + config.ACTIONS + list(config.LIGHT_COMPOUNDS)
 
 
 def main() -> None:  # pragma: no cover - thin I/O wrapper (manual/integration)

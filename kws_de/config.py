@@ -69,13 +69,10 @@ ACTIONS = [
 # it stands for; kws_de.grammar.parse()/firmware/main/intent.c treat the
 # compound as device=Licht + this zone in one token (see both for the wiring).
 #
-# NOT added to COMMAND_LABELS/LABELS: the trained command model only has
-# KWS_MODEL_NUM_CLASSES=23 outputs (firmware/main/gen/model_config.h), and
-# recognise.cc asserts KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES at compile time.
-# Growing COMMAND_LABELS here without retraining would desync kws-fwgen's
-# generated gen/labels.h from that model and break the firmware build. These
-# compounds are grammar-ready but unrecognizable by the device until the next
-# retrain adds them as their own classes (see docs/paper-notes.md E50).
+# Promoted to COMMAND_LABELS (E53, run8): these 3 are now live model classes,
+# retrained in lockstep with recognise.cc's _Static_assert(KWS_NUM_LABELS ==
+# KWS_MODEL_NUM_CLASSES) -- see docs/paper-notes.md E50 (grammar/intent.c
+# wiring landed already, unreachable until now) and E53 (the retrain).
 #
 # "Dach" (the roof-hatch light) is excluded: unlike Küche/Außen/Lesen, German
 # speakers don't have a one-word compound for it -- "Dachlicht" never occurs
@@ -84,12 +81,11 @@ ACTIONS = [
 LIGHT_COMPOUNDS = {"Küchenlicht": "Küche", "Außenlicht": "Außen", "Leselicht": "Lesen"}
 # Guided/elicit prompts for the above -- an/aus only, the idiom's natural
 # form ("Küchenlicht heller" is not how this gets said; brightness stays
-# "Licht Küche heller"). Same status as LIGHT_COMPOUNDS: not yet wired into
-# prompt_sets()/SITUATIONS (kws_de.qc.vocab()/label_for_token only know
-# DEVICES+ZONES+ACTIONS, so they cannot segment or label a token that isn't
-# one of those -- wiring this in now would silently break word-cutting/QC for
-# every take that reads it). Wire in at the retrain that adds LIGHT_COMPOUNDS
-# to COMMAND_LABELS, the same way heller/dunkler etc. are single word classes.
+# "Licht Küche heller"). Folded into COMMAND_LABELS (E53) so they appear in
+# prompt_sets()'s single-word "Wörter aufnehmen" guided session -- but NOT
+# into SITUATIONS (out of scope, a separate/bigger prompt set) and NOT read
+# by kws_de.qc.vocab()/label_for_token (still DEVICES+ZONES+ACTIONS only),
+# so scene/elicit word-cutting is untouched by this addition.
 LIGHT_COMPOUND_PROMPTS = [
     f"{word} {action}" for word in LIGHT_COMPOUNDS for action in ("an", "aus")
 ]
@@ -101,7 +97,16 @@ DEVICE_ACTIONS = {
     "Heizung": ["an", "aus", "wärmer", "kälter"],
     "Aufstelldach": ["auf", "zu"],
 }
-COMMAND_LABELS = DEVICES + ZONES + ACTIONS + ["_unknown_", "_silence_"]
+
+# New classes are APPENDED AFTER _unknown_/_silence_, not before: this keeps
+# every one of the original 23 indices byte-identical to the deployed model's
+# output ordering, so code that decodes a model's argmax with the CURRENT
+# config.COMMAND_LABELS (e.g. scripts/compare_command_models.py scoring the
+# deployed 23-class model side by side with a 26-class candidate) still maps
+# indices 0-22 correctly. Putting the compounds before the sentinels would
+# silently mislabel the deployed model's _unknown_/_silence_ outputs as
+# Küchenlicht/Außenlicht once this list grows.
+COMMAND_LABELS = DEVICES + ZONES + ACTIONS + ["_unknown_", "_silence_"] + list(LIGHT_COMPOUNDS)
 
 
 def command_index(label: str) -> int:
