@@ -3602,6 +3602,124 @@ parse over existing posteriors (Open questions, below), per-word segmentation di
 125 failing phrases, and the E8 transducer once phrase data is real rather than 392 synthetic
 sentences.
 
+### E42 — single-variable test: does a wider training time-shift (±500 ms) fix the in-context word miss? (2026-09-08, host-only, exp/shift-500)
+
+E41's per-window diagnostic over the 139 approved phrase clips (deployed `86b7105e`, decoder
+replayed at 100 ms) found that an expected word is raw top-1 in 91 % of windows when it sits where
+a training clip puts it (word centre + 0.5 s = window end), 45 % at +0.3 s, 3 % at −0.4 s, 0 % at
+−0.5 s. Training clips are trimmed, centred and shifted by only ±200 ms (`_random_shift`), so the
+hypothesis was: the classifier has learnt "word in the middle", the streaming decoder rarely
+offers that alignment, widening the shift to ±500 ms should flatten the offset curve and lift
+phrase exact-intent (0.10, oracle ceiling 0.34) without hurting isolated words much. One
+variable, two arms, same seed, nothing else moved.
+
+**Code.** `kws-dataset build --shift-ms N` (default 200 = previous behaviour) is passed through
+`kws_de.dataset.build → assemble → kws_de.data.build_dataset(shift_ms=)` into every
+`_random_shift` call (clean, per-snr, perturbed-TTS and van rows alike) and recorded as
+`"shift_ms"` in the manifest. One test (`test_random_shift_500_keeps_length_and_stays_within_bounds`).
+
+**Procedure.** Worktree off `origin/main` at `459b05f`; `features_v3_{train,val,test}.npz`,
+`manifest_v3.json`, `raw_clips_v3.pkl` backed up as `*.pre-shift` and the npz + manifest restored
+(byte-identical, `cmp`) at the end; `raw_clips_v3.pkl` unchanged (`[tts] added:` empty in both
+builds). `KWS_NOISE_DIR` (210) / `KWS_RIR_DIR` (270) as in E39–E40. Both arms:
+`kws-dataset build --cache raw_clips_v3.pkl --prefix features_v3 --seed 0 [--shift-ms 500]`
+(48 s / 46 s, train/val/test 38,758 / 6,433 / 11,315 in both — same split, same rows, only the
+shift draw differs; note val/test rows are shifted too, so INT8 test accuracy is *not*
+comparable across arms), `kws-train --v2 --prefix features_v3 --width 48 --qat --qat-epochs 20
+--real-weight 3 --seed 0 --out command_v3_w48_qat_shift{200,500}.keras` (1,287 s / 1,255 s),
+`kws-export --v2 --qat --width 48 --prefix features_v3 --model … --out <models>/shift{200,500}/`
+(canonical `command_v3_w48_qat.tflite` hashed `86b7105e` before and after; `firmware/main/gen/`
+untouched), scored with `scripts/recipe-grid.py`'s `score()`/`append_row()` (rows
+`shift200_w48_rw3_qe20`, `shift500_w48_rw3_qe20`), `scripts/compare_command_models.py`, and the
+E41 per-window diagnostic pointed at each export.
+
+**Control reproduces a known row.** The seed-0 build is E40 Part B's (38,758 rows) and
+`best epoch 35/40: val accuracy 0.6695` is exactly `run5_e80_flat`'s best epoch, so the control
+export is bit-identical to it (sha `1cf0435e`, aggregate 0.897, 1/32) — E40's "40 epochs is not
+under-trained" claim confirmed the cheap way. The deployed model (`86b7105e`, E37) is a different
+build era and sits at the top of the seed band; the arm-to-arm comparison is control vs treatment.
+
+| | deployed `86b7105e` (E41) | control shift 200 | treatment shift 500 |
+|---|---|---|---|
+| sha256 / bytes | `86b7105e` / 25,832 | `1cf0435e` / 25,800 | `58129989` / 25,800 |
+| best epoch / val acc (own val, own shift) | n/a | 35/40, 0.6695 | 35/40, 0.5548 |
+| float / QAT final train acc | | 0.7330 / 0.7404 | 0.6486 / 0.6542 |
+| INT8 test acc (own test rows) | 0.6936 | 0.7125 | 0.5972 |
+| spk01 / spk02 / spk10 / spk18 words | 1.000 / 1.000 / 0.952 / 0.778 | 0.923 / 0.947 / 0.911 / 0.778 | 0.846 / 1.000 / 0.829 / 0.583 |
+| spk19 / spk20 words (outside the rule) | 0.688 / 0.800 | 0.812 / 0.950 | 0.562 / 0.750 |
+| **aggregate words (n=233)** | **0.936** | 0.897 | **0.820** |
+| false accepts (n=32) | 0 | 1 (spk10 1/19) | 0 |
+| deploy rule (`passes()`) | (reference) | FAIL | PASS (on the floor: 0.820 ≥ 0.785, spk18 0.583 > 0.333) |
+| isolated words, all six speakers (n=269, diag) | 0.911 | 0.896 | 0.799 |
+| **phrase exact-intent, unpadded (n=139)** | 0.101 (14) | 0.058 (8) | 0.094 (13) |
+| phrase exact-intent, 0.7 s silence prepended | 0.40 (55) | 0.35 (49) | 0.31 (43) |
+| phrase exact-intent, 0.7 s padded both ends | 0.57 (79) | 0.48 (67) | 0.37 (52) |
+| oracle ceiling raw t=0.3 / t=0.5 | 0.32 / 0.29 | 0.28 / 0.24 | 0.25 / 0.20 |
+| oracle ceiling smoothed t=0.3 / t=0.5 | 0.28 / 0.19 | 0.23 / 0.14 | 0.24 / 0.13 |
+| argmax-only oracle | 0.29 | 0.25 | 0.25 |
+| failure classes OK / MISS / SUB / INS / MULTI | 14 / 91 / 2 / 1 / 31 | 8 / 96 / 3 / 1 / 31 | 13 / 89 / 3 / 0 / 34 |
+| why expected words miss: fired / never top-1 / hangover / below thr | 52 / 34 / 9 / 4 % | 50 / 39 / 6 / 5 % | 46 / 37 / 8 / 9 % |
+| in-context peak raw median / run width median | 0.86 / 2 win | 0.84 / 2 win | 0.71 / 1 win |
+| isolated-word stream peak raw median / run width | 0.97 / 7 win | 0.90 / 5 win | 0.86 / 6 win |
+
+Per expected word, fired (decoder) / ever raw top-1 / isolated acc (n): Licht 40/58/0.84 (76) →
+38/49/0.86 → 28/50/0.75; an 14/23/0.96 (26) → 14/23/1.00 → 18/26/0.92; aus 14/19/0.84 (19) →
+14/15/0.68 → 11/17/0.47; Küche 1/1 → 1/1 → 0/1 (n=20 expected, 1 isolated clip); Dach 0/3 → 0/1
+→ 0/0 (n=19, no isolated clips); Außen 15/16/0.95 (22) → 16/16/0.95 → 12/16/0.82; Lesen
+15/15/1.00 (12) → 16/16/1.00 → 14/14/0.83.
+
+**Offset curve** (guided takes, Whisper spans; cell = mean raw p(word) / share of windows where the
+word is raw top-1; offset = window end − (word centre + 0.5 s), 0 = training layout):
+
+| offset (s) | −0.5 | −0.4 | −0.3 | −0.2 | −0.1 | 0.0 | +0.1 | +0.2 | +0.3 | +0.4 | +0.5 | +0.6 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| deployed (E41) | 0.01/0 % | 0.04/3 % | 0.27/22 % | 0.56/62 % | 0.78/85 % | **0.83/91 %** | 0.74/82 % | 0.66/72 % | 0.43/45 % | 0.39/39 % | 0.33/37 % | 0.23/29 % |
+| control shift 200 | 0.01/0 % | 0.02/0 % | 0.19/15 % | 0.45/55 % | 0.76/82 % | **0.83/90 %** | 0.74/81 % | 0.62/67 % | 0.41/42 % | 0.38/39 % | 0.34/38 % | 0.23/30 % |
+| treatment shift 500 | 0.02/0 % | 0.09/6 % | 0.27/32 % | 0.48/54 % | 0.68/78 % | **0.69/76 %** | 0.63/69 % | 0.54/59 % | 0.37/39 % | 0.36/39 % | 0.30/37 % | 0.23/28 % |
+
+Per word, control → treatment at the centre and at ±0.3: Licht (window ends only at ≥ +0.1
+because Licht opens every clip) +0.1: 0.96/100 % → 0.81/100 %, +0.3: 0.08/5 % → 0.06/5 %; Außen
+0.0: 0.83/94 % → 0.60/69 %, −0.3: −/− (n=0), +0.3: 0.24/25 % → 0.12/12 %; aus 0.0: 0.64/60 % →
+0.34/30 %, +0.4: 0.96/100 % → 0.86/90 %; an 0.0: 0.84/90 % → 0.85/90 %, −0.3: 0.22/17 % → 0.55/67 %;
+Lesen 0.0: 0.90/100 % → 0.64/73 %, −0.3: 0.01/0 % → 0.64/100 %, +0.3: 0.12/9 % → 0.04/0 %.
+
+**Verdict: refuted.** The ±500 ms shift does not lift the shoulders of the offset curve; it lowers
+the peak. Top-1 share at 0.0 falls 90 % → 76 % and mean p 0.83 → 0.69, while +0.3/+0.4 stay at
+39–42 % and only the −0.3/−0.4 side moves at all (15 % → 32 %, 0 % → 6 % — the two words that
+gained there, `an` and `Lesen`, are short words that a wider shift lets the model see with more
+right-context; the left-of-centre gain is real but small). Unpadded phrase exact-intent goes 8 →
+13 of 139 (0.058 → 0.094), *within* the control-vs-deployed gap (8 vs 14 on the same clips, both
+±200 ms builds) and below the 0.10 it had to beat clearly; every counterfactual that removes the
+alignment problem by hand gets *worse* (prepend 0.35 → 0.31, pad both ends 0.48 → 0.37), the
+oracle ceilings drop (raw t=0.3 0.28 → 0.25), and the in-context peak run width shrinks to 1
+window (46 % of expected words never reach a smoothed top-1 run at all, vs 43 %). The isolated
+scoreboard pays for it: aggregate 0.897 → 0.820 (−0.077, 18 fewer of 233 words, seven times the
+E40 seed half-range of 0.011), spk18 0.778 → 0.583, spk10 0.911 → 0.829, six-speaker isolated
+0.896 → 0.799, `aus` isolated 0.68 → 0.47. `shift500` clears `passes()` only because the rule's
+0.785 floor dates from the 0.785 deployed model of E27 and its false-accept count happens to be 0;
+it is 0.116 below the deployed `86b7105e` on aggregate and would not be deployed under any
+reading of E40's yardstick. Not deployed, not a candidate.
+
+**Reading.** The width-48 DS-CNN at 25.8 kB does not have spare capacity to become
+shift-invariant by data alone: asking it to recognise a word anywhere in the 1 s window costs
+it the centred case without buying the off-centre one (val accuracy on the *same* split falls
+0.6695 → 0.5548 when val rows are also shifted ±500 ms). The E41 offset curve is therefore not
+mainly a training-augmentation artefact; it reads as the model's real positional resolution at
+this size — a window that holds a word at its edge also holds half of the next word, and the
+classifier (whose MFCC frames cover the whole second) sees a mixture it was never asked to
+separate, at either shift range. The word→sentence bottleneck stays on the decoder side: the
+in-context top-1 runs are 1–2 windows wide against the isolated 5–7, and E41's oracle
+(0.34) is reached by lowering what the decoder needs, not by moving where the word sits. Next
+levers, unchanged from E41: threshold/hangover from E28 (0.3 / 1) re-evaluated on the phrase
+set, n-best over the posteriors, and a wider-context model (2 s / two-window input, or the E8
+transducer) rather than more augmentation on the 1 s classifier. An intermediate shift
+(±300–350 ms) is not worth a run on this evidence: the shoulder did not move at +0.3 at all.
+
+**Housekeeping.** `scripts/recipe-grid.csv` gained `shift200_w48_rw3_qe20` (`1cf0435e`, FAIL) and
+`shift500_w48_rw3_qe20` (`58129989`, PASS-on-the-floor); exports under `<models>/shift200/` and
+`<models>/shift500/`, never at the canonical path; diagnostic CSVs + summaries kept in the
+session scratch, not committed. No device, no flashing, no deploy.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

@@ -241,6 +241,7 @@ def build_dataset(
     labels=None,
     commands=None,
     synthetic=None,
+    shift_ms: int = 200,
 ):
     """Build (X, y) from raw clips. `labels`/`commands` default to the v1 vocab
     (`config.LABELS`/`config.COMMANDS`) so existing v1 callers are unaffected;
@@ -253,7 +254,8 @@ def build_dataset(
     real clips are left alone so the real:TTS row ratio does not get worse.
 
     Every word class (commands AND `_unknown_`) sees the SAME audio domains: one
-    clean (time-shifted) copy plus a noise-mixed (time-shifted) copy at each snr
+    clean (time-shifted by up to ±`shift_ms`, see `_random_shift`) copy plus a
+    noise-mixed (time-shifted) copy at each snr
     in `snrs` -- per-clip count = 1 + len(snrs). This matters: if commands were
     noise-only and `_unknown_` clean-only, the model learns "clean audio implies
     _unknown_" instead of the actual words. `_silence_` stays noise-only (that IS
@@ -277,10 +279,10 @@ def build_dataset(
         y.append(labels.index(label))
 
     def add_word_clip(clip, label, perturbed=False):
-        add(_random_shift(clip, rng), label)
+        add(_random_shift(clip, rng, shift_ms), label)
         for snr in snrs:
             noise = noises[int(rng.integers(0, len(noises)))]
-            add(mix_at_snr(_random_shift(clip, rng), noise, snr, rng), label)
+            add(mix_at_snr(_random_shift(clip, rng, shift_ms), noise, snr, rng), label)
         if perturbed:
             # A pitch/tempo-perturbed copy gets the SAME clean+per-snr treatment above,
             # not a recursive add_word_clip call — that would also fall into the van
@@ -288,14 +290,15 @@ def build_dataset(
             n_steps = float(rng.uniform(-2.0, 2.0))
             rate = float(rng.uniform(0.85, 1.15))
             pclip = perturb(clip, n_steps, rate, config.SAMPLE_RATE)
-            add(_random_shift(pclip, rng), label)
+            add(_random_shift(pclip, rng, shift_ms), label)
             for snr in snrs:
                 noise = noises[int(rng.integers(0, len(noises)))]
-                add(mix_at_snr(_random_shift(pclip, rng), noise, snr, rng), label)
+                add(mix_at_snr(_random_shift(pclip, rng, shift_ms), noise, snr, rng), label)
         elif van:  # REAL clip (rec:/MSWC): van-cabin variety, its own (noise, RIR) pair
             van_noise, van_rir = _van_noise_and_rir(rng)
             for snr in VAN_SNRS:
-                add(van_augment(_random_shift(clip, rng), van_noise, van_rir, snr, rng), label)
+                shifted = _random_shift(clip, rng, shift_ms)
+                add(van_augment(shifted, van_noise, van_rir, snr, rng), label)
 
     def flags_for(label):
         return (synthetic or {}).get(label) or []

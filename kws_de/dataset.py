@@ -21,14 +21,22 @@ from kws_de.data import (
 from kws_de.manifest import build_manifest
 
 
-def assemble(clips_ws, noises, rng, labels, commands):
+def assemble(clips_ws, noises, rng, labels, commands, shift_ms=200):
     """Raw (clip, speaker) dict for one split -> (X, y, is_tts). Wraps build_dataset
     (features + labels) and _origin_flags (per-row real/TTS origin, same iteration
     order) -- neither is duplicated here, just composed. TTS clips get one perturbed
     copy (build_dataset `synthetic`), mirrored in the flags."""
     clips = {lbl: [c for c, _ in items] for lbl, items in clips_ws.items()}
     synthetic = {lbl: [s.startswith("tts:") for _, s in items] for lbl, items in clips_ws.items()}
-    X, y = build_dataset(clips, noises, rng, labels=labels, commands=commands, synthetic=synthetic)
+    X, y = build_dataset(
+        clips,
+        noises,
+        rng,
+        labels=labels,
+        commands=commands,
+        synthetic=synthetic,
+        shift_ms=shift_ms,
+    )
     is_tts = _origin_flags(clips_ws, snrs=(20, 10, 0), words=commands, perturb_tts=True)
     return X, y, np.asarray(is_tts, bool)
 
@@ -66,6 +74,7 @@ def build(  # pragma: no cover - I/O
     cache_name: str = "raw_clips_merged.pkl",
     out_prefix: str = "features",
     recordings_split: str = "train",
+    shift_ms: int = 200,
 ):
     """Dataset build, deterministic from one seed given the cached raw clips (Piper TTS
     synthesis itself is stochastic per call, so newly-filled clips are persisted back to
@@ -109,12 +118,16 @@ def build(  # pragma: no cover - I/O
     splits = {}
     speakers = {}
     for i, (name, ws) in enumerate((("train", tr_ws), ("val", va_ws), ("test", te_ws))):
-        X, y, is_tts = assemble(ws, noises, np.random.default_rng(seed + 1 + i), labels, words)
+        X, y, is_tts = assemble(
+            ws, noises, np.random.default_rng(seed + 1 + i), labels, words, shift_ms=shift_ms
+        )
         np.savez(config.DATA_DIR / f"{out_prefix}_{name}.npz", X=X, y=y, is_tts=is_tts)
         splits[name] = (X, y, is_tts)
         speakers[name] = [s for items in ws.values() for _, s in items]
 
-    manifest = build_manifest(splits, seed=seed, labels=labels, speakers=speakers)
+    manifest = build_manifest(
+        splits, seed=seed, labels=labels, speakers=speakers, shift_ms=shift_ms
+    )
     suffix = out_prefix.removeprefix("features")
     (config.DATA_DIR / f"manifest{suffix}.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False)
@@ -127,10 +140,17 @@ def build(  # pragma: no cover - I/O
 
 def main() -> None:  # pragma: no cover - CLI wrapper
     """`kws-dataset build [--seed N] [--cache raw_clips_v3.pkl] [--prefix features_v3]
-    [--recordings-split train|auto]`."""
+    [--recordings-split train|auto] [--shift-ms N]`."""
     ap = argparse.ArgumentParser(prog="kws-dataset")
     ap.add_argument("command", choices=["build"])
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--shift-ms",
+        type=int,
+        default=200,
+        dest="shift_ms",
+        help="max random time-shift of each word row in ms, either direction (default 200)",
+    )
     ap.add_argument("--cache", default="raw_clips_merged.pkl", help="raw clip cache under data/")
     ap.add_argument("--prefix", default="features", help="output npz prefix (features_v3 ...)")
     ap.add_argument(
@@ -148,4 +168,5 @@ def main() -> None:  # pragma: no cover - CLI wrapper
         cache_name=args.cache,
         out_prefix=args.prefix,
         recordings_split=args.recordings_split,
+        shift_ms=args.shift_ms,
     )
