@@ -3910,6 +3910,81 @@ post-wake command window, where the grammar still needs a device word first; the
 session's false-alarm and agreement columns are the arbiter. Left in Assistent with `field
 on thresh 0.85`; no spoken test (audio embargo).
 
+### E45 — the word cutter never split Whisper's welded compounds: Küche 1 → 20, Dach 0 → 19 real clips (2026-09-08, host-only, fix/qc-split-glued-words)
+
+(E44 is reserved for a parallel firmware entry.) E41's per-word diagnostic had `Küche` and `Dach`
+firing 1/39 in context, and `approved/words/` held **1 Küche and 0 Dach** real clips against
+76 Licht — although 28 % of the read sentences contain one of them. Cause, not a model
+property: Whisper large-v3 writes "Licht Küche" as one token, and the phrase→word cutter in
+`run_qc` matched the prompt's tokens against each Whisper span's *first* normalised token, so a
+"Lichtküche" span matched neither `licht` nor `küche`, the cutter ran off the end of the span
+list and reported the whole sentence as a segmentation gap — every word of it, `Licht`
+included. The content gate had already accepted the sentence (`_token_covers` understands the
+glue), and the field path had its own un-welder (`_split_glued`, E17/E25) — but only for the
+*label*, never for the clip timing.
+
+**Inventory** (every `qc/<stamp>/qc.csv`; a glued token is `Licht` welded to a zone,
+case-insensitive; "segmented" = the zone word appears as its own token in that set/speaker):
+
+| set | speaker | rows | glued rows | of which | zone segmented |
+|---|---|---|---|---|---|
+| sentences | spk10 | 98 | 36 | Lichtküche 16, Lichtdach 15 (2 triple-glued "Lichtdachheller/-dunkler"), Lichtlesen 5 | Außen 16, Lesen 11, Küche 0, Dach 0 |
+| sentences | spk02 | 102 | 4 (+1 rejected "Lichtdachteller") | Lichtküche 2, Lichtdach 2 | 0 |
+| field | spk18 | 39 | 2 | Lichtküche 2 | Dach 7, Außen/Küche/Lesen 1 each |
+| field | spk20 | 13 | 1 | Lichtdach 1 | 0 |
+| elicit | spk20 | 4 | 1 | Lichtküche 1 | 0 |
+| field spk17/spk19, negatives, wake, guided words | | | 0 | | (guided words: Außen 5, Lesen 1) |
+
+Whisper glued `Licht` to `Küche`/`Dach`/`Lesen` in **every** read sentence that contains them
+(0 segmented); `Außen` it always separated ("Licht außen"), which is why Außen had 22 clips and
+the other three had 13 between them. Four stamps carry the glue: `…09-02T16-18-05Z`,
+`…09-03-1923`, `…09-04-0951`, `…09-06-1404`. The spk18 "Dach auf/zu" field takes are segmented
+but unparsable (no such intent) and stay unfiled by design.
+
+**Fix** (`kws_de.qc.word_spans`, one function). The one place every word clip takes its
+timing from — guided sentence, field and elicit takes all reach the same `set == "sentences"`
+branch — now yields one `(token, start, end)` per *vocabulary* token: each Whisper span is
+normalised, `_split_glued` peels vocabulary words off it (only a token that decomposes
+completely is split, unchanged from E25), and the span is divided among the parts **in
+proportion to their letter counts** — Whisper's timestamps are per word, not per character
+(`mlx_whisper.transcribe(word_timestamps=True)` gives nothing finer), so the boundary inside a
+compound is an estimate: "Lichtküche" 0.20–1.00 s → licht 0.20–0.60, küche 0.60–1.00.
+`segment_word` then centres its 1 s window on the part as before. No gate moved: audio,
+content, wake, truncation, stub and #58 rules are untouched; the matching loop simply sees
+the split tokens. Test: a "Lichtküche an." transcript files Licht, Küche and an, with the
+two `words.csv` spans covering the original span end to end.
+
+**Re-run** (`kws-qc "$KWS_DATA_ROOT/data/recordings/incoming/<stamp>"`, the four stamps only;
+idempotent by construction — `_clear_stamp` removes exactly the paths in that stamp's
+`written.txt` before rewriting, and `approved/*/index.csv` is filtered by the same list), then
+`scripts/audit-approved.py` (with transcription):
+
+| | Küche | Dach | Lesen | Außen | Licht | words total | of which field-derived |
+|---|---|---|---|---|---|---|---|
+| before | 1 | 0 | 12 | 22 | 76 | 269 | 72 |
+| after | **20** | **19** | **17** | 22 | **120** | **401** | 80 |
+
++132 word clips; Licht gained 44 because every glued sentence had lost its `Licht` clip too.
+Per stamp: `…09-02` 51 → 63 word clips (0 skipped, was 12), `…09-03-1923` 258 written / 0
+skipped, `…-0951` 8, `…-1404` 44; phrases/negatives/wake counts unchanged (139/43/51).
+Listen-free sanity over the 70 recovered Küche/Dach/Außen/Lesen clips: every clip is exactly
+1.00 s (`config.CLIP_SAMPLES`), 0 samples at the rail, RMS no lower than −26 dBFS; derived
+sub-spans 0.16–0.71 s (median 0.38). Three `Dach` sub-spans are 0.16–0.20 s — the 4-letter
+share of a fast "Lichtdach" span — below the 0.2 s a spoken "Dach" should take, but the 1 s
+window still holds the whole compound, so no gate trips and nothing was dropped.
+
+The audit's one finding is **pre-existing and outside this change**:
+`negatives/spk18/74-46932133_001.wav` (stamp `…09-05-1202`, not re-run) re-transcribes as
+"… Hey Bus." although the whole-take transcript QC cut it by reads "Hey Bus, lieber Bus
+Bananenbrot." — a Whisper whole-take vs. clip disagreement of the #58 class, to be handled
+separately.
+
+**Not done here:** no dataset rebuild, no retrain. The manifest and every command-model
+figure since E15 were built from the 269-clip words tree; the coordinator schedules the
+rebuild. Expected effect: Küche/Dach go from ~0 training examples to spk10-dominated 20/19,
+so the E41 in-context 1/39 miss for these two words is at least partly a data gap, not only
+the positional-resolution ceiling E42/E43 measured.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

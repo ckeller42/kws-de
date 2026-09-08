@@ -258,6 +258,29 @@ def _split_glued(tok: str, v: set[str]) -> list[str]:
     return out
 
 
+def word_spans(tr: Transcript) -> list[tuple[str, float, float]]:
+    """One `(normalised token, start, end)` per token in a transcript's word
+    spans — THE place every word clip takes its timing from, guided sentence
+    or field/elicit take alike. A welded compound ("Lichtküche", E41: 28 % of
+    the read sentences carry one, and Küche/Dach had 1 and 0 real clips) is
+    split by `_split_glued`, and its single span is divided among the parts in
+    proportion to their letter counts: Whisper's timestamps are per word, not
+    per character, so the boundary inside the compound is an estimate."""
+    v = vocab()
+    out: list[tuple[str, float, float]] = []
+    for w in tr.get("words", []):
+        toks = [s for t in normalise(w["word"]) for s in _split_glued(t, v)]
+        if not toks:
+            continue
+        s, e = float(w["start"]), float(w["end"])
+        per_letter = (e - s) / sum(len(t) for t in toks)
+        for t in toks:
+            cut = s + per_letter * len(t)
+            out.append((t, s, cut))
+            s = cut
+    return out
+
+
 def field_intent(tokens: list[str]) -> Intent | Rejection:
     """The Whisper-derived label for a field take: the command tokens mapped
     back onto config labels and run through the SAME grammar the device uses
@@ -931,10 +954,10 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 },
             )
             need = required_tokens(t.prompt, "sentences")
-            spans = [(normalise(w["word"]), w["start"], w["end"]) for w in tr.get("words", [])]
+            spans = word_spans(tr)
             pos = 0
             for i, tok in enumerate(need):
-                while pos < len(spans) and not (spans[pos][0] and _matches(tok, spans[pos][0][0])):
+                while pos < len(spans) and not _matches(tok, spans[pos][0]):
                     pos += 1
                 if pos >= len(spans):  # Whisper's word spans didn't cover this token
                     n_skipped += len(need) - i
