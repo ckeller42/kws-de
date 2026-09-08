@@ -3896,8 +3896,19 @@ inside the tail, drop only fires whose label is `aus` (12 of 17 first words in t
 `_unknown_` (would otherwise become an `intent_rescore` slot); no valid intent starts with either
 (`intent.c`: device word first). `assist_gate_in_wake_tail(ms, label)`, host test extended.
 
-**Device: pending** (flash + a field session at the new cadence; expect the first-word fired
-share and the field agreement to move, and the `KWS_DUTY` recognise-mode line to read ≈ 460).
+**Device (2026-09-08 10:10, flashed this branch's build).** Boot: same model stamps, free
+internal 37,799 B (−256 B vs E37 for the tick bookkeeping). Continuous `mode recognise`:
+`KWS_DUTY … recogniser active 1000/1000 of wall, inference 461 ms per wall second` (E37:
+320) — ten steps per second as designed; `step 45–46 ms (front-end 511–529 us over 4–5 new
+frames, invoke 42.1–42.5 ms)` — 4–5 new frames per step instead of 6–7, front-end cost
+unchanged. Wake loop unaffected (`step 1316 +/- 206 us`, room peaks 0.20 / 0.00). One
+thing to watch: in the quiet room the continuous recogniser now logged `fired Licht`
+0.46–0.62 three times in 25 s (the E37 run at the old cadence logged `_unknown_` 0.59–0.63
+three times in 20 s) — hangover 2 at 100 ms is 200 ms of stable top-1 instead of 290 ms, so
+room-noise runs clear it more easily. In Assistent mode this only matters inside the
+post-wake command window, where the grammar still needs a device word first; the field
+session's false-alarm and agreement columns are the arbiter. Left in Assistent with `field
+on thresh 0.85`; no spoken test (audio embargo).
 
 ## Open questions
 
