@@ -90,6 +90,28 @@ def test_merge_recordings_folds_approved_in_and_never_duplicates(tmp_path):
     assert {k: len(v) for k, v in clips_ws.items()} == sizes
 
 
+def test_merge_recordings_folds_context_tree_in_tagged_ctx(tmp_path):
+    """E48: approved/context/<label>/ (word clips cut from a sentence/field/elicit
+    take) merges alongside approved/words/ (guided single-word takes), tagged
+    `ctx:` so the two origins stay distinguishable, and a re-run replaces rather
+    than duplicates its own entries without touching the other tree's."""
+    rec = tmp_path / "recordings"
+    _approved_tree(rec)
+    ctx = rec / "approved" / "context" / "Licht"
+    ctx.mkdir(parents=True)
+    sf.write(ctx / "spk10_001.wav", _tone(), 16000, subtype="PCM_16")
+    clips_ws = {"Licht": [(np.zeros(config.CLIP_SAMPLES, np.float32), "mswc:x")], "_unknown_": []}
+
+    merged = data.merge_recordings(clips_ws, rec)
+    assert merged["Licht"] == 2  # 1 guided + 1 context
+    speakers = {s for _, s in clips_ws["Licht"]}
+    assert speakers == {"mswc:x", "rec:spk09", "ctx:spk10"}
+
+    sizes = {k: len(v) for k, v in clips_ws.items()}
+    data.merge_recordings(clips_ws, rec)  # re-run: no duplication
+    assert {k: len(v) for k, v in clips_ws.items()} == sizes
+
+
 def test_merge_recordings_no_approved_tree_is_a_noop(tmp_path):
     clips_ws = {"Licht": [(np.zeros(config.CLIP_SAMPLES, np.float32), "rec:spk09")]}
     assert data.merge_recordings(clips_ws, tmp_path / "recordings") == {}

@@ -392,6 +392,8 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
         "approved": 3,
         "rejected": 1,
         "words_written": 4,
+        "words_guided_written": 1,
+        "words_context_written": 3,
         "words_skipped": 0,
         "wake_written": 0,
         "field_takes": 0,
@@ -411,10 +413,12 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
         "elicit_expected_match": 0,
         "elicit_expected_compared": 0,
     }
-    licht_files = sorted((appr / "words" / "Licht").glob("*.wav"))
-    assert len(licht_files) == 2  # bare take + phrase-segmented word, distinct files
-    assert (appr / "words" / "Küche" / "spk02_001.wav").exists()
-    assert (appr / "words" / "an" / "spk02_001.wav").exists()
+    # bare guided take -> approved/words/; phrase-segmented words (context
+    # origin, E48) -> approved/context/, both distinct files
+    assert (appr / "words" / "Licht" / "spk02_001.wav").exists()
+    assert (appr / "context" / "Licht" / "spk02_001.wav").exists()
+    assert (appr / "context" / "Küche" / "spk02_001.wav").exists()
+    assert (appr / "context" / "an" / "spk02_001.wav").exists()
     assert (appr / "phrases" / "spk02" / "licht-kueche-an_001.wav").exists()
     assert (appr / "negatives" / "spk02" / "hallo-welt_001.wav").exists()
     assert not (appr / "negatives" / "spk02" / "hallo-welt_002.wav").exists()
@@ -423,12 +427,16 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
     assert (qcd / "report.md").read_text().count("reject") >= 1
     words = list(csv.DictReader((qcd / "words.csv").open()))
     assert {w["word"] for w in words} == {"Licht", "Küche", "an"}
-    assert counts["words_written"] == len(list((appr / "words").rglob("*.wav")))
+    n_on_disk = len(list((appr / "words").rglob("*.wav"))) + len(
+        list((appr / "context").rglob("*.wav"))
+    )
+    assert counts["words_written"] == n_on_disk
 
     # re-run the SAME stamp: no duplication, no growth in file count
     counts2 = qc.run_qc(inc, qcd, appr, _phrase_transcriber)
     assert counts2 == counts
-    assert len(list((appr / "words" / "Licht").glob("*.wav"))) == 2
+    assert len(list((appr / "words" / "Licht").glob("*.wav"))) == 1
+    assert len(list((appr / "context" / "Licht").glob("*.wav"))) == 1
     assert len(list((appr / "phrases" / "spk02").glob("*.wav"))) == 1
     assert len(list(csv.DictReader((appr / "phrases" / "index.csv").open()))) == 1
 
@@ -532,9 +540,9 @@ def test_run_qc_segmentation_gap_reported_when_word_spans_miss_a_token(tmp_path)
     assert counts["approved"] == 1
     assert counts["words_written"] == 2
     assert counts["words_skipped"] == 1
-    assert (appr / "words" / "Licht" / "spk02_001.wav").exists()
-    assert (appr / "words" / "Küche" / "spk02_001.wav").exists()
-    assert not (appr / "words" / "an").exists()
+    assert (appr / "context" / "Licht" / "spk02_001.wav").exists()
+    assert (appr / "context" / "Küche" / "spk02_001.wav").exists()
+    assert not (appr / "context" / "an").exists()
     report = (qcd / "report.md").read_text()
     assert "## Segmentation gaps" in report
     assert "licht-kueche-an_001.wav" in report.split("## Segmentation gaps")[1]
@@ -570,7 +578,7 @@ def test_run_qc_splits_a_welded_compound_span_into_one_word_clip_per_part(tmp_pa
     assert set(words) == {"Licht", "Küche", "an"}
     assert (words["Licht"]["start_ms"], words["Licht"]["end_ms"]) == ("200", "600")
     assert (words["Küche"]["start_ms"], words["Küche"]["end_ms"]) == ("600", "1000")
-    assert (appr / "words" / "Küche" / "spk10_001.wav").exists()
+    assert (appr / "context" / "Küche" / "spk10_001.wav").exists()
     assert "(none)" in (qcd / "report.md").read_text().split("## Segmentation gaps")[1]
 
 
@@ -606,8 +614,8 @@ def test_word_spans_cuts_a_glued_span_at_the_energy_valley_not_by_letter_share(t
     qc.run_qc(inc, qcd, appr, lambda _p: tr)
     words = {r["word"]: r for r in csv.DictReader((qcd / "words.csv").open())}
     assert set(words) == {"Licht", "Küche"}
-    assert (appr / "words" / "Licht" / "spk10_001.wav").exists()
-    assert (appr / "words" / "Küche" / "spk10_001.wav").exists()
+    assert (appr / "context" / "Licht" / "spk10_001.wav").exists()
+    assert (appr / "context" / "Küche" / "spk10_001.wav").exists()
     for word, burst_centre in (("Licht", 0.325), ("Küche", 0.725)):
         span_centre = (int(words[word]["start_ms"]) + int(words[word]["end_ms"])) / 2000
         assert abs(span_centre - burst_centre) < 0.03
@@ -799,12 +807,13 @@ def test_run_qc_field_take_splits_wake_labels_by_grammar_and_scores_agreement(tm
     assert 0.70 <= len(sig) / sr <= 0.80
 
     # the command became an approved phrase with the grammar-derived prompt,
-    # segmented into word clips exactly like a guided sentence take
+    # segmented into word clips exactly like a guided sentence take (context
+    # origin, E48: cut out of a field take, not a dedicated single-word one)
     idx = list(csv.DictReader((appr / "phrases" / "index.csv").open()))
     assert idx[0]["prompt"] == "Licht Küche an" and idx[0]["speaker"] == "spk05"
     phrase = appr / "phrases" / "spk05" / "1-123456_001.wav"
     assert phrase.exists()
-    assert {p.parent.name for p in (appr / "words").rglob("*.wav")} == {"Licht", "Küche", "an"}
+    assert {p.parent.name for p in (appr / "context").rglob("*.wav")} == {"Licht", "Küche", "an"}
 
     # the phrase clip is the COMMAND, not the whole take: it starts after the
     # wake phrase (0.60 + 0.15 s) and ends 0.3 s past the last word (2.30 s), so
@@ -1150,10 +1159,10 @@ def test_run_qc_elicit_take_that_says_the_expected_intent_matches(tmp_path):
     assert row["prompt"] == "Licht Küche an"  # the derived (Whisper) label
     assert "## Elicit" in (qcd / "report.md").read_text()
 
-    # filed exactly like a field command: wake clip + phrase + word clips
+    # filed exactly like a field command: wake clip + phrase + context word clips
     assert len(list((appr / "wake" / "spk09").glob("*.wav"))) == 1
     assert len(list((appr / "phrases" / "spk09").glob("*.wav"))) == 1
-    assert {p.parent.name for p in (appr / "words").rglob("*.wav")} == {"Licht", "Küche", "an"}
+    assert {p.parent.name for p in (appr / "context").rglob("*.wav")} == {"Licht", "Küche", "an"}
 
 
 def test_run_qc_elicit_take_with_alternative_phrasing_is_filed_but_flagged_mismatch(tmp_path):
