@@ -3910,6 +3910,166 @@ post-wake command window, where the grammar still needs a device word first; the
 session's false-alarm and agreement columns are the arbiter. Left in Assistent with `field
 on thresh 0.85`; no spoken test (audio embargo).
 
+### E46 — run 6: retrain on the recovered Küche/Dach clips (2026-09-08, host-only, exp/run6-kueche-dach)
+
+(E45 — the QC word-cutter fix that un-welds Whisper's "Lichtküche"/"Lichtdach" spans, PR #91 —
+is the data change this entry trains on; its re-run had already put the recovered clips in
+`approved/words/`, so no QC ran here.) E41–E43 measured `Küche`/`Dach` firing 1/39 in context and
+attributed part of it to the 1 s classifier's positional resolution; E45 showed the two words
+had **1 and 0** real clips in the training tree because the cutter dropped every sentence that
+contained them. Question: with 20 Küche / 19 Dach / 120 Licht (was 76) real clips train-side,
+does the deployed recipe (a) recover those two words, (b) stay inside E40's seed band on the
+words it already had, and (c) move phrase exact-intent — and does E43's context-mix gain survive
+a second look on the bigger tree? Three rows, same recipe (`--width 48 --qat --qat-epochs 20
+--real-weight 3`, 40 epochs), nothing else moved.
+
+**Procedure.** Worktree off `origin/main` at `490ca1e`; `features_v3_{train,val,test}.npz`,
+`manifest_v3.json`, `raw_clips_v3.pkl` backed up as `*.pre-run6` (the E42/E43 seed-0 build).
+**This time the data is not restored:** the seed-0 build below, with the recovered clips, is
+the new baseline that later entries compare against; the `*.pre-run6` copies stay beside it and
+`raw_clips_v3.pkl` is byte-identical (`[tts] added:` empty in all three builds — the cache
+holds MSWC/TTS only, device clips are re-read from `approved/` on every build). `KWS_NOISE_DIR`
+(210) / `KWS_RIR_DIR` (270) as in E39–E43. Builds: `kws-dataset build --cache raw_clips_v3.pkl
+--prefix features_v3 --seed {0,1} [--context-mix 2]` (83 / 46 / 51 s); every build logs
+`[recordings] merged: {… 'Dach': 19, 'Küche': 20, 'Lesen': 17, 'Licht': 120 … '_unknown_': 104}`
+= 401 word + 104 negative device clips, all forced train-side. Seed 0: train/val/test 39,682 /
+6,433 / 11,315 (E42's 38,758 + 132 clips × 7 rows; **val and test rows byte-identical to E42/E43**
+— `cmp` equal to `*.pre-run6` — so INT8 test accuracy is comparable to those entries and to the
+deployed model's 0.7188 on the same rows). Seed 1: 45,184 / 3,792 / 8,454 (own split, as E40).
+Context-mix 2 on seed 0: 53,521 = 39,682 + 4,613 command clips × 3, `_unknown_` 3,689 → 8,302,
+val/test unchanged. Train `kws-train --v2 --prefix features_v3 --width 48 --qat --qat-epochs 20
+--real-weight 3 --seed N --out command_v3_w48_qat_run6_{s0,s1,ctx_s0}.keras` (1,317 / 1,342 /
+1,706 s), export `kws-export … --out <models>/run6-{s0,s1,ctx-s0}/` (canonical
+`command_v3_w48_qat.tflite` hashed `86b7105e` before and after; `firmware/main/gen/` untouched),
+scored with `scripts/recipe-grid.py`'s `score()`/`append_row()`, `kws_de.eval.eval_recordings`
+and the E41 per-window diagnostic pointed at each export and at the deployed model.
+
+**The scoreboard changed under the models.** `score()` walks `approved/words/*/*.wav`, so the
+four-speaker isolated set is now **n = 357** (spk01 13, spk02 50, spk10 258, spk18 36; six
+speakers 401), not E35–E43's 233, and the deployed model re-scored on it reads **0.798** — it
+has never seen a `Küche` or `Dach` and gets 1/20 and 0/19 of them. Two figures per row
+therefore: the new n = 357 scoreboard, and a reconstruction of the old set = every clip whose
+source take's Whisper transcript has no welded token (`_split_glued` on the `qc/<stamp>/words.csv`
+→ `qc.csv` join; the one spk18 field take whose two clips pre-date E45 kept). That gives
+n = 232 four-speaker / 268 six-speaker, one short of E41's 233/269, and the deployed model reads
+0.931 on it against E37's 0.936 — two clips (one spk10, one spk18) were re-cut with different
+timing by the E45 re-run, so the old-subset column is comparable *within this table* and to
+E40 only at the ±1-word level. The negatives set is untouched (32/43 clips), so false accepts
+are exactly comparable.
+
+| | deployed `86b7105e` | `run6_s0` | `run6_s1` | `run6_ctx_s0` |
+|---|---|---|---|---|
+| sha256 / bytes | `86b7105e` / 25,832 | `fc18de59` / 25,800 | `d0ea5793` / 25,800 | `1d3a3e30` / 25,800 |
+| train rows | (other era) | 39,682 | 45,184 | 53,521 |
+| best epoch / val acc (own val) | n/a | 39/40, 0.6593 | 37/40, 0.6018 | 40/40, 0.6462 |
+| float / QAT final train acc | | 0.7294 / 0.7376 | 0.7520 / 0.7574 | 0.6691 / 0.6784 |
+| INT8 test acc | 0.7188 (same rows as s0/ctx) | 0.7106 | 0.5929 (own split) | 0.7125 |
+| spk01 / spk02 / spk10 / spk18 (n 13/50/258/36) | 1.000 / 0.880 / 0.779 / 0.750 | 1.000 / 0.960 / 0.903 / **0.806** | 0.846 / 0.980 / 0.911 / 0.778 | 0.923 / 1.000 / 0.934 / 0.778 |
+| spk19 / spk20 (n 18/26, outside the rule) | 0.667 / 0.692 | 0.722 / 0.923 | 0.778 / 0.923 | 0.778 / 0.808 |
+| **aggregate words, new scoreboard (n=357)** | 0.798 (285) | **0.905 (323)** | **0.905 (323)** | **0.927 (331)** |
+| six-speaker isolated (n=401) | 0.786 | 0.898 | 0.900 | 0.913 |
+| aggregate words, old subset (n=232) | 0.931 (216) | 0.927 (215) | 0.922 (214) | 0.935 (217) |
+| six-speaker isolated, old subset (n=268) | 0.907 | 0.914 | 0.914 | 0.918 |
+| isolated Küche / Dach (n 20 / 19) | 0.05 / 0.00 | 0.80 / 0.89 | 0.95 / 0.84 | 0.95 / 0.95 |
+| isolated Licht / aus (n 120 / 23) | 0.85 / 0.74 | 0.85 / 0.83 | 0.88 / 0.70 | 0.82 / 0.91 |
+| false accepts (n=32) | 0 | **0** | **0** | 2 (spk10 1/19, spk18 1/3) |
+| deploy rule (`passes()`) | (reference) | **PASS** | **PASS** | FAIL (FA) |
+| **phrase exact-intent, unpadded (n=139)** | 0.101 (14) | **0.115 (16)** | 0.101 (14) | 0.094 (13) |
+| phrase exact-intent, 0.7 s silence prepended | 0.40 (55) | 0.53 (74) | 0.48 (67) | 0.60 (83) |
+| phrase exact-intent, 0.7 s padded both ends | 0.57 (79) | 0.70 (97) | 0.60 (84) | 0.71 (98) |
+| … of which zone = Küche/Dach (n=39), prepended / padded | 1 / 1 | 26 / 27 | 21 / 21 | 26 / 26 |
+| oracle ceiling raw t=0.3 / t=0.5 | 0.32 / 0.29 | **0.43 / 0.30** | 0.32 / 0.26 | 0.29 / 0.27 |
+| oracle ceiling smoothed t=0.3 / t=0.5 | 0.28 / 0.19 | 0.40 / 0.24 | 0.27 / 0.19 | 0.27 / 0.17 |
+| argmax-only oracle | 0.29 | 0.35 | 0.29 | 0.29 |
+| failure classes OK / MISS / SUB / INS / MULTI | 14 / 91 / 2 / 1 / 31 | 16 / 95 / 3 / 0 / 25 | 14 / 85 / 2 / 2 / 36 | 13 / 101 / 1 / 0 / 24 |
+| why expected words miss: fired / never top-1 / hangover / below thr | 52 / 34 / 9 / 4 % | 61 / 25 / 8 / 7 % | 60 / 24 / 7 / 9 % | 59 / 23 / 7 / 11 % |
+| in-context peak raw median / run width median | 0.86 / 2 win | 0.93 / 4 win | 0.94 / 3 win | 0.94 / 3 win |
+| isolated-word stream peak raw median / run width | 0.97 / 7 win | 0.87 / 6 win | 0.96 / 7 win | 0.96 / 7 win |
+| exact-intent 2-word (n=67) / 3-word (n=72) | 0.16 (11) / 0.04 (3) | 0.19 (13) / 0.04 (3) | 0.18 (12) / 0.03 (2) | 0.16 (11) / 0.03 (2) |
+| oracle raw t=0.3, 2-word / 3-word | 0.55 / 0.11 | 0.58 / **0.29** | 0.51 / 0.15 | 0.52 / 0.08 |
+| 3-word: **first** / middle / last word fired | **0.27** / 0.48 / 0.92 | **0.15** / 0.85 / 0.95 | **0.08** / 0.90 / 0.95 | **0.06** / 0.98 / 0.97 |
+| 2-word: first / last word fired | 0.52 / 0.50 | 0.55 / 0.50 | 0.52 / 0.48 | 0.43 / 0.52 |
+
+Per expected word, fired (decoder) / ever raw top-1 / isolated acc (n), deployed → s0 → s1 →
+ctx: **Küche 1/1/0.05 (20) → 18/19/0.80 → 18/19/0.95 → 19/20/0.95; Dach 0/3/0.00 (19) →
+17/18/0.89 → 16/17/0.84 → 19/19/0.95** (n = 20 / 19 expected); Licht 40/58/0.85 (120) →
+30/51/0.85 → 24/57/0.88 → 19/52/0.82; an 14/23/0.97 (31) → 14/23/0.94 → 14/22/1.00 →
+15/23/1.00; aus 14/19/0.74 (23) → 14/16/0.83 → 13/15/0.70 → 15/20/0.91; Außen 15/16/0.95 (22)
+→ 15/16/0.91 → 17/17/1.00 → 15/17/1.00; Lesen 14/15/1.00 (17) → 15/16/1.00 → 16/16/0.94 →
+16/16/0.94. (The 3-word position rates are computed here from `words_in_context.csv` for all
+139 clips, so the deployed column differs by a few points from E43's guided-take figures.)
+
+**Offset curve** (guided takes, Whisper spans; cell = mean raw p(word) / share of windows where
+the word is raw top-1; offset = window end − (word centre + 0.5 s)). Not comparable to E41–E43's
+curves: E45 rewrote `words.csv`, so `Küche`/`Dach` spans (n = 18 / 16) now enter the average —
+that alone takes the deployed model's centre from E41's 0.83/91 % to 0.60/66 %.
+
+| offset (s) | −0.5 | −0.4 | −0.3 | −0.2 | −0.1 | 0.0 | +0.1 | +0.2 | +0.3 | +0.4 | +0.5 | +0.6 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| deployed | 0.11/11 % | 0.12/13 % | 0.24/23 % | 0.48/54 % | 0.57/64 % | **0.60/66 %** | 0.55/62 % | 0.50/56 % | 0.41/44 % | 0.36/38 % | 0.30/33 % | 0.21/25 % |
+| `run6_s0` | 0.02/0 % | 0.07/6 % | 0.19/17 % | 0.51/53 % | 0.73/79 % | **0.78/88 %** | 0.72/80 % | 0.60/66 % | 0.42/43 % | 0.36/38 % | 0.29/31 % | 0.22/27 % |
+| `run6_s1` | 0.05/7 % | 0.10/12 % | 0.20/19 % | 0.52/55 % | 0.77/85 % | **0.80/87 %** | 0.71/75 % | 0.57/60 % | 0.38/41 % | 0.35/37 % | 0.30/33 % | 0.23/29 % |
+| `run6_ctx_s0` | 0.04/2 % | 0.10/9 % | 0.23/25 % | 0.56/62 % | 0.81/87 % | **0.82/89 %** | 0.72/79 % | 0.59/63 % | 0.37/39 % | 0.34/36 % | 0.29/32 % | 0.23/28 % |
+
+Per word at the centre, deployed → s0 → s1 → ctx: Küche 0.00/0 % → 0.74/80 % → 0.80/93 % →
+0.90/100 %; Dach 0.01/0 % → 0.82/94 % → 0.79/81 % → 0.92/100 %; Außen 0.82/100 % → 0.79/88 % →
+0.91/100 % → 0.84/100 %; Lesen 0.72/88 % → 0.82/100 % → 0.87/94 % → 0.88/94 %; an 0.89/93 % →
+0.84/93 % → 0.88/100 % → 0.94/100 %. The +0.3/+0.4 shoulders are the E42/E43 ones again
+(41–44 % / 36–38 %) in every row. Top-1 share while `Licht` is fully inside the window (115
+windows): deployed Licht 28 % / Lesen 17 % / Außen 15 % → s0 **Küche 21 % / Dach 20 %** / Licht
+14 % / Lesen 14 % → s1 Küche 26 % / Dach 17 % / Licht 9 % → ctx Küche 27 % / Dach 23 % / Licht
+absent from the top five. While `Küche` is inside: Licht 27 % (deployed) → Küche 59 / 52 / 59 %;
+`Dach`: Licht 19 % → Dach 62 / 55 / 67 %.
+
+**Verdict.** (a) **Recovered.** `Küche`/`Dach` go from 1/39 fired in context to 35/39 (s0),
+34/39 (s1), 38/39 (ctx), isolated from 0.05/0.00 to 0.80–0.95, and the zone = Küche/Dach
+counterfactual (silence prepended) from 1/39 to 21–26/39: E41's "1/39" was a data gap, as E45
+predicted, not the classifier's positional ceiling. (b) **Old words held.** On the old-subset
+column the two plain seeds read 0.927 / 0.922 against the deployed 0.931 and each other's
+E40 band (0.919 ± 0.011): no loss on the 232 words the deployed model was chosen on, and both
+seeds land on the same 323/357 with **0/32 false accepts** — the first time two seeds of this
+recipe agree on 0 FA (E40's three seeds gave 2/1/0). (c) **Phrase intent barely moves**:
+16 / 14 / 13 of 139 against 14, although the model now knows the missing words. The reason is
+in the 3-word rows: the middle word fires 0.48 → 0.85–0.98, but the **first word — always
+`Licht` — falls 0.27 → 0.15 / 0.08 / 0.06**, and unpadded 3-word exact-intent stays at 2–3/72.
+The confusion table says why: the recovered clips are 1 s windows centred on a letter-count
+share of a *welded* Whisper span, so a "Küche" training clip contains most of the preceding
+"Licht" (sub-spans 0.16–0.71 s in a 1 s window, E45), and the classifier has learnt "Licht
+followed by küche ⇒ Küche" — a window that holds `Licht` fully is now top-1 `Küche`/`Dach`
+41–50 % of the time. The decoder then fires the zone and never sees the device word, and the
+grammar rejects on "missing device". The gain moved from one word to its neighbour; the
+sentence still loses. Where the first word is centred by hand (0.7 s prepended) the same
+models reach 0.48–0.60, and padded both ends 0.60–0.71 (deployed 0.40 / 0.57), so the ceiling
+rose — the oracle at raw t=0.3 goes 0.32 → 0.43 for s0 and the 3-word oracle 0.11 → 0.29 — and
+the decoder's alignment problem of E41 is once more what is left. s0's oracle gain is
+seed-specific (s1 0.32, ctx 0.29): three exports from the same tree span 0.29–0.43 on the
+oracle and 13–16 on exact-intent, which is the phrase-level seed bar for future rows.
+**Context-mix, second look:** on this tree it buys +8 words on the new scoreboard (0.927 vs
+0.905; spk10 0.934, spk02 1.000, Dach 19/19 fired) but costs **2 false accepts** (spk10 and
+spk18, one each) and the lowest phrase score (13, first-word 0.06) — E43's "isolated words
+only" finding again, with the FA side of it now on the wrong side of the rule. Not a candidate.
+
+**Deploy candidate: `run6_s0` (`fc18de59`)** — passes the rule (0.905 ≥ 0.785, 0/32, spk18
+0.806 > 0.333), beats `86b7105e` on the scoreboard the rule is now scored on (0.905 vs 0.798,
++38 of 357 words) at 0 FA, is inside the seed band on the old words (0.927 vs 0.931), and is
+the better of the two passing seeds on spk18 (0.806 vs 0.778), spk01 (1.000 vs 0.846) and
+phrase intent (16 vs 14, oracle 0.43 vs 0.32). `run6_s1` (`d0ea5793`) is the equally-passing
+second seed (same 323/357, 0 FA). **Not deployed here** — no device, no flashing, the canonical
+model is still `86b7105e`; the device rows (E37-style duty/step, a field session for
+`Licht Küche …` / `Licht Dach …`) are the next step and the coordinator's call. Two follow-ups
+this opens: re-cut the recovered clips tighter (a forced alignment or an energy-based split
+inside the welded span instead of the letter-count share) so a `Küche` clip stops carrying
+`Licht`, and re-run the decoder sweep of E28 on the phrase set, since the middle-word
+recovery has changed which fires the grammar has to arbitrate.
+
+**Housekeeping.** `scripts/recipe-grid.csv` gained `run6_s0_w48_rw3_qe20` (`fc18de59`, PASS),
+`run6_s1_w48_rw3_qe20` (`d0ea5793`, PASS), `run6_ctx2_s0_w48_rw3_qe20` (`1d3a3e30`, FAIL);
+`aggregate_words` in those rows is on n = 357. Exports under `<models>/run6-*/`, never at the
+canonical path. Data: `features_v3_*.npz` + `manifest_v3.json` left at the **seed-0 plain
+build** (the new baseline; `built_at` 2026-09-08, `context_mix` 0), `*.pre-run6` kept, the
+seed-1 and context-mix builds stashed as `*.run6s1` / `*.run6ctx0` beside them. Diagnostic
+CSVs + summaries in the session scratch, not committed. No device, no flashing, no deploy.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
