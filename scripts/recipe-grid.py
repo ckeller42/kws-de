@@ -1,5 +1,5 @@
 """Host-only hyper-recipe grid search for the v3 command model
-(docs/paper-notes.md -- width sweep was E16, the deploy rule E27/E28).
+(docs/paper-notes.md -- width sweep was E16, the deploy rule E27/E28, redefined E52).
 
 Sweeps width x real-clip weight (kws-train --real-weight) x QAT epochs, all on
 the SAME `features_v3` build (fixed seed=0, whatever `kws-dataset build`
@@ -80,13 +80,13 @@ GIT_SHA = subprocess.run(
 
 
 def passes(row: dict) -> bool:
-    """The standing deploy rule (E27/E28): aggregate real-voice words >= 0.785, no false
-    accepts, and the least-represented speaker (spk18) above the deployed 1/3 floor."""
-    return (
-        float(row["aggregate_words"]) >= 0.785
-        and int(row["false_accepts"]) == 0
-        and float(row["spk18_words"]) > 0.333
-    )
+    """The deploy rule, redefined E52 (was E27/E28): aggregate GUIDED-ONLY isolated-word
+    accuracy (`approved/words/`, single-word takes only -- not `approved/context/`, see
+    E48) >= 0.785, and no false accepts. The original spk18 floor is dropped, not
+    replaced: E48's guided/context split left spk18 (and spk10) with zero guided-only
+    word clips, so `spk18_words` is permanently unmeasurable on the current tree (E49),
+    not merely low -- no other per-speaker floor was already available to reuse."""
+    return float(row["aggregate_words"]) >= 0.785 and int(row["false_accepts"]) == 0
 
 
 def run_id(width: int, real_weight: int, qat_epochs: int) -> str:
