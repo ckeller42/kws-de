@@ -4836,8 +4836,103 @@ any seed of this recipe can actually ship. Device: pending (moot — nothing pro
 **Not done here:** no change to `kws_de/export.py`'s health-floor logic or write ordering (flagged
 above, a maintainer decision, not a host-only scoring call); no third seed; no firmware build/flash.
 
+### E55 — health-gate redesign: per-class bootstrap floor + write-order fix; run8_s1 still blocked (2026-09-09, host-only, exp/run8-compound-bootstrap)
+
+E54 flagged two problems with `kws_de/export.py`'s `--firmware` gate and left both as open questions
+for a maintainer call. This entry resolves both, per that call: lower the health floor specifically
+for bootstrap classes (zero real training clips) while keeping the existing floor meaningful for
+classes with real backing, and fix the write-order bug so a failed gate can no longer leave canonical
+files ahead of `firmware/main/gen/`.
+
+**1 — health-gate redesign.** `assert_model_healthy` now takes `bootstrap_classes` (label indices
+with zero real, i.e. non-TTS, training clips) and `class_names`. Classes in `bootstrap_classes` are
+excluded from the existing `min_accuracy` (50%) floor — which now applies only to classes that DO
+have real training backing — and are instead scored against a new `bootstrap_min_accuracy` floor
+(default 15%). Bootstrap-class membership is derived from the train split's existing `is_tts`
+provenance flag (`kws_de/data.py`), not a new tracking mechanism: a class with zero `~is_tts` rows
+in `{prefix}_train.npz` is bootstrap. `kws_de/export.py:main` computes this set right after loading
+the train npz and threads it (plus `labels`) into `assert_model_healthy`.
+
+Floor choice: 26 classes at chance is 1/26 ≈ 3.8%. E53/E54 measured the 3 bootstrap classes
+(`Küchenlicht`/`Außenlicht`/`Leselicht`) at 24.4-29.0% own-class INT8 accuracy across two seeds —
+consistent, well above chance, exactly the shape expected of a TTS-only class that hasn't collapsed
+or scrambled. 15% sits at ~4x chance: comfortably below every observed bootstrap number (safety
+margin ≥9 points) so it doesn't rubber-stamp a pass, but far enough above the ~3.8% chance rate that
+a genuinely broken class (export corruption, label-index scrambling — those land at or near chance)
+still trips it. Tests: `test_bootstrap_classes_get_a_separate_lower_floor` (a 25%-accurate bootstrap
+class passes, the mature-class accuracy computed over the *other* 23 classes is unaffected) and
+`test_bootstrap_floor_still_rejects_a_near_chance_class` (a 0%-accurate bootstrap class still raises)
+in `tests/test_export_firmware.py`.
+
+**2 — write-order fix.** `kws_de/export.py:main` previously wrote the canonical
+`command{suffix}.tflite`/`_data.h`/`_metadata.json` unconditionally, then ran `assert_model_healthy`
+only inside the `--firmware` branch afterward — so a failed gate left canonical files holding the
+rejected model's bytes while `firmware/main/gen/` still named the old one (exactly what E54 caught
+and reverted by hand). Fixed by reordering: the INT8 test-set prediction, accuracy print, and (for
+`--firmware`) the health gate now all run *before* any file is written; the gate raises straight out
+of `main()` with nothing touched. Smallest possible diff — no temp-path/rename machinery needed,
+since the gate is pure computation over already-in-memory arrays and only ever needs to run once
+before the first `write_bytes`/`write_text` call. Test:
+`test_firmware_export_leaves_canonical_files_untouched_on_health_failure` — a full `kws-export
+--firmware` run against a synthetic, deliberately-untrained model in an isolated `tmp_path`
+`KWS_DATA_ROOT`, asserting canonical files and `firmware/main/gen/model_data.h` are byte-identical
+(via pre-written sentinel content) before and after the raised `ValueError`.
+
+**3 — re-running run8_s1's export.** Canonical `command_v3_w48_qat.{tflite,_data.h,_metadata.json}`
+and the `command_v3_w48_qat/` SavedModel dir were backed up as `*.pre-run8s1` (confirmed identical to
+deployed `86b7105e` beforehand), then: `kws-export --firmware --qat --prefix features_v3 --model
+command_v3_w48_qat_run8_s1.keras --width 48` (same command E54 used). Result: **still refused**, now
+for a different, verified-genuine reason:
+
+```text
+INT8 test accuracy: 0.4598
+ValueError: model accuracy 48.2% (real-backed classes) is below the 50% floor — refusing to export a broken model
+```
+
+Excluding the 3 bootstrap classes only moves the floor-relevant accuracy from 46.0% (all 26 classes)
+to 48.2% (23 real-backed classes) — still under 50%. Per-class breakdown of the 23 mature classes on
+this seed's `features_v3_test` split (own-era INT8, n=5,322 total) confirms this is not a
+bootstrap-class artefact: `Licht`/`Kühlschrank`/`_silence_` score 80-96%, but many single-word
+classes sit well below half — `Küche` 17.6%, `Lesen` 19.6%, `fünfundsiebzig` 17.9%, `heller` 28.0%,
+`kälter` 27.7%, `an` 34.8%, `Heizung`/`Aufstelldach` 36-37% — dragging the 23-class weighted average
+under the floor on its own, independent of the 3 bootstrap classes (which score 24.4-29.0%, as
+before, and individually clear their new 15% floor with margin — the redesign works as intended).
+This own-era split is TTS-heavy and adversarial across similar-sounding numerals/compounds by
+construction (see E54); it disagrees sharply with the guided-only real-voice metric (0.9595, best of
+any model scored in this vocabulary's history) the same way E54 already documented for the
+all-26-class figure. The gate redesign did exactly its job — it stopped rubber-stamping a bootstrap
+artefact and instead surfaced that seed 1's mature-class own-era accuracy is genuinely, if narrowly,
+below the floor. Per this task's explicit stopping rule, the floor is not loosened further to force
+a pass.
+
+**Write-order fix verified on a real failure.** After the `ValueError` above, canonical
+`command_v3_w48_qat.tflite`/`_data.h`/`_metadata.json` sha256-match their `*.pre-run8s1` backups
+exactly (byte-for-byte untouched) and `firmware/main/gen/model_config.h` still reads
+`KWS_MODEL_ID "command_v3_w48_qat.tflite@86b7105e 2026-09-06"` — no partial-overwrite, no manual
+catch-and-revert needed this time. Backups deleted afterward (nothing to restore from; canonical was
+never touched).
+
+**Deploy decision: still NOT deployed.** Since `--firmware` refused the export again, none of step
+5's downstream verification (`kws-codegen`, `kws-fwgen --check`, `make -C firmware/test`, full
+`pytest`, `ruff`, `markdownlint`, Docker build, `data/manifest_v3_qat.json` refresh) applies — all
+conditional on a successful export, which did not happen. `run8_s1`'s isolated export under
+`$KWS_DATA_ROOT/models/run8-s1/` is unchanged from E54. Device: pending (moot — nothing promoted).
+The remaining path to deploying either `run8` seed is real speaker data: for the 3 new bootstrap
+words directly (their own accuracy is already known and expected to stay low without it), and
+plausibly a broader real-recording pass on the weaker mature classes surfaced above — this seed's
+own-era shortfall is not concentrated in the new vocabulary.
+
+**Not done here:** no third seed (out of scope — this entry is about the gate, not a fresh
+seed-variance search); no loosening of the 50% mature-class floor to force `run8_s1` through; no
+firmware build/flash.
+
 ## Open questions
 
+- `kws_de/export.py`'s bootstrap-aware health gate (E55) is now class-provenance-driven and covers
+  the failure mode E54 raised, but both `run8` seeds still fail it on the *mature*-class accuracy
+  alone (independent of the bootstrap floor) — the vocabulary needs real speaker data, not a further
+  gate change, before this recipe can ship. Candidate weak mature classes from E55's per-class
+  breakdown: `Küche`, `Lesen`, `fünfundsiebzig`, `heller`, `kälter`, `an`.
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
   effective n ≈ (speaker, word) pairs; `kws-benchmark --folds 5` over real speakers only, TTS always
   train-side, mean ± std + per-speaker table. Build after v3 once ≥ 5 speaker groups cover every

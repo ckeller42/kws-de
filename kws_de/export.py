@@ -200,28 +200,81 @@ def write_metadata(path, labels=None) -> None:
         json.dump(meta, fh, indent=2, ensure_ascii=False)
 
 
-def assert_model_healthy(y_true, y_pred, *, min_accuracy=0.5, min_predicted_classes=10) -> dict:
+def assert_model_healthy(
+    y_true,
+    y_pred,
+    *,
+    min_accuracy=0.5,
+    min_predicted_classes=10,
+    bootstrap_classes=None,
+    bootstrap_min_accuracy=0.15,
+    class_names=None,
+) -> dict:
     """Refuse to ship a model that classifies at ~random or has collapsed onto a
     handful of classes. A broken `command.keras` (mode-collapsed — ~random
     accuracy even on its own training data, every input mapped to ~3 classes) was
     once exported into the firmware header unnoticed and the on-device recogniser
     produced near-uniform garbage. This gate turns that into a hard export-time
-    failure. Pure over (y_true, y_pred) so it is trivially testable."""
+    failure. Pure over (y_true, y_pred) so it is trivially testable.
+
+    `bootstrap_classes` (label indices with zero real, non-TTS training clips —
+    e.g. a just-promoted word that only exists as TTS bootstrap data) are held
+    out of the `min_accuracy` floor: those classes structurally cannot reach
+    real-world accuracy yet (no real speaker data to learn from), so folding
+    them into the blanket floor would either rubber-stamp real regressions in
+    the mature classes (by diluting the average) or block every bootstrap
+    retrain regardless of quality (by dragging the average down with expected
+    low bootstrap numbers) — see docs/paper-notes.md E54. `min_accuracy` then
+    applies unchanged to the classes that DO have real backing. Each bootstrap
+    class instead gets its own much lower `bootstrap_min_accuracy` sanity floor
+    (default 15%, ~4x the ~3.8% chance rate for 26 classes) — high enough to
+    catch a genuinely broken class (export corruption, label-index scrambling:
+    those land near chance) but comfortably under the 24-29% TTS-only accuracy
+    real bootstrap classes actually score (run8_s1, E54), so it doesn't
+    rubber-stamp a pass but doesn't demand data these classes don't have
+    either. Classes not present in `y_true` are skipped (nothing to score).
+    `class_names[i]` (optional) is used instead of the bare index `i` in error
+    messages."""
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
-    accuracy = float(np.mean(y_pred == y_true))
+    bootstrap_classes = set(bootstrap_classes or ())
+
+    def name(c: int) -> str:
+        return class_names[c] if class_names is not None else str(c)
+
+    mature_mask = ~np.isin(y_true, list(bootstrap_classes)) if bootstrap_classes else None
+    y_true_mature = y_true[mature_mask] if mature_mask is not None else y_true
+    y_pred_mature = y_pred[mature_mask] if mature_mask is not None else y_pred
+    accuracy = (
+        float(np.mean(y_pred_mature == y_true_mature)) if len(y_true_mature) else float("nan")
+    )
     predicted_classes = int(np.unique(y_pred).size)
-    if accuracy < min_accuracy:
+    if len(y_true_mature) and accuracy < min_accuracy:
         raise ValueError(
-            f"model accuracy {accuracy:.1%} is below the {min_accuracy:.0%} floor "
-            "— refusing to export a broken model"
+            f"model accuracy {accuracy:.1%} (real-backed classes) is below the {min_accuracy:.0%} "
+            "floor — refusing to export a broken model"
         )
     if predicted_classes < min_predicted_classes:
         raise ValueError(
             f"model predicted only {predicted_classes} distinct classes (mode collapse) "
             "— refusing to export"
         )
-    return {"accuracy": accuracy, "predicted_classes": predicted_classes}
+    result = {"accuracy": accuracy, "predicted_classes": predicted_classes}
+    bootstrap_accuracy = {}
+    for c in sorted(bootstrap_classes):
+        rows = y_true == c
+        if not rows.any():
+            continue
+        bacc = float(np.mean(y_pred[rows] == y_true[rows]))
+        bootstrap_accuracy[name(c)] = bacc
+        if bacc < bootstrap_min_accuracy:
+            raise ValueError(
+                f"bootstrap class {name(c)!r} accuracy {bacc:.1%} is below its "
+                f"{bootstrap_min_accuracy:.0%} sanity floor — refusing to export"
+            )
+    if bootstrap_accuracy:
+        result["bootstrap_accuracy"] = bootstrap_accuracy
+    return result
 
 
 def _tflite_predict(tflite: bytes, X) -> np.ndarray:  # pragma: no cover - needs tflite runtime
@@ -314,11 +367,40 @@ def main() -> None:  # pragma: no cover - I/O wrapper
         return
     d = np.load(config.DATA_DIR / f"{prefix}_train.npz")
     blob = to_int8_tflite(model, balanced_calibration(d["X"], d["y"]))
+    # Bootstrap classes: labels with zero real (non-TTS) training clips, e.g. a
+    # just-promoted word that only exists as TTS data so far. Derived from the
+    # train split's existing is_tts provenance flag (kws_de/data.py), not a new
+    # tracking mechanism — see assert_model_healthy's docstring for why these
+    # get a separate, lower health floor.
+    bootstrap_classes = set()
+    if "is_tts" in d.files:
+        y_train, is_tts_train = np.asarray(d["y"]), np.asarray(d["is_tts"], bool)
+        bootstrap_classes = {
+            int(c) for c in np.unique(y_train) if not (~is_tts_train[y_train == c]).any()
+        }
+    # Never bake a broken model into the firmware, and never leave the canonical
+    # command{...}.tflite/_data.h/_metadata.json inconsistent with
+    # firmware/main/gen/ if it's refused: compute + validate on held-out data
+    # BEFORE writing any output file. Skips the gate only if the test split is
+    # absent (non-firmware exports never had a gate to begin with).
     test_path = config.DATA_DIR / f"{prefix}_test.npz"
     if test_path.exists():
         t = np.load(test_path)
-        acc = float((_tflite_predict(blob, t["X"]) == t["y"]).mean())
+        y_pred = _tflite_predict(blob, t["X"])
+        acc = float(np.mean(y_pred == t["y"]))
         print(f"INT8 test accuracy: {acc:.4f}")
+        if args.firmware:
+            h = assert_model_healthy(
+                t["y"], y_pred, bootstrap_classes=bootstrap_classes, class_names=labels
+            )
+            n_real = len(labels) - len(bootstrap_classes)
+            print(
+                f"model health: {h['accuracy']:.1%} accuracy ({n_real} real-backed classes), "
+                f"{h['predicted_classes']} classes predicted"
+                + (f", bootstrap: {h['bootstrap_accuracy']}" if "bootstrap_accuracy" in h else "")
+            )
+    elif args.firmware:
+        print(f"WARNING: {test_path.name} absent — skipping model-health gate")
     (out / tflite_name).write_bytes(blob)
     write_c_array(blob, out / header_name)
     print(f"[export] wrote {tflite_name} + {header_name} from {model_name} ({prefix})")
@@ -327,15 +409,6 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     )
     write_metadata(out / "metadata.json")
     if args.firmware:
-        # Never bake a broken model into the firmware: validate on held-out data
-        # before writing the device header. Skips only if the test split is absent.
-        test_path = config.DATA_DIR / f"{prefix}_test.npz"
-        if test_path.exists():
-            t = np.load(test_path)
-            h = assert_model_healthy(t["y"], _tflite_predict(blob, t["X"]))
-            print(f"model health: {h['accuracy']:.1%} accuracy, {h['predicted_classes']} classes")
-        else:
-            print(f"WARNING: {test_path.name} absent — skipping model-health gate")
         gen = pathlib.Path("firmware/main/gen")
         gen.mkdir(parents=True, exist_ok=True)
         write_c_array(blob, gen / "model_data.h")
