@@ -13,6 +13,20 @@ def test_negative_prompts_contain_no_command_words():
         assert not (set(p.lower().split()) & vocab), p
 
 
+def test_negative_prompts_exclude_fused_scene_trigger_words():
+    # Leseratte/Nachtlicht are single unbroken words -- a negative_windows() 1s
+    # hop window could isolate one whole, giving the eventual positive class a
+    # contradictory _unknown_-labelled duplicate of itself once promoted (see
+    # config.SCENE_TRIGGERS' comment). The two-word triggers (Gute Nacht/Guten
+    # Morgen) are deliberately NOT guarded here: their internal word boundary
+    # and a sentence's surrounding prosody make an exact-length hop-window
+    # isolation less likely, and greeting-phrase negatives are valuable enough
+    # to keep despite the residual risk.
+    single_word_triggers = {"leseratte", "nachtlicht"}
+    for p in config.NEGATIVE_PROMPTS:
+        assert not (set(p.lower().split()) & single_word_triggers), p
+
+
 def test_slug_is_ascii_and_stable():
     assert firmware_gen.slug("Kühlschrank") == "kuehlschrank"
     assert firmware_gen.slug("Licht Außen an") == "licht-aussen-an"

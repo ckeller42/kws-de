@@ -47,6 +47,21 @@ static const struct { const char *word; const char *zone; } kLightCompounds[] = 
 };
 #define N_LIGHT_COMPOUNDS (sizeof kLightCompounds / sizeof kLightCompounds[0])
 
+/* kws_de.config.SCENE_TRIGGERS: a single token standing for a COMPLETE intent
+   (device+zone+action all at once), unlike kLightCompounds which still needs a
+   following action word. Same pending status: not a trained class yet, matched
+   here as a literal string for the day a retrain adds it (docs/paper-notes.md
+   E50/E54). zone==NULL means "no zone" (device_takes_zone() still governs
+   whether a real zone may be attached downstream, matching grammar.py). */
+struct scene_trigger { const char *word; int device_idx; const char *zone; int action_idx; };
+static const struct scene_trigger kSceneTriggers[] = {
+    {"GuteNacht", 0, NULL, 1},     /* Licht, no zone, aus */
+    {"GutenMorgen", 0, NULL, 0},   /* Licht, no zone, an */
+    {"Leseratte", 0, "Lesen", 0},  /* Licht, Lesen, an */
+    {"Nachtlicht", 0, NULL, 9},    /* Licht, no zone, fuenfundzwanzig (25%) */
+};
+#define N_SCENE_TRIGGERS (sizeof kSceneTriggers / sizeof kSceneTriggers[0])
+
 static int label_index(const char *tok)
 {
     for (int i = 0; i < KWS_NUM_LABELS; i++)
@@ -66,6 +81,23 @@ intent_t intent_parse(const char *words)
     int device_idx = -1, action_idx = -1;
     const char *zone = NULL;
     for (char *tok = strtok(buf, " "); tok; tok = strtok(NULL, " ")) {
+        const struct scene_trigger *trig = NULL;
+        for (size_t ti = 0; ti < N_SCENE_TRIGGERS; ti++) {
+            if (strcmp(tok, kSceneTriggers[ti].word) == 0) {
+                trig = &kSceneTriggers[ti];
+                break;
+            }
+        }
+        if (trig) {
+            /* A scene trigger sets device+zone+action all at once; any slot
+               already set from an earlier token is a conflict (grammar.py
+               mirrors this with the same "duplicate device" rejection). */
+            if (device_idx >= 0 || zone || action_idx >= 0) return kInvalid;
+            device_idx = trig->device_idx;
+            zone = trig->zone;
+            action_idx = N_DEVICES + N_ZONES + trig->action_idx;
+            continue;
+        }
         const char *compound_zone = NULL;
         for (size_t ci = 0; ci < N_LIGHT_COMPOUNDS; ci++) {
             if (strcmp(tok, kLightCompounds[ci].word) == 0) {

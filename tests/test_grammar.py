@@ -85,3 +85,35 @@ def test_light_compound_duplicate_device_rejected():
 
 def test_light_compound_zone_conflict_rejected():
     assert isinstance(parse(["Küchenlicht", "Küche", "an"]), Rejection)
+
+
+def test_scene_trigger_gute_nacht_valid():
+    assert parse(["GuteNacht"]) == Intent("Licht", None, "aus")
+
+
+def test_scene_trigger_guten_morgen_valid():
+    assert parse(["GutenMorgen"]) == Intent("Licht", None, "an")
+
+
+def test_scene_trigger_leseratte_valid():
+    assert parse(["Leseratte"]) == Intent("Licht", "Lesen", "an")
+
+
+def test_scene_trigger_after_device_rejected():
+    assert isinstance(parse(["Licht", "GuteNacht"]), Rejection)
+
+
+def test_scene_trigger_then_device_rejected():
+    assert isinstance(parse(["GuteNacht", "Licht"]), Rejection)
+
+
+def test_scene_trigger_extra_zone_rejected():
+    assert isinstance(parse(["Leseratte", "Lesen"]), Rejection)
+
+
+def test_scene_trigger_nachtlicht_valid():
+    assert parse(["Nachtlicht"]) == Intent("Licht", None, "fünfundzwanzig")
+
+
+def test_scene_trigger_nachtlicht_extra_action_rejected():
+    assert isinstance(parse(["Nachtlicht", "fünfzig"]), Rejection)

@@ -93,6 +93,55 @@ LIGHT_COMPOUNDS = {"Küchenlicht": "Küche", "Außenlicht": "Außen", "Leselicht
 LIGHT_COMPOUND_PROMPTS = [
     f"{word} {action}" for word in LIGHT_COMPOUNDS for action in ("an", "aus")
 ]
+
+# Scene triggers: a single spoken phrase that maps to a COMPLETE Intent by itself
+# (device+zone+action all at once), unlike LIGHT_COMPOUNDS which still needs a
+# following action word. Same pending status as LIGHT_COMPOUNDS/E50: NOT in
+# COMMAND_LABELS/LABELS -- see that dict's comment for the exact
+# KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES coupling this would break. Grammar-ready
+# (kws_de.grammar.parse()/firmware/main/intent.c both treat a SCENE_TRIGGERS token
+# as short-circuiting straight to its mapped Intent), unreachable from a live
+# recognition until a retrain adds these as their own classes.
+#
+# Keys are the TOKEN a trained class would emit -- a single string with no
+# internal space, since grammar.py's event list and intent.c's
+# space-delimited `strtok` both assume one token per word/class. "Leseratte" is
+# already one German word, but "Gute Nacht"/"Guten Morgen" are two, so their
+# token joins the words the same way a real fused compound would
+# ("Küchenlicht" has no space either); SCENE_TRIGGER_PROMPTS below keeps the
+# natural two-word spelling for TTS/display. Values are (device, zone, action).
+#
+# Length check (CLIP_MS=1000, a 1s window): "Guten Morgen" is 4 syllables,
+# comparable to existing single-word classes like "Aufstelldach" (3) or
+# "Außenlicht" (3) that already fit; "Gute Nacht" (3 syllables) and
+# "Leseratte" (4 syllables) fit the same way. The one real risk a true fused
+# compound doesn't have: these two are separately-written words a speaker may
+# pause between, so a slow/enunciated take could run longer than a genuine
+# compound's single unbroken word -- worth confirming against real recordings
+# once a guided session captures them, not assumed safe from syllable count
+# alone.
+# "Nachtlicht" -> fünfundzwanzig (25%, the LOWEST existing LIGHT_LEVELS word):
+# there is no dimmer level word today, so 25% is the closest existing match to
+# "a bit of light for the night", not a considered design choice -- flag for
+# the coordinator in case a genuinely lower level word should be added instead
+# of reusing 25%.
+SCENE_TRIGGERS: dict[str, tuple[str, str | None, str]] = {
+    "GuteNacht": ("Licht", None, "aus"),
+    "GutenMorgen": ("Licht", None, "an"),
+    "Leseratte": ("Licht", "Lesen", "an"),
+    "Nachtlicht": ("Licht", None, "fünfundzwanzig"),
+}
+# Natural-language spelling per trigger token, for TTS synthesis/guided-recording
+# display only -- never fed to parse()/intent_parse() (those only ever see the
+# SCENE_TRIGGERS token). Same not-yet-wired-into-prompt_sets() status as
+# LIGHT_COMPOUND_PROMPTS and for the identical reason (kws_de.qc.vocab()/
+# label_for_token() only know DEVICES+ZONES+ACTIONS).
+SCENE_TRIGGER_PROMPTS: dict[str, str] = {
+    "GuteNacht": "Gute Nacht",
+    "GutenMorgen": "Guten Morgen",
+    "Leseratte": "Leseratte",
+    "Nachtlicht": "Nachtlicht",
+}
 ZONED_DEVICES = ["Licht"]
 # Per-device allowed actions — grounded in the real controllable functions.
 DEVICE_ACTIONS = {
@@ -173,4 +222,27 @@ NEGATIVE_PROMPTS = [
     "gib mir bitte das Handtuch",
     "die Kinder schlafen schon",
     "was gibt es heute zum Essen",
+    # Near-miss negatives for the pending SCENE_TRIGGERS words (kws_de.config):
+    # "Nacht"/"Morgen" used as ordinary greetings/farewells, and reading in an
+    # everyday (non-command) context -- NOT the trigger phrases themselves.
+    # "Sie ist eine richtige Leseratte" (a compliment using the literal
+    # trigger word) was deliberately left out: unlike the two-word triggers,
+    # "Leseratte" is one unbroken word, so a `negative_windows()` 1s hop
+    # window could isolate it whole, giving the eventual positive class a
+    # contradictory `_unknown_`-labelled duplicate of itself -- the exact
+    # contamination `test_negative_prompts_contain_no_command_words` already
+    # guards against for DEVICES/ZONES/ACTIONS. The two-word triggers below
+    # keep this residual risk (a hop window could still catch "gute nacht"
+    # whole) but are kept anyway: greeting formulas are common, valuable
+    # negative material, and their internal word boundary/sentence prosody
+    # make an exact-length isolation less likely than for a single word.
+    "gute Nacht bis morgen",
+    "der Morgen war kalt und neblig",
+    "ich habe die ganze Nacht gelesen",
+    # Nachtlicht (compound noun): dark/night theme without the literal
+    # trigger word and without "Licht" -- "Licht" is already forbidden in
+    # every negative (see test_negative_prompts_contain_no_command_words,
+    # it's a live DEVICES word), so an actual "Nacht ... Licht said
+    # separately" near-miss cannot be built without tripping that guard.
+    "das Zimmer war nachts stockdunkel",
 ]

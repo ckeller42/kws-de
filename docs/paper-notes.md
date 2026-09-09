@@ -4585,6 +4585,42 @@ them to the guided "Wörter aufnehmen" prompt list) into a future session. PR #9
 unmerged, as that future work; this entry's gate fix stands on its own regardless of when or
 whether that branch ships.
 
+### E54 — scene-trigger keywords: single phrases mapping to a full Intent (2026-09-09, host-only, pending)
+
+Four user-requested single-utterance "scene triggers", each a phrase that carries a COMPLETE
+`Intent` on its own rather than composing device+zone+action — same pending-vocabulary pattern as
+E50's light compounds (wired in grammar/intent.c/prompts/TTS/tests, NOT folded into
+`COMMAND_LABELS`; recognizes only after a retrain, held per the E53 hold-until-real-data decision):
+
+| trigger phrase | maps to Intent | note |
+|---|---|---|
+| Gute Nacht | Licht, all zones, `aus` | all lights off |
+| Guten Morgen | Licht, all zones, `an` | all lights on |
+| Leseratte | Licht, zone Lesen, `an` | reading light on |
+| Nachtlicht | Licht, all zones, `fünfundzwanzig` | 25%, the lowest existing `LIGHT_LEVELS` word — **assumption**: reuses the existing 25% level for "very low light"; a new, lower level word is a coordinator call if 25% is too bright |
+
+`SCENE_TRIGGERS` (config.py) is a `phrase-token → (device, zone, action)` map — unlike E50's
+compounds it needs a full-intent target, not a device+zone pair. `grammar.parse`/`intent.c`
+short-circuit a recognized trigger token straight to its mapped `Intent`, reusing the existing
+`Intent` construction path. Tokens are spaceless (`GuteNacht`, `GutenMorgen`) since the KWS class
+space is one token per ~1 s window; `SCENE_TRIGGER_PROMPTS` holds the spoken spelling for
+TTS/guided recording. The two-word triggers are 3–4 syllables — fit the 1 s window like the
+existing multi-syllable classes (`Aufstelldach`, `fünfundzwanzig`).
+
+**Negatives (user asked to extend these too).** Near-miss sentences using the trigger stems in
+ordinary, non-command contexts: "gute Nacht bis morgen", "der Morgen war kalt und neblig", "ich
+habe die ganze Nacht gelesen", "das Zimmer war nachts stockdunkel". **`"Sie ist eine richtige
+Leseratte"` was deliberately excluded** — unlike the two-word triggers, "Leseratte" is one
+unbroken word, so the compliment is acoustically the trigger word; labelling it a negative would
+teach the model to reject the very utterance it must accept. The residual risk kept is the
+two-word triggers: a `negative_windows()` 1 s hop over "gute Nacht bis morgen" could still frame
+"gute nacht" — accepted trade, the false-accept rate on the negatives set is the arbiter once real
+data exists.
+
+All four wired through guided "Wörter aufnehmen" prompts + TTS bootstrap so the next real recording
+round can capture them. `tests/test_grammar.py` +cases (29 pass), `intent_cases.h` regenerated
+(34 cases, intent parity 0/34), `COMMAND_LABELS` unchanged at 23 (pending). No retrain here.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
