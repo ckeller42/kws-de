@@ -4535,6 +4535,56 @@ tuple (flagged above, E49's same unfixed staleness), no firmware export/codegen/
 verification (moot, nothing deployed). `uv run --no-sync pytest -q` and `ruff check` both pass
 unchanged (host-only, `KWS_NOISE_DIR`/`KWS_RIR_DIR` unset).
 
+### E53 — export health gate: a separate, lower floor for bootstrap-only classes; fix a write-order bug (2026-09-09, host-only)
+
+An in-progress experiment (parked, unmerged branch `exp/run8-compound-bootstrap`, PR #99) promoted
+`COMMAND_LABELS` from 23 to 26 classes to bootstrap three new compound words
+(`Küchenlicht`/`Außenlicht`/`Leselicht`) from TTS only — no real speaker clips exist for them yet.
+`kws_de.export.assert_model_healthy`'s blanket 50% own-era-test-accuracy floor, applied over all 26
+classes at once, was diluted below 50% by the three structurally-weak bootstrap classes (24–29%
+each, expected for zero-real-data classes) even though the model's real-voice guided-only accuracy
+on the 23 mature classes was the best on record (0.9595, 0 false accepts — clears the E52 deploy
+rule with room to spare). This entry pulls just the gate fix out of that parked branch, since it is
+correct and useful independent of whether/when the 26-class model ever ships.
+
+**Fix.** `assert_model_healthy` now accepts `bootstrap_classes` (label indices with zero real,
+non-TTS training clips — read off the train split's existing `is_tts` provenance array, no new
+tracking) and `class_names`. The existing 50% floor applies unchanged, but only over classes that
+have real backing data — no longer diluted by classes that structurally cannot meet it yet. Each
+bootstrap class gets its own separate, much lower sanity floor (15%, ≈4× the ≈3.8% chance rate at
+26 classes) — comfortably under the observed 24–29% real bootstrap accuracy (so a normal bootstrap
+retrain isn't blocked) but far enough above chance to still catch a genuinely broken class (export
+corruption, label-index scrambling land near 0%). With `bootstrap_classes` empty (today's deployed
+23-class model has real data for every class), behaviour is bit-for-bit unchanged — this is
+additive, not a relaxation of the existing gate for models that don't need it.
+
+**Also fixed: a write-order bug**, found while chasing the above. `kws-export --firmware` wrote the
+canonical `command_v3_w48_qat.{tflite,_data.h,_metadata.json}` files *before* running the health
+check, so a failed check left canonical files holding the rejected model's bytes while
+`firmware/main/gen/` still named the old one — an inconsistent half-promoted state, caught once
+this session by hand (sha256 diff) rather than by any test. Reordered: the INT8 test prediction and
+health gate now run entirely in memory before any file is written; on failure nothing is written.
+
+**Tests:** `test_bootstrap_classes_get_a_separate_lower_floor` (a 25%-accurate bootstrap class
+passes, mature accuracy untouched), `test_bootstrap_floor_still_rejects_a_near_chance_class` (a
+0%-accurate bootstrap class still raises), `test_firmware_export_leaves_canonical_files_untouched_on_health_failure`
+(a full `export.main()` run against an untrained model; sentinel canonical/gen files provably
+unchanged after the raised error). Full suite, ruff, markdownlint all pass unchanged.
+
+**Not done here.** The 26-class model itself is not deployed and this entry does not attempt to —
+re-running the fixed gate on that model surfaced a second, independent problem: several of the
+*mature* 23 classes (`Küche` 17.6%, `Lesen` 19.6%, `fünfundsiebzig` 17.9%, `heller` 28.0%, `kälter`
+27.7%, `an` 34.8%, `Heizung`/`Aufstelldach` 36–37% own-era test accuracy) drag the mature-class
+floor to 48.2%, below 50%, on their own — nothing to do with the bootstrap classes. This disagrees
+sharply with the same classes' real-voice guided accuracy and is the same TTS-test-vs-real-voice
+divergence E49/E52 already flagged, just surfacing on a different subset of classes than before.
+**Coordinator's decision:** treat this as a real data-quality signal rather than a gate to tune
+around — hold the 26-class deploy, keep `86b7105e` deployed, and fold a broader real-recording pass
+(the weak mature classes above, plus the three bootstrap words, now that E53's sibling entry added
+them to the guided "Wörter aufnehmen" prompt list) into a future session. PR #99 stays open,
+unmerged, as that future work; this entry's gate fix stands on its own regardless of when or
+whether that branch ships.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
