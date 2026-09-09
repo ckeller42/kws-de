@@ -36,6 +36,7 @@ CAP_MS = {
     # is not fixed at 3500 ms — the firmware's ring is the only ceiling.
     "field": 9800,
     "elicit": 9800,  # prompts.c prompt_cap_ms(PROMPT_ELICIT): an unscripted answer runs long
+    "scene": 6000,  # prompts.c prompt_cap_ms(PROMPT_SCENE): a two-word trigger read with a pause
 }
 MIN_MS = 300
 MIN_RMS_DBFS = -45.0
@@ -174,6 +175,20 @@ def label_for_token(token: str) -> str | None:
     for w in config.DEVICES + config.ZONES + config.ACTIONS:
         if normalise(w) == [token]:
             return w
+    return None
+
+
+def scene_trigger_token(prompt: str) -> str | None:
+    """Recover the config.SCENE_TRIGGERS token ("GuteNacht") from a scene take's
+    prompt column, which record.c wrote as the natural-spelling display text
+    ("Gute Nacht", config.SCENE_TRIGGER_PROMPTS). Matched glued/normalised so a
+    trailing period or spacing quirk in the recorded prompt still resolves. The
+    token names the approved/scene/<token>/ bucket the take is filed under — a
+    pending class today, its own class after the retrain that promotes it."""
+    want = "".join(normalise(prompt))
+    for token, display in config.SCENE_TRIGGER_PROMPTS.items():
+        if "".join(normalise(display)) == want:
+            return token
     return None
 
 
@@ -450,6 +465,17 @@ def content_gate(set_name: str, prompt: str, transcript_text: str) -> tuple[floa
     if set_name == "wake":
         glued = "".join(heard)
         return (1.0, None) if _WAKE_RE.fullmatch(glued) else (0.0, f"wrong_word:{glued or '-'}")
+    if set_name == "scene":
+        # A scene take is one fixed trigger phrase read from the screen, no wake
+        # word — verified against the EXPECTED spelling (session.csv's prompt =
+        # record.c's prompt_text(), the config.SCENE_TRIGGER_PROMPTS display) the
+        # way the wake set is verified against "Hey Bus": glued so a two-word
+        # trigger Whisper spaces ("Nacht Licht") or fuses ("Nachtlicht") both
+        # match. The trigger words are NOT in vocab()/label_for_token (a pending
+        # class), so the words/sentences token filter cannot be used here.
+        want = "".join(normalise(prompt))
+        glued = "".join(heard)
+        return (1.0, None) if want and want in glued else (0.0, f"wrong_word:{glued or '-'}")
     need = required_tokens(prompt, set_name)
     if set_name == "words":
         ok = bool(need) and any(_token_covers(h, need, 0) is not None for h in heard)
@@ -759,7 +785,7 @@ def _clear_stamp(approved: Path, qc_dir: Path) -> None:
         f = approved / rel
         if f.exists():
             f.unlink()
-    for sub in ("phrases", "negatives", "wake"):
+    for sub in ("phrases", "negatives", "wake", "scene"):
         idx = approved / sub / "index.csv"
         if idx.exists():
             with idx.open() as fh:
@@ -833,6 +859,10 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
     # that matters is whether the speaker said what the scene was meant to elicit.
     n_elicit = n_elicit_approved = n_elicit_wake = n_elicit_parsable = n_elicit_unfiled = 0
     n_elicit_expected_compared = n_elicit_expected_match = 0
+    # Scene ("Szenen") takes are fixed trigger phrases read like the words set (no
+    # wake word), for a class pending until the next retrain — filed whole under
+    # approved/scene/<token>/, counted here, never folded into approved/words/.
+    n_scene = n_scene_approved = n_scene_written = n_scene_skipped = 0
     for t in takes:
         try:
             row, tr = judge(t, transcriber)
@@ -858,6 +888,8 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
             n_field_truncated += row.truncated == "1"
         elif t.set == "elicit":
             n_elicit += 1
+        elif t.set == "scene":
+            n_scene += 1
         if row.verdict != "approve":
             continue
         sig, sr = sf.read(t.file, dtype="float32", always_2d=True)
@@ -1090,6 +1122,32 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
                 },
             )
             n_wake += 1
+        elif t.set == "scene":
+            # A scene take is one whole fixed trigger phrase (no wake word, nothing
+            # to segment) — filed intact, exactly like a guided word/wake take, but
+            # under approved/scene/<token>/ because the trigger is a class pending
+            # until the next retrain (config.SCENE_TRIGGERS), kept OUT of
+            # approved/words/ (E48: the guided isolated-word set stays clean). The
+            # token is recovered from the read spelling in the prompt column.
+            token = scene_trigger_token(t.prompt)
+            if token is None:  # unknown trigger spelling: reject filing, don't misfile
+                n_scene_skipped += 1
+                continue
+            d = approved / "scene" / token
+            dst = d / f"{t.speaker}_{_next_no(d, t.speaker)}.wav"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(t.file.read_bytes())
+            written.append(str(dst.relative_to(approved)))
+            _append_index(
+                approved / "scene" / "index.csv",
+                {
+                    "file": str(dst.relative_to(approved)),
+                    "prompt": t.prompt,
+                    "speaker": t.speaker,
+                },
+            )
+            n_scene_approved += 1
+            n_scene_written += 1
         else:
             slug = _slug_of(t.file)
             d = approved / "negatives" / t.speaker
@@ -1154,6 +1212,16 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         )
     else:
         elicit_section = ""
+    if n_scene:
+        scene_section = (
+            f"\n## Scene\n\n{n_scene} scene takes, {n_scene_approved} approved, "
+            f"{n_scene_written} filed under approved/scene/, {n_scene_skipped} "
+            "skipped (unrecognised trigger spelling). Each approved take is one "
+            "fixed scene-trigger phrase (config.SCENE_TRIGGERS), a class pending "
+            "until the next retrain.\n"
+        )
+    else:
+        scene_section = ""
     (qc_dir / "report.md").write_text(
         f"# QC {incoming.name}\n\n{len(rows)} takes, {approved_n} approved, "
         f"{len(rejects)} rejected, {n_words_guided} guided word clips + "
@@ -1171,6 +1239,7 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         + ("".join(f"- `{f}`\n" for f in gap_files) or "(none)\n")
         + field_section
         + elicit_section
+        + scene_section
     )
     return {
         "takes": len(rows),
@@ -1197,6 +1266,10 @@ def run_qc(incoming: Path, qc_dir: Path, approved: Path, transcriber: Transcribe
         "elicit_unfiled": n_elicit_unfiled,
         "elicit_expected_match": n_elicit_expected_match,
         "elicit_expected_compared": n_elicit_expected_compared,
+        "scene_takes": n_scene,  # every scene row, approved or not
+        "scene_approved": n_scene_approved,
+        "scene_written": n_scene_written,
+        "scene_skipped": n_scene_skipped,
     }
 
 

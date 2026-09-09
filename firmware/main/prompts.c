@@ -3,6 +3,7 @@
 
 _Static_assert(KWS_NUM_SENTENCE_PROMPTS <= 64, "grow prompt_session_t.order");
 _Static_assert(KWS_NUM_ELICIT_PROMPTS <= 64, "grow prompt_session_t.order");
+_Static_assert(KWS_NUM_SCENE_PROMPTS <= 64, "grow prompt_session_t.order");
 
 static uint32_t xorshift(uint32_t *s) { *s ^= *s << 13; *s ^= *s >> 17; *s ^= *s << 5; return *s; }
 
@@ -13,6 +14,7 @@ static void set_tables(prompt_set_t set, const char *const **text, const char *c
     case PROMPT_NEGS:      *text = KWS_NEG_PROMPTS;      *slug = KWS_NEG_SLUGS;      *n = KWS_NUM_NEG_PROMPTS;      break;
     case PROMPT_WAKE:      *text = KWS_WAKE_PROMPTS;     *slug = KWS_WAKE_SLUGS;     *n = KWS_NUM_WAKE_PROMPTS;     break;
     case PROMPT_ELICIT:    *text = KWS_ELICIT_PROMPTS;   *slug = KWS_ELICIT_SLUGS;   *n = KWS_NUM_ELICIT_PROMPTS;   break;
+    case PROMPT_SCENE:     *text = KWS_SCENE_PROMPTS;    *slug = KWS_SCENE_SLUGS;    *n = KWS_NUM_SCENE_PROMPTS;    break;
     default:               *text = KWS_WORD_PROMPTS;     *slug = KWS_WORD_SLUGS;     *n = KWS_NUM_WORD_PROMPTS;     break;
     }
 }
@@ -65,11 +67,13 @@ uint32_t prompt_hangover_ms(prompt_set_t set) { return set == PROMPT_WORDS ? 500
 
 int prompt_takes_per_prompt(prompt_set_t set)
 {
-    return (set == PROMPT_WAKE || set == PROMPT_ELICIT) ? 1 : 2;
+    if (set == PROMPT_WAKE || set == PROMPT_ELICIT) return 1;
+    if (set == PROMPT_SCENE) return 3;  /* bootstrap class: no real clips yet, grab several per trigger */
+    return 2;
 }
 
 const char *prompt_set_name(prompt_set_t set)
 {
-    static const char *names[] = {"words", "sentences", "negatives", "wake", "elicit"};
+    static const char *names[] = {"words", "sentences", "negatives", "wake", "elicit", "scene"};
     return names[set];
 }

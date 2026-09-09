@@ -30,7 +30,7 @@ def slug(text: str) -> str:
     return "-".join(w for w in "".join(c if c.isalnum() else " " for c in s).split())
 
 
-def prompt_sets() -> tuple[list, list, list, list, list]:
+def prompt_sets() -> tuple[list, list, list, list, list, list]:
     """(display, slug) pairs for words, sentences, negatives, and the wake set — in
     canonical (unshuffled) order; the device shuffles with its on-screen seed. The
     wake set is config.WAKE_WORD repeated config.WAKE_PROMPT_REPEATS times (a
@@ -40,7 +40,12 @@ def prompt_sets() -> tuple[list, list, list, list, list]:
     (short and shared across paraphrases of the same command, unlike the long
     scene sentence), and intent is that expected-intent text — written verbatim
     into session.csv's prompt column so QC can compare it against what the
-    speaker actually said (see kws_de.qc)."""
+    speaker actually said (see kws_de.qc). The scene ("Szenen") set is (display,
+    slug) pairs from config.SCENE_TRIGGER_PROMPTS: display is the natural spoken
+    spelling ("Gute Nacht") the speaker reads and record.c writes to session.csv's
+    prompt column, slug is derived from that same spelling ("gute-nacht"). QC
+    recovers the SCENE_TRIGGERS token from the display text to file the take under
+    approved/scene/<token>/ (see kws_de.qc)."""
     words = [(label, slug(label)) for label in config.COMMAND_LABELS if not label.startswith("_")]
     sentences = []
     for it in build_catalog():
@@ -49,7 +54,8 @@ def prompt_sets() -> tuple[list, list, list, list, list]:
     negs = [(p, slug(p)) for p in config.NEGATIVE_PROMPTS]
     wake = [(config.WAKE_WORD, slug(config.WAKE_WORD))] * config.WAKE_PROMPT_REPEATS
     elicit = [(scene, slug(intent), intent) for scene, intent in config.SITUATIONS]
-    return words, sentences, negs, wake, elicit
+    scene = [(display, slug(display)) for display in config.SCENE_TRIGGER_PROMPTS.values()]
+    return words, sentences, negs, wake, elicit, scene
 
 
 def mfcc_tables() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -131,9 +137,15 @@ def generate(out) -> None:
         + _c_strings("KWS_LABELS", labels)
     )
 
-    words, sentences, negs, wake, elicit = prompt_sets()
+    words, sentences, negs, wake, elicit, scene = prompt_sets()
     p = hdr
-    for tag, items in (("WORD", words), ("SENTENCE", sentences), ("NEG", negs), ("WAKE", wake)):
+    for tag, items in (
+        ("WORD", words),
+        ("SENTENCE", sentences),
+        ("NEG", negs),
+        ("WAKE", wake),
+        ("SCENE", scene),
+    ):
         p += f"#define KWS_NUM_{tag}_PROMPTS {len(items)}\n"
         p += _c_strings(f"KWS_{tag}_PROMPTS", [d for d, _ in items])
         p += _c_strings(f"KWS_{tag}_SLUGS", [s for _, s in items])

@@ -4637,6 +4637,79 @@ fixed, so the phrases are synthesised the same way they will be recorded.
 0/34), `firmware/main/gen/prompts.h` regenerated for the new negatives, `COMMAND_LABELS` unchanged
 at 23 (pending). No retrain here.
 
+### E55 — "Szenen" guided recording session + TTS bootstrap for the scene triggers (2026-09-09, host-only, feat/scene-recording-session)
+
+Closes E54's recording/TTS fork. The coordinator chose **option (a): a dedicated guided recording
+session**, modelled exactly on the "Hey Bus aufnehmen" wake session and the "Situationen" elicit
+session (commit `b326222`), plus a TTS bootstrap so the four pending scene-trigger classes have
+training data ready for the retrain that promotes them.
+
+**The recording set.** The four `config.SCENE_TRIGGER_PROMPTS` phrases ("Gute Nacht", "Guten
+Morgen", "Leseratte", "Nachtlicht"), read whole from the screen — no wake word (unlike an elicit
+answer, which starts with "Hey Bus"). Display text is the natural spelling; the slug is derived
+from that spelling ("gute-nacht"). Nothing new was needed in `config.py`: `SCENE_TRIGGERS`/
+`SCENE_TRIGGER_PROMPTS` from E54 suffice.
+
+**Takes per prompt = 3.** Wake uses 1, words 2. A scene trigger is a *bootstrap* class — zero real
+clips exist until this session runs — and there are only four prompts, so 3 takes each (12 clips
+per speaker) grabs several real samples per class without lengthening the session much. **Cap =
+6000 ms** (the sentence cap, not the 4000 ms word cap): E54's own syllable note flags that the
+two-word triggers ("Guten Morgen") are separately-written words a speaker may pause between, so a
+slow take can run past a single unbroken compound's length; 6000 ms + the 1200 ms hangover
+(sentences/negatives/wake/elicit, not words' 500 ms) keeps a mid-phrase pause from cutting the take.
+
+**Firmware.** `PROMPT_SCENE` (`prompts.h`/`.c`: `set_tables` case, `prompt_cap_ms`,
+`prompt_hangover_ms`, `prompt_takes_per_prompt`, `prompt_set_name` "scene", `_Static_assert
+KWS_NUM_SCENE_PROMPTS <= 64`). `REC_CMD_START_SCENE_SESSION` (`record.h`/`.c`) mirrors the wake
+session: bump speaker id, run `PROMPT_SCENE` to exhaustion, no negatives chained. Takes file under
+`spkNN/_scene_/<slug>_NNN.wav` (the elicit `_elicit_` shared-subdir convention); `session.csv`'s
+`prompt` column is the read spelling (`prompt_text()`, no `prompt_intent()` — a scene take has no
+separate expected-intent, the phrase IS the target). `UI_MODE_RECORD_SCENE`, a "Szenen aufnehmen"
+menu button (the boot menu grows 7 to 8 buttons; row pitch tightened 28 to 24 px to keep 320x240),
+the standard `<set> n/N - read r/takes` progress line (scene reads a prompt like the words set, so
+no special screen text), and console `mode recordscene`. `recognise.cc`'s
+`KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES` assert is untouched: this session records audio only, it
+does not add a model class.
+
+**QC (`kws_de.qc`).** A scene take is a fixed phrase read whole (no wake word), so it is closest to
+the *words* branch, not field/elicit: `content_gate("scene", ...)` verifies the transcript against
+the expected `SCENE_TRIGGER_PROMPTS` spelling — glued, like the wake gate, so "Nacht Licht" and
+"Nachtlicht" both match — and rejects a wrong phrase (the trigger words are not in `vocab()`, so the
+words/sentences token filter cannot be used). An approved take is filed **whole** under a NEW
+**`approved/scene/<token>/`** bucket (`GuteNacht`/`GutenMorgen`/`Leseratte`/`Nachtlicht`, recovered
+from the read spelling by `scene_trigger_token()`), with a `scene/index.csv`. **Bucket decision:**
+a new `approved/scene/` tree, mirroring E48's `approved/context/` pattern for clips whose class is
+not yet in `COMMAND_LABELS`, deliberately NOT folded into `approved/words/` — E48 keeps that guided
+isolated-word set clean, and a scene trigger is a two-word/compound phrase mapping to a whole
+Intent, a different class family. `run_qc` counts `scene_takes`/`scene_approved`/`scene_written`/
+`scene_skipped` and emits a `## Scene` report section.
+
+**TTS bootstrap (extend training data now).** `data.tts_text_for(word)` maps a class label to the
+text an engine should SAY: for a `SCENE_TRIGGERS` token it returns the `SCENE_TRIGGER_PROMPTS`
+natural spelling ("GuteNacht" to "Gute Nacht"; no engine pronounces the spaceless token). Wired
+into `_fill_with_tts`, so the moment a scene trigger is promoted into `COMMAND_LABELS` the existing
+voice-gated fill (`passing_voices` to `_tts_fill_word` to `tts_cheap_gate`, E50/PR #97's pipeline)
+bootstraps ~300 clips/phrase from the correct spelling, no further change. These are bootstrap
+classes (zero real clips until the device session above runs); E53's bootstrap-aware export health
+gate already gives them a separate low floor when promoted.
+
+**Data-build wiring — done vs TODO.** The TTS-bootstrap path is **wired** (`tts_text_for` +
+`_fill_with_tts`): needed now for "extend training data", and it activates automatically on
+promotion. The **real `approved/scene/` into train path is a documented TODO**, and deliberately so:
+`data.merge_recordings` folds `approved/words/` and `approved/context/` in keyed by label, and a
+scene token is not a `COMMAND_LABELS` label yet, so wiring the real clips in now would create a
+phantom label key `build_dataset` cannot place. That merge belongs in the same retrain commit that
+adds the four tokens to `COMMAND_LABELS` (a `scene:`-prefixed source alongside `rec:`/`ctx:`), where
+the label space actually exists — entangled with promotion, exactly like E50's compound merge was.
+
+Host-only: no scene recordings were collected (the coordinator flashes and records). TTS bootstrap
+counts from this session's dry run are reported in the PR, not committed (clips live under the data
+root). Tests: `firmware/test/test_prompts.c` extended (scene set: count 4, name "scene", 3 takes,
+6000 ms cap, 1200 ms hangover) — all host binaries build clean under `-Wall -Wextra -Werror` and
+pass; `tests/test_qc.py` (`content_gate`/`scene_trigger_token`/filing/reject) and
+`tests/test_firmware_gen.py` (scene block + token round-trip) added; full `pytest` 403 passed;
+`kws-fwgen --check` clean; ruff + markdownlint clean; Docker `idf.py build` passes.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

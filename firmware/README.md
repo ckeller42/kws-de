@@ -23,6 +23,13 @@ selection screen" below).
   machinery, one take per prompt, no sentence/negative sets chained on.
   Collects natural command speech — read sentences alone generalise poorly
   to real usage (paper notes E30).
+- **Szenen mode** ("Szenen aufnehmen") — a scene-trigger recording session:
+  same recorder machinery, but it prompts the four fixed scene-trigger
+  phrases (`config.SCENE_TRIGGER_PROMPTS`: "Gute Nacht", "Guten Morgen",
+  "Leseratte", "Nachtlicht"), read whole from the screen (no wake word), 3
+  takes each, straight to the success screen — no sentence/negative sets
+  chained on. Collects bootstrap positives for the pending scene-trigger
+  classes (`config.SCENE_TRIGGERS`, paper notes E54/E55).
 - **Recognise mode** — an on-device keyword recogniser: mic -> MFCC -> the
   int8 TFLite Micro model -> the same streaming detector logic as
   `kws_de.stream`, shown live on the LCD and logged to the recording
@@ -89,9 +96,9 @@ docker run --rm -v "$PWD/firmware:/project" -w /project --device=/dev/ttyACM0 \
 ## Modes and the selection screen
 
 The device boots into a dark-theme selection menu: a small "kws-de" title
-over a column of seven big buttons — **Assistent**, **Recognition**, **Hey
-Bus**, **Record**, **Hey Bus aufnehmen**, **Situationen**, **USB** — each
-switching straight to that mode. Every mode's own back/abort button returns
+over a column of eight big buttons — **Assistent**, **Recognition**, **Hey
+Bus**, **Record**, **Hey Bus aufnehmen**, **Situationen**, **Szenen
+aufnehmen**, **USB** — each switching straight to that mode. Every mode's own back/abort button returns
 to this menu; no mode links directly to another mode. `app_set_mode()`
 (`firmware/main/main.c`) is the only place that suspends/resumes the
 consumer task for the mode being left/entered.
@@ -140,6 +147,18 @@ not the scene text), and each `session.csv` row has `set` = `elicit` with
 than the on-screen scene — QC (`kws_de.qc`) scores what was actually said
 against this. Recording cap is 9.8 s (an unscripted answer runs longer than
 a read sentence), 1200 ms hangover.
+
+**Szenen aufnehmen** on the menu runs the same machinery for the scene
+triggers: it bumps the speaker id, then walks the four
+`config.SCENE_TRIGGER_PROMPTS` phrases, 3 takes each, straight to the
+success screen — no sentence/negative sets chained on. The speaker reads the
+fixed phrase whole (no wake word), like the words set. Takes land under
+`spkNN/_scene_/<slug>_NNN.wav` and each `session.csv` row has `set` =
+`scene` with `prompt` set to the read phrase (e.g. `Gute Nacht`); QC
+(`kws_de.qc`) verifies the phrase and files the whole clip under
+`approved/scene/<trigger>/` — a class pending until the next retrain
+(paper notes E55). Recording cap is 6 s (a two-word trigger read with a
+pause runs past the 4 s word cap), 1200 ms hangover.
 
 ## Where recordings are stored
 
@@ -289,12 +308,12 @@ mode usb
 status
 ```
 
-- `mode menu|record|recordwake|elicit|recognise|wake|assist|usb` — switches
-  the app mode, same as tapping the matching menu/back button.
+- `mode menu|record|recordwake|elicit|recordscene|recognise|wake|assist|usb` —
+  switches the app mode, same as tapping the matching menu/back button.
 - `status` — prints the current mode; the model stamps as
   `models command=<id> wake=<id>`; an `intent <text>` line naming the last
   closed assist window's parsed result (omitted before the first window);
-  and in record/record-wake/elicit mode also the recorder's
+  and in record/record-wake/elicit/scene mode also the recorder's
   phase/index/count/speaker.
 - `wakefire` — injects one synthetic wake fire down the same path as a real
   one (gate, beep, log, UI). A measurement hook for the assist-mode duty
@@ -375,6 +394,15 @@ recorder's phase/index/speaker; completing all 30 shows "Fertig - danke!"
 with the speaker id, no sentence/negative sets chained on. Tap **USB** ->
 pull -> the session's `sessions.csv` rows have `set` = `elicit` with
 `prompt` = the expected-intent text, not the on-screen scene.
+
+Szenen mode: from the menu, tap **Szenen aufnehmen** -> the session starts
+at a new speaker id and shows the first scene-trigger phrase with a
+`scene 1/4 - read 1/3` progress line; read the phrase whole (no wake word)
+-> `record: saved ...` after each of the 3 takes; `status` in this mode also
+reports the recorder's phase/index/speaker; completing all four triggers
+shows "Fertig - danke!" with the speaker id, no sentence/negative sets
+chained on. Tap **USB** -> pull -> the session's `sessions.csv` rows have
+`set` = `scene` with `prompt` = the read phrase.
 
 Wake mode: tap **Hey Bus** -> the probability updates live and stays low
 on silence; say "Hey Bus" -> the screen flashes green, the speaker beeps

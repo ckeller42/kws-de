@@ -31,7 +31,8 @@ void app_set_mode(ui_mode_t m)
 {
     if (m == s_mode) return;
     ESP_LOGI(TAG, "mode %d -> %d", s_mode, m);
-    if (s_mode == UI_MODE_RECORD || s_mode == UI_MODE_RECORD_WAKE || s_mode == UI_MODE_RECORD_ELICIT)
+    if (s_mode == UI_MODE_RECORD || s_mode == UI_MODE_RECORD_WAKE ||
+        s_mode == UI_MODE_RECORD_ELICIT || s_mode == UI_MODE_RECORD_SCENE)
         record_post(REC_CMD_PAUSE);
     if (s_mode == UI_MODE_USB) ESP_ERROR_CHECK(usb_drive_exit());
     if (s_mode == UI_MODE_RECOGNISE) recognise_set_active(false);
@@ -54,6 +55,9 @@ void app_set_mode(ui_mode_t m)
     /* RECORD_ELICIT ("Situationen"): a scene/question session, PROMPT_ELICIT only,
        no negatives chained on completion — same shape as RECORD_WAKE. */
     if (m == UI_MODE_RECORD_ELICIT) { ui_show_record(); record_post(REC_CMD_START_ELICIT_SESSION); }
+    /* RECORD_SCENE ("Szenen"): a scene-trigger session, PROMPT_SCENE only, no
+       negatives chained on completion — same shape as RECORD_WAKE. */
+    if (m == UI_MODE_RECORD_SCENE) { ui_show_record(); record_post(REC_CMD_START_SCENE_SESSION); }
     if (m == UI_MODE_RECOGNISE) { ui_show_recognise(); recognise_set_active(true); }
     /* Wake mode measures the wake model alone: the command recogniser stays off
        so nothing else competes for the mic, the CPU, or the screen. */

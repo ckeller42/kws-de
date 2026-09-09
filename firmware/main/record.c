@@ -101,7 +101,8 @@ static int next_path(char *out, size_t n)
     int slugdir = s_prompts.set == PROMPT_WORDS || s_prompts.set == PROMPT_WAKE;
     const char *sub = slugdir ? prompt_slug(&s_prompts)
                     : s_prompts.set == PROMPT_SENTENCES ? "_phrase_"
-                    : s_prompts.set == PROMPT_ELICIT ? "_elicit_" : "_neg_";
+                    : s_prompts.set == PROMPT_ELICIT ? "_elicit_"
+                    : s_prompts.set == PROMPT_SCENE ? "_scene_" : "_neg_";
     snprintf(dir, sizeof dir, "%s/%s", storage_root(), s_st.speaker);         mkdir(dir, 0777);
     snprintf(dir, sizeof dir, "%s/%s/%s", storage_root(), s_st.speaker, sub); mkdir(dir, 0777);
     for (int i = 1; i < 1000; i++) {
@@ -394,6 +395,12 @@ static void record_task(void *arg)
             s_take_idx = 0; s_saved_takes = 0;
             nvs_bump_speaker();
             prompt_session_init(&s_prompts, PROMPT_ELICIT, (uint32_t)esp_timer_get_time());
+            s_paused = 0;
+            break;
+        case REC_CMD_START_SCENE_SESSION:
+            s_take_idx = 0; s_saved_takes = 0;
+            nvs_bump_speaker();
+            prompt_session_init(&s_prompts, PROMPT_SCENE, (uint32_t)esp_timer_get_time());
             s_paused = 0;
             break;
         }

@@ -35,7 +35,7 @@ def test_slug_is_ascii_and_stable():
 
 
 def test_prompt_sets_cover_labels_and_catalog():
-    words, sentences, negs, wake, elicit = firmware_gen.prompt_sets()
+    words, sentences, negs, wake, elicit, scene = firmware_gen.prompt_sets()
     assert [w for w, _ in words] == [
         label for label in config.COMMAND_LABELS if not label.startswith("_")
     ]
@@ -54,7 +54,7 @@ def test_elicit_prompts_match_situations_and_parse_to_the_expected_intent():
     from kws_de.grammar import Intent
     from kws_de.qc import field_intent, normalise
 
-    _, _, _, _, elicit = firmware_gen.prompt_sets()
+    _, _, _, _, elicit, _ = firmware_gen.prompt_sets()
     assert len(elicit) == len(config.SITUATIONS) >= 25
     for (scene, slug, intent), (want_scene, want_intent) in zip(
         elicit, config.SITUATIONS, strict=True
@@ -64,6 +64,23 @@ def test_elicit_prompts_match_situations_and_parse_to_the_expected_intent():
         assert slug == firmware_gen.slug(want_intent)
         got = field_intent(normalise(intent))
         assert isinstance(got, Intent), (intent, got)
+
+
+def test_scene_prompts_are_the_trigger_spellings_slugged_and_qc_recovers_the_token():
+    """The scene set emits (display, slug) for each config.SCENE_TRIGGER_PROMPTS
+    spelling; the slug comes from the spelling, and kws_de.qc.scene_trigger_token
+    round-trips the display text back to its config.SCENE_TRIGGERS key so a take
+    files under approved/scene/<token>/."""
+    from kws_de.qc import scene_trigger_token
+
+    _, _, _, _, _, scene = firmware_gen.prompt_sets()
+    assert [d for d, _ in scene] == list(config.SCENE_TRIGGER_PROMPTS.values())
+    for (display, slug), (token, want_display) in zip(
+        scene, config.SCENE_TRIGGER_PROMPTS.items(), strict=True
+    ):
+        assert display == want_display
+        assert slug == firmware_gen.slug(want_display)
+        assert scene_trigger_token(display) == token
 
 
 def test_sentence_prompts_say_prozent_for_light_levels():

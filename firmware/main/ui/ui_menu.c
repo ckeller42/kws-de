@@ -31,12 +31,13 @@ static void on_assist(lv_event_t *e)      { (void)e; app_set_mode(UI_MODE_ASSIST
 static void on_record(lv_event_t *e)      { (void)e; app_set_mode(UI_MODE_RECORD); }
 static void on_record_wake(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_RECORD_WAKE); }
 static void on_record_elicit(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_RECORD_ELICIT); }
+static void on_record_scene(lv_event_t *e) { (void)e; app_set_mode(UI_MODE_RECORD_SCENE); }
 static void on_usb(lv_event_t *e)         { (void)e; app_set_mode(UI_MODE_USB); }
 static void on_menu(lv_event_t *e)        { (void)e; app_set_mode(UI_MODE_MENU); }
 
 /* Boot screen and every mode's "back" destination: a small title line over a
-   single column of seven full-width touch targets, one per mode. Dark theme
-   matching the record screen. Fits 320x240: rows 24..238 x 10..310, 28 px
+   single column of eight full-width touch targets, one per mode. Dark theme
+   matching the record screen. Fits 320x240: rows 24..237 x 10..310, 24 px
    tall with a 3 px gap. Assistant first: it is the one that is meant to be
    used, the others are measurement and data-collection modes. */
 void ui_show_menu(void)
@@ -51,13 +52,14 @@ void ui_show_menu(void)
     lv_obj_set_style_text_color(title, lv_color_hex(UI_MENU_DIM), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
-    big_button(scr, "Assistent",          on_assist,        10, 24,  300, 28);
-    big_button(scr, "Recognition",        on_recognise,     10, 55,  300, 28);
-    big_button(scr, "Hey Bus",            on_wake,          10, 86,  300, 28);
-    big_button(scr, "Record",             on_record,        10, 117, 300, 28);
-    big_button(scr, "Hey Bus aufnehmen",  on_record_wake,   10, 148, 300, 28);
-    big_button(scr, "Situationen",        on_record_elicit, 10, 179, 300, 28);
-    big_button(scr, "USB",                on_usb,           10, 210, 300, 28);
+    big_button(scr, "Assistent",          on_assist,        10, 24,  300, 24);
+    big_button(scr, "Recognition",        on_recognise,     10, 51,  300, 24);
+    big_button(scr, "Hey Bus",            on_wake,          10, 78,  300, 24);
+    big_button(scr, "Record",             on_record,        10, 105, 300, 24);
+    big_button(scr, "Hey Bus aufnehmen",  on_record_wake,   10, 132, 300, 24);
+    big_button(scr, "Situationen",        on_record_elicit, 10, 159, 300, 24);
+    big_button(scr, "Szenen aufnehmen",   on_record_scene,  10, 186, 300, 24);
+    big_button(scr, "USB",                on_usb,           10, 213, 300, 24);
 
     lv_screen_load(scr);
     bsp_display_unlock();
