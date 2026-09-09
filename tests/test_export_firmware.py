@@ -1,9 +1,10 @@
 import re
+import sys
 
 import numpy as np
 import pytest
 
-from kws_de import config
+from kws_de import config, export
 from kws_de.export import (
     assert_model_healthy,
     to_int8_tflite,
@@ -55,6 +56,90 @@ def test_model_health_gate_catches_broken_models():
     # ~Random accuracy across all classes: fails the accuracy floor.
     with pytest.raises(ValueError, match="below"):
         assert_model_healthy(y, rng.integers(0, n, size=800))
+
+
+def test_bootstrap_classes_get_a_separate_lower_floor():
+    """E54: classes with zero real training clips (TTS-only bootstrap, e.g. a
+    just-promoted word) must not be held to the blanket 50% floor, but a
+    realistic bootstrap accuracy (24-29% for run8_s1's 3 new classes) still
+    passes its own much lower sanity floor."""
+    n = len(config.COMMAND_LABELS)  # 26
+    bootstrap = {n - 3, n - 2, n - 1}
+    rows_per_class = 40
+    y = np.repeat(np.arange(n), rows_per_class)
+    y_pred = y.copy()
+    # Bootstrap classes score 25% (run8_s1's actual 24-29%) -> not 100%, but
+    # excluded from the mature floor and clears its own 15% floor.
+    for c in bootstrap:
+        rows = np.flatnonzero(y == c)
+        y_pred[rows[rows_per_class // 4 :]] = (c + 1) % n
+
+    h = assert_model_healthy(
+        y, y_pred, bootstrap_classes=bootstrap, class_names=config.COMMAND_LABELS
+    )
+    assert h["accuracy"] == 1.0  # mature-only accuracy: untouched by low bootstrap scores
+    assert h["bootstrap_accuracy"] == {config.COMMAND_LABELS[c]: 0.25 for c in bootstrap}
+
+
+def test_bootstrap_floor_still_rejects_a_near_chance_class():
+    """A bootstrap class must not be a free pass: near-chance accuracy (export
+    corruption, label-index scrambling) still fails, just against its own
+    floor instead of the blanket one."""
+    n = len(config.COMMAND_LABELS)
+    bootstrap = {n - 3, n - 2, n - 1}
+    rows_per_class = 40
+    y = np.repeat(np.arange(n), rows_per_class)
+    y_pred = y.copy()
+    broken = n - 1
+    rows = np.flatnonzero(y == broken)
+    y_pred[rows] = (broken + 1) % n  # 0% accuracy on the broken bootstrap class
+
+    with pytest.raises(ValueError, match="bootstrap class"):
+        assert_model_healthy(
+            y, y_pred, bootstrap_classes=bootstrap, class_names=config.COMMAND_LABELS
+        )
+
+
+def test_firmware_export_leaves_canonical_files_untouched_on_health_failure(tmp_path, monkeypatch):
+    """E54: a failed health check must not leave canonical
+    command_*.tflite/_data.h/_metadata.json overwritten with the rejected
+    model's bytes while firmware/main/gen still names the old model -- the
+    write order must be validate-then-write, not write-then-validate-and-hope
+    someone catches a failure by hand."""
+    monkeypatch.setattr(config, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    config.MODELS_DIR.mkdir()
+    config.DATA_DIR.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    n = len(config.COMMAND_LABELS)
+    build_dscnn(num_classes=n).save(config.MODELS_DIR / "command.keras")
+
+    rng = np.random.default_rng(0)
+    y = np.repeat(np.arange(n), 4)
+    X = rng.standard_normal((len(y), config.N_FRAMES, config.N_MFCC)).astype(np.float32)
+    is_tts = np.zeros(len(y), dtype=bool)
+    np.savez(config.DATA_DIR / "features_test_train.npz", X=X, y=y, is_tts=is_tts)
+    np.savez(config.DATA_DIR / "features_test_test.npz", X=X, y=y, is_tts=is_tts)
+
+    canonical = config.MODELS_DIR / "command_test.tflite"
+    canonical.write_bytes(b"SENTINEL-TFLITE")
+    header = config.MODELS_DIR / "command_test_data.h"
+    header.write_text("SENTINEL-HEADER")
+    meta = config.MODELS_DIR / "command_test_metadata.json"
+    meta.write_text("SENTINEL-META")
+    gen_model = tmp_path / "firmware" / "main" / "gen" / "model_data.h"
+    gen_model.parent.mkdir(parents=True)
+    gen_model.write_text("SENTINEL-GEN")
+
+    monkeypatch.setattr(sys, "argv", ["kws-export", "--firmware", "--prefix", "features_test"])
+    with pytest.raises(ValueError):  # untrained model: nowhere near the health floor
+        export.main()
+
+    assert canonical.read_bytes() == b"SENTINEL-TFLITE"
+    assert header.read_text() == "SENTINEL-HEADER"
+    assert meta.read_text() == "SENTINEL-META"
+    assert gen_model.read_text() == "SENTINEL-GEN"
 
 
 def test_write_wake_headers_emits_model_contract(tmp_path):
