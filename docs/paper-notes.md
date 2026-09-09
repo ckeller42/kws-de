@@ -4617,9 +4617,25 @@ two-word triggers: a `negative_windows()` 1 s hop over "gute Nacht bis morgen" c
 "gute nacht" — accepted trade, the false-accept rate on the negatives set is the arbiter once real
 data exists.
 
-All four wired through guided "Wörter aufnehmen" prompts + TTS bootstrap so the next real recording
-round can capture them. `tests/test_grammar.py` +cases (29 pass), `intent_cases.h` regenerated
-(34 cases, intent parity 0/34), `COMMAND_LABELS` unchanged at 23 (pending). No retrain here.
+**What is NOT yet wired (recording/TTS) — a design fork for the coordinator.** `SCENE_TRIGGER_PROMPTS`
+(the spoken spelling per trigger) is defined but consumed by nothing — `prompt_sets()` derives its
+word prompts from `COMMAND_LABELS` (so pending vocab is excluded by construction), and E50's light
+compounds became recordable only by riding inside *sentence* prompts ("das Küchenlicht brennt
+noch") that QC's Whisper-split later carves the target word out of. Scene triggers do not fit that:
+they are fixed command phrases a speaker says whole to the device, not words embedded in a read
+sentence. So making them recordable is a genuine choice, not a mechanical add — either (a) a
+dedicated guided recording session like the wake-word one (`wake = [(WAKE_WORD, …)] * repeats`),
+which needs new firmware UI (menu entry, `record.c`/`prompts.h` set, like the elicit-mode PR), or
+(b) elicit `SITUATIONS` scenes crafted to draw out each phrase (unreliable for the exact literal
+word), or (c) accept that real captures come only from live field/Assistent use once the model can
+fire on them. This entry does NOT pick one — the user asked to "extend the data recording
+procedure", and that is the pending decision. `SCENE_TRIGGER_PROMPTS` is left in place as the seed
+for whichever path is chosen; TTS bootstrap is likewise deferred until the recordable form is
+fixed, so the phrases are synthesised the same way they will be recorded.
+
+`tests/test_grammar.py` +cases (29 pass), `intent_cases.h` regenerated (34 cases, intent parity
+0/34), `firmware/main/gen/prompts.h` regenerated for the new negatives, `COMMAND_LABELS` unchanged
+at 23 (pending). No retrain here.
 
 ## Open questions
 

@@ -150,8 +150,8 @@ static const char *const KWS_SENTENCE_SLUGS[49] = {
   "aufstelldach-auf",
   "aufstelldach-zu"
 };
-#define KWS_NUM_NEG_PROMPTS 20
-static const char *const KWS_NEG_PROMPTS[20] = {
+#define KWS_NUM_NEG_PROMPTS 24
+static const char *const KWS_NEG_PROMPTS[24] = {
   "wie spät ist es",
   "wo sind wir gerade",
   "hast du den Schlüssel gesehen",
@@ -171,9 +171,13 @@ static const char *const KWS_NEG_PROMPTS[20] = {
   "wir sind gleich da",
   "gib mir bitte das Handtuch",
   "die Kinder schlafen schon",
-  "was gibt es heute zum Essen"
+  "was gibt es heute zum Essen",
+  "gute Nacht bis morgen",
+  "der Morgen war kalt und neblig",
+  "ich habe die ganze Nacht gelesen",
+  "das Zimmer war nachts stockdunkel"
 };
-static const char *const KWS_NEG_SLUGS[20] = {
+static const char *const KWS_NEG_SLUGS[24] = {
   "wie-spaet-ist-es",
   "wo-sind-wir-gerade",
   "hast-du-den-schluessel-gesehen",
@@ -193,7 +197,11 @@ static const char *const KWS_NEG_SLUGS[20] = {
   "wir-sind-gleich-da",
   "gib-mir-bitte-das-handtuch",
   "die-kinder-schlafen-schon",
-  "was-gibt-es-heute-zum-essen"
+  "was-gibt-es-heute-zum-essen",
+  "gute-nacht-bis-morgen",
+  "der-morgen-war-kalt-und-neblig",
+  "ich-habe-die-ganze-nacht-gelesen",
+  "das-zimmer-war-nachts-stockdunkel"
 };
 #define KWS_NUM_WAKE_PROMPTS 5
 static const char *const KWS_WAKE_PROMPTS[5] = {
