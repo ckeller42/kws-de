@@ -11,7 +11,11 @@ def test_v2_vocab():
     assert all(lvl in config.DEVICE_ACTIONS["Licht"] for lvl in config.LIGHT_LEVELS)
     assert config.ZONED_DEVICES == ["Licht"]
     assert config.COMMAND_LABELS == (
-        config.DEVICES + config.ZONES + config.ACTIONS + ["_unknown_", "_silence_"]
+        config.DEVICES
+        + config.ZONES
+        + config.ACTIONS
+        + ["_unknown_", "_silence_"]
+        + list(config.LIGHT_COMPOUNDS)
     )
 
 

@@ -4535,8 +4535,404 @@ tuple (flagged above, E49's same unfixed staleness), no firmware export/codegen/
 verification (moot, nothing deployed). `uv run --no-sync pytest -q` and `ruff check` both pass
 unchanged (host-only, `KWS_NOISE_DIR`/`KWS_RIR_DIR` unset).
 
+### E53 — retrain 23→26 classes: promote the light compounds, TTS-only bootstrap, not deployed (2026-09-09, host-only, exp/run8-compound-bootstrap)
+
+E50 wired `Küchenlicht`/`Außenlicht`/`Leselicht` into grammar/intent.c/prompts as *pending*
+vocabulary, deliberately kept out of `COMMAND_LABELS` because `recognise.cc`'s
+`_Static_assert(KWS_NUM_LABELS == KWS_MODEL_NUM_CLASSES)` needs a retrain in lockstep with any
+label-count change. This entry is that retrain. **Framing up front: this is a bootstrap, not real
+data.** No speaker has ever recorded these 3 words — the guided-only word set (E48/E49) has zero
+clips for them — so every one of their training/test rows is TTS-only, the same way every word in
+this project's history started (E27/E28) before real recordings were folded in. Nothing here
+should be read as "the model now knows these words" in the sense the other 23 do.
+
+**1 — label promotion (23→26).** `kws_de/config.py`: `COMMAND_LABELS` grows from `DEVICES` +
+`ZONES` + `ACTIONS` + `["_unknown_", "_silence_"]` to the same plus `list(LIGHT_COMPOUNDS)`
+**appended after** the sentinels, not before — this keeps indices 0-22 byte-identical to the deployed model's own
+output ordering, which matters because `scripts/compare_command_models.py` decodes *both* the
+deployed (23-class) and candidate (26-class) model's argmax through one shared
+`config.COMMAND_LABELS`; inserting the compounds before `_unknown_`/`_silence_` would have silently
+relabeled the deployed model's own unknown/silence outputs as `Küchenlicht`/`Außenlicht` for indices
+21/22 (caught by hand-checking the first comparison run, not by a test — see below). `kws-fwgen
+--out`/`--check` regenerate `firmware/main/gen/{labels.h,prompts.h}` only (no other generated
+header depends on the label list); `KWS_NUM_LABELS` 23→26, `KWS_UNKNOWN_INDEX`/`KWS_SILENCE_INDEX`
+unchanged (21/22). `firmware/main/gen/model_data.h`/`model_config.h` (the actual embedded model,
+still 23 classes) are untouched — regenerating labels.h/prompts.h ahead of a matching model export
+is the expected transient state E50 flagged ("EXPECTED to now assert against 26 once model+headers
+agree"); nothing in steps 1-5 below compiles firmware, so the mismatch never surfaces here.
+
+The 3 words are also folded into `prompt_sets()`'s single-word "Wörter aufnehmen" guided session —
+for free, since `words = [(label, slug(label)) for label in config.COMMAND_LABELS if not
+label.startswith("_")]` already derives directly from `COMMAND_LABELS`. **Not** added to
+`SITUATIONS` (out of scope, a separate/bigger prompt set) and **not** read by
+`kws_de.qc.vocab()`/`label_for_token` (still `DEVICES+ZONES+ACTIONS` only), so scene/elicit
+word-cutting is untouched.
+
+**Extra fix beyond config.py, required, not optional:** `kws_de.data.command_words()` (`DEVICES +
+ZONES + ACTIONS`, feeding both `_fill_with_tts`'s target-word list and `build_dataset`'s
+`commands=` loop in `kws_de/dataset.py:build`) does **not** derive from `COMMAND_LABELS` — it is a
+separate list. Left alone, the 3 compounds would have a valid label index but zero entries in
+`command_words()`, so `_fill_with_tts` would never synthesize clips for them and `build_dataset`
+would never emit a single training row for them despite the label existing — a silent 0-row class.
+Fixed by adding `list(LIGHT_COMPOUNDS)` to `command_words()`'s return list. This is the one file
+beyond `config.py` + generated-header regen that step 1 flagged as needing a call-out if touched;
+it is small (4 lines) and necessary for the retrain to do anything at all with the new classes.
+Tests updated for both changes: `tests/test_config_v2.py` (`COMMAND_LABELS` formula),
+`tests/test_data_v2.py` (`command_words()` formula). Full suite: `uv run --no-sync pytest -q`
+(`KWS_DATA_ROOT` set, `KWS_NOISE_DIR`/`KWS_RIR_DIR` unset) → 386 passed, 1 skipped, 1 xfailed —
+unchanged pass count from before this entry (the skip/xfail pre-exist). `ruff check` clean.
+`kws-fwgen --check firmware/main/gen` exits 0.
+
+**2 — TTS bootstrap.** Same mechanism as every prior word (E27/E28): `kws-dataset build`'s
+`_fill_with_tts` synthesizes up to 300 clips/word from `passing_voices` (the cached
+`tts_voice_gate.json` gate, ≥90% token match + detected `de`, ~51/259 voices historically) plus
+`tts_cheap_gate` (duration ≥0.25s). **300/300 clips kept for all three words, 0 gate drops** —
+notably cleaner than short single-syllable words like `an`/`zu` (E28: 88/300, 72/299 dropped) since
+these are longer compounds less prone to the duration floor. Voice spread per word: 9 `say` voices
+(16-17 clips each), 3 non-`mls` Piper voices (`eva_k`, `karlsson`, `kerstin`, 2 clips each), ~72
+`de_DE-mls-medium#N` speakers (1-2 clips each) — the same ~84-voice gate-passing pool E28
+established, applied unchanged to 3 new words. Persisted back into `raw_clips_v3.pkl` (the shared
+cache, per existing convention) so a rebuild reuses these exact clips rather than resynthesizing.
+
+**3 — dataset build.** `kws-dataset build --cache raw_clips_v3.pkl --prefix features_v3 --seed 0`
+(identical invocation to run7/E49, now against the 26-class `COMMAND_LABELS`, `KWS_NOISE_DIR`/
+`KWS_RIR_DIR` set — van-cabin augmentation on, same as the environment this task's build ran
+under). `train=48998, val=13636, test=4638` vs run7/E49's `train=44078, val=11788, test=4206` —
+total delta +7,200 rows across all three splits, exactly `3 words × 300 TTS clips × 8 rows/clip`
+(clean + 3 SNRs, doubled for the pitch/tempo-perturbed TTS copy) — i.e. the entire delta is
+attributable to the 3 new TTS-only classes, nothing else moved. No crash, no shape mismatch.
+`manifest_v3.json` confirms 26 labels, 1640/616/144 train/val/test rows for each new class (all TTS
+origin, 0 real — the manifest's own `real`/`tts` split counts confirm zero real clips for all
+three). Wall time: TTS bootstrap + build together ~3 min (including the first, later-superseded run
+below); rebuild alone (cache already warm) ~1 min.
+
+Note on rework: the first pass at step 1 appended the compounds *before* `_unknown_`/`_silence_` in
+`COMMAND_LABELS` (matching E50's own draft ordering) — this was corrected mid-task (see the "1 —
+label promotion" ordering note above) once cross-model scoring exposed why it mattered, which meant
+redoing the fwgen regen, dataset build, and training run once. The numbers reported here are all
+from the corrected ordering; the first (superseded) build/train under the wrong ordering is not
+used or reported.
+
+**4 — training.** `kws-train --v2 --prefix features_v3 --width 48 --qat --qat-epochs 20
+--real-weight 3 --seed 0 --out command_v3_w48_qat_run8.keras` — same recipe as run7/E49 and the
+deployed model's own recipe. Float phase (40 epochs): best val accuracy 0.6811 at epoch 38, final
+train accuracy 0.7069. QAT phase (20 epochs): final train accuracy 0.7222. Wall time ~27 min (float
+and QAT combined; run7's own logged `train_seconds_actual` was 1577s/26min for 23 classes — the
+increase is consistent with 3 more classes and ~12% more rows). Exported to
+`$KWS_DATA_ROOT/models/run8-s0/` (`kws-export --v2 --qat --width 48 --prefix features_v3 --model
+command_v3_w48_qat_run8.keras --out .../run8-s0`) — isolated, canonical `command_v3_w48_qat.*` and
+`firmware/main/gen/` untouched throughout. `command_v3_w48_qat_metadata.json` confirms 26 labels
+exported in the corrected order. Export bytes 25,960 (deployed: 25,832) — the FC layer's 3 extra
+output columns cost 128 bytes; MACs 4,234,848 (deployed: 4,234,704, +144 for the same reason), both
+comfortably inside the 500,000-byte / 5,000,000-MAC budgets. sha256 `3b99aee2`. INT8 own-era test
+accuracy 0.5112 (n=4,638) — not cross-comparable to deployed's 0.7188 (different-era test set, per
+established convention, see below).
+
+**5 — scoring.** `scripts/compare_command_models.py --candidate .../run8-s0/command_v3_w48_qat.tflite
+--candidate-test-npz features_v3_test.npz --deployed-test-npz features_v3_test.npz.pre-run7`
+(deployed header default, `firmware/main/gen/model_data.h`, sha256 `86b7105e` — unchanged; the
+`.pre-run7` npz is the same one E49 used, still valid since deployed hasn't retrained since well
+before run7). Guided-only isolated-word aggregate, same definition as E49/E52 (n=74:
+spk01+spk02+spk22, `approved/words/` only):
+
+| | deployed `86b7105e` | run8_s0 `3b99aee2` |
+|---|---|---|
+| spk01 words (n=13) | 1.000 | 1.000 |
+| spk02 words (n=38) | 1.000 | 0.947 |
+| spk22 words (n=23) | 0.696 | **0.826** |
+| **aggregate guided-only words (n=74)** | 0.905 | **0.932** |
+| false accepts (n=85) | 0/85 | **1/85** (spk10, rate 0.053) |
+| redefined `passes()` (E52: aggregate ≥0.785 AND 0 FA) | PASS | **FAIL** (FA clause) |
+
+**This is not the "roughly a wash or slightly worse" result the task brief anticipated going in.**
+The guided-only aggregate actually *improves* (0.905 → 0.932), driven entirely by spk22
+(0.696 → 0.826, the held-out speaker deployed handles worst) — spk01 is unchanged, spk02 dips two
+clips (38 → 36 correct). But run8_s0 introduces exactly one false accept (spk10, 1/19) that
+deployed does not have, which fails E52's hard `false_accepts == 0` clause regardless of the
+aggregate improvement. `recipe-grid.csv` row appended: `run8_s0_w48_rw3_qe20` (FAIL, same reasoning
+as `passes()` above).
+
+**Bootstrap sanity check — the 3 new classes' own TTS-held-out accuracy** (NOT part of the deploy
+metric above; these have zero guided clips and correctly do not appear in the guided-only
+aggregate — confirmed by construction, since `eval_recordings`'s `isolated` figures only ever read
+`approved/words/*/*.wav`, which has no entries for any of the 3 new words, and separately confirmed
+the aggregate's n=74 denominator is unchanged from E49/E52). Per-class INT8 accuracy on the TTS
+test split (n=144 each, all synthetic):
+
+| class | n | INT8 accuracy | most common confusions |
+|---|---|---|---|
+| Küchenlicht | 144 | 0.347 | `Lesen` (31), `fünfundzwanzig` (16), `kälter` (13) |
+| Außenlicht | 144 | 0.361 | `Aufstelldach` (23), `fünfundsiebzig` (15), `kälter` (9) |
+| Leselicht | 144 | 0.361 | `fünfundsiebzig` (24), `Lesen` (13), `fünfundzwanzig` (12) |
+
+Well above chance (1/26 ≈ 3.8%) but far below any deployable bar — consistent with a from-scratch
+TTS-only bootstrap on words with no real speaker data at all, and consistent with E27/E28's
+experience that a brand-new word class needs real speech to generalize past the synthetic voice
+pool it was born from. The confusions are not random: each compound is most often mistaken for
+another multi-syllable word sharing some acoustic shape (its own zone stem, a brightness number
+word, or an unrelated action) — exactly the kind of error that fades with real-speaker variety and
+does not indicate a broken class.
+
+**Deploy decision: NOT deployed.** Per standing policy (deploy iff the candidate passes E52's rule
+AND beats deployed on the same guided-only aggregate): run8_s0 fails `passes()` on the false-accept
+clause alone, so the "beats deployed" comparison is moot — one failing gate is enough. Canonical
+`command_v3_w48_qat.*` and `firmware/main/gen/` are untouched; `run8_s0`'s export lives only under
+`$KWS_DATA_ROOT/models/run8-s0/`. No firmware export/codegen/parity/Docker verification was run
+(deploy-only steps, moot since nothing is deployed). Device: pending (no device access, host-only
+task; moot regardless since nothing was promoted to canonical).
+
+**What this unblocks.** The concrete next data-collection step named in E50 is now live: because
+`Küchenlicht`/`Außenlicht`/`Leselicht` are in `COMMAND_LABELS` and therefore in `prompt_sets()`'s
+guided "Wörter aufnehmen" word list, the *next* guided recording session on the device will surface
+these 3 words and can capture real speaker clips for them for the first time. That real data is the
+missing ingredient this entry's bootstrap sanity numbers point at directly — until it exists, these
+3 classes stay TTS-only and should not be represented as recognized in any user-facing sense.
+
+**Not done here:** no change to `SITUATIONS`, `kws_de.qc.vocab()`/`label_for_token`, or any elicit/
+scene word-cutting path (all out of scope per the task brief); no fix to `recipe-grid.py`'s stale
+`SPEAKERS` tuple (same staleness E49/E52 already flagged, unrelated to this entry); no firmware
+build/flash; no promotion to canonical.
+
+### E54 — seed-variance follow-up to E53: does seed 1 clear the false-accept gate? (2026-09-09, host-only, exp/run8-compound-bootstrap)
+
+E40 already established that 0-2 false accepts is normal seed-to-seed noise at this exact recipe
+(`--width 48 --qat --qat-epochs 20 --real-weight 3`). E53 (`run8_s0`, seed 0) improved the
+guided-only aggregate over deployed (0.905 → 0.932) but introduced one false accept (spk10),
+failing E52's `passes()` rule on that clause alone. This entry retrains the identical 26-class
+recipe at seed 1 in the same worktree to see whether the false accept was seed noise rather than
+something the 3 new classes structurally cause.
+
+**1 — dataset build.** `kws-dataset build --cache raw_clips_v3.pkl --prefix features_v3 --seed 1`
+(same cache/prefix as E53's build, seed only variable). No `[tts] added:` line — the 300/300 TTS
+clips per new word E53 already synthesized were reused unchanged from the persisted
+`raw_clips_v3.pkl` cache, confirming the "resynthesize only on cache miss" convention held.
+`[recordings] merged` counts identical to E53 (same approved recordings pool, nothing new landed
+since). `train=54791, val=7160, test=5322` (E53/seed 0: `train=48998, val=13636, test=4638`) — a
+different seed reshuffles the speaker-disjoint split boundaries substantially on a dataset this
+small; not a data problem, the same effect E39/E40 already documented for split-sensitive small
+real-speaker pools. Wall time 56.6s (cache hit; no TTS resynthesis).
+
+**Caution for future reruns:** `kws-dataset build`'s `--cache` flag defaults to
+`raw_clips_merged.pkl`, not `raw_clips_v3.pkl` — the first attempt at this step (immediately
+superseded, not used below) was run with the bare `--prefix`/`--seed` flags per the task brief's
+literal wording and silently built off the wrong cache (`train=45386, val=11095, test=10792`,
+*with* a fresh `[tts] added: {...}` resynthesis into `raw_clips_merged.pkl`, additively — no data
+lost, just the wrong cache polluted with 3 new words it didn't have before). Re-run with the
+explicit `--cache raw_clips_v3.pkl` flag E53 actually used; the numbers above are from the
+corrected run. `raw_clips_merged.pkl`'s new entries are harmless leftovers (additive, 3 words that
+previously had zero rows there) but are not cleaned up here — out of scope for a host-only scoring
+task, flagged for whoever next reaches for that cache file.
+
+**2 — training.** `kws-train --v2 --prefix features_v3 --width 48 --qat --qat-epochs 20
+--real-weight 3 --seed 1 --out command_v3_w48_qat_run8_s1.keras`. Float phase (40 epochs): best val
+accuracy 0.6328 at epoch 39, final train accuracy 0.7223. QAT phase (20 epochs): final train
+accuracy 0.7346. Wall time 28:48 (float+QAT combined; comparable to E53's 27 min for the same
+recipe at seed 0). Exported (isolated) to `$KWS_DATA_ROOT/models/run8-s1/` — canonical untouched at
+this point. Export bytes 25,960, MACs 4,234,848 (both identical to `run8_s0`, as expected — same
+architecture, same label count). sha256 `4ce8ad25`. INT8 own-era test accuracy 0.4598 (n=5,322) —
+own-era only, not cross-comparable to deployed's or `run8_s0`'s (different test splits per seed, see
+below for why this number matters more than usual this time).
+
+**3 — scoring.** `scripts/compare_command_models.py` against deployed `86b7105e`, same guided-only
+definition as E52/E53 (n=74: spk01+spk02+spk22, `approved/words/` only):
+
+| | deployed `86b7105e` | `run8_s0` `3b99aee2` | `run8_s1` `4ce8ad25` |
+|---|---|---|---|
+| spk01 words (n=13) | 1.000 | 1.000 | 1.000 |
+| spk02 words (n=38) | 1.000 | 0.947 | **1.000** |
+| spk22 words (n=23) | 0.696 | 0.826 | **0.870** |
+| **aggregate guided-only words (n=74)** | 0.905 | 0.932 | **0.9595** |
+| false accepts (n=85) | 0/85 | 1/85 (spk10, rate 0.053) | **0/85** |
+| `passes()` (E52: aggregate ≥0.785 AND 0 FA) | PASS | FAIL (FA clause) | **PASS** |
+
+**Seed 1 clears the gate `run8_s0` missed, and by a wide margin.** Every per-category false-accept
+bucket (`spk18`/`spk02`/`spk10`/`spk19`/`spk20` in-training, `spk22` held-out — the same 85-clip
+denominator E52/E53 used) reads `rate=0.000` for `run8_s1`; the single false accept `run8_s0` had at
+spk10 (1/19) is gone at seed 1. This confirms E40's seed-variance finding directly: the false accept
+was seed noise, not something the 3 new TTS-only classes structurally cause. The guided-only
+aggregate also improves further (0.932 → 0.9595), driven by spk02 recovering its 2 lost clips (36/38
+→ 38/38) and spk22 improving another clip (19/23 → 20/23) on top of `run8_s0`'s already-large gain
+there. `recipe-grid.csv` row appended: `run8_s1_w48_rw3_qe20` (PASS).
+
+**Bootstrap sanity check — the 3 new classes' own TTS-held-out accuracy**, same framing as E53 (zero
+guided clips exist for these words; not part of the guided-only deploy metric; confirmed absent from
+the n=74 denominator by the same construction argument E53 made). Per-class INT8 accuracy on this
+seed's TTS test split (n=176 each — larger than E53's n=144 because of the different seed's split
+sizes, all synthetic):
+
+| class | n | INT8 accuracy | most common confusions |
+|---|---|---|---|
+| Küchenlicht | 176 | 0.290 | `fünfundzwanzig` (18), `fünfundsiebzig` (17), `Außenlicht` (14) |
+| Außenlicht | 176 | 0.250 | `Aufstelldach` (47), `fünfundsiebzig` (18), `fünfundzwanzig` (10) |
+| Leselicht | 176 | 0.244 | `fünfundsiebzig` (31), `Außenlicht` (21), `Aufstelldach` (14) |
+
+Similar shape to E53's numbers (well above the 1/26 ≈ 3.8% chance floor, far below deployable, same
+kind of cross-compound confusion) — seed doesn't materially change the TTS-only bootstrap story,
+consistent with these 3 classes needing real speaker data regardless of which seed trains them.
+
+**4 — deploy attempt: blocked by `kws-export`'s model-health floor, not by the deploy rule.**
+`run8_s1` passes E52's `passes()` rule AND beats deployed's guided-only aggregate (0.9595 ≥ 0.905),
+so per standing policy this entry proceeded to promote it. Canonical `command_v3_w48_qat.{tflite,
+_data.h,_metadata.json}` and the `command_v3_w48_qat/` SavedModel dir were backed up as
+`*.pre-run8s1` first. `kws-export --firmware --qat --prefix features_v3 --model
+command_v3_w48_qat_run8_s1.keras --width 48` (default `--out`, the canonical path, per E37's
+promotion pattern from the PR #82/#95/#98 lineage) ran into `kws_de/export.py`'s
+`assert_model_healthy` gate:
+
+```text
+INT8 test accuracy: 0.4598
+[export] wrote command_v3_w48_qat.tflite + command_v3_w48_qat_data.h from command_v3_w48_qat_run8_s1_qat (features_v3)
+ValueError: model accuracy 46.0% is below the 50% floor — refusing to export a broken model
+```
+
+This is a *different* accuracy gate than the deploy-rule aggregate above — it is
+`assert_model_healthy`'s blanket own-era INT8 test accuracy check across all 26 classes on
+`features_v3_test.npz` (min 50%, added to catch a mode-collapsed model from ever reaching firmware,
+see its docstring), evaluated against *this seed's* test split. `run8_s1`'s own-era accuracy
+(45.98%, n=5,322) sits under that floor even though its real-voice guided-only performance is the
+best of the three models compared here — the two metrics measure different things (all-26-class
+synthetic-heavy test-set accuracy vs. a hand-picked real-speaker word subset) and can disagree.
+`run8_s0`'s own-era accuracy (51.12%, n=4,638) happened to clear the same floor by a hair; `run8_s1`
+does not, so **`--firmware` refused to write `firmware/main/gen/model_data.h`/`model_config.h`
+for it** — the retrain never reached the codegen/parity/Docker steps this task's brief anticipated
+for a successful deploy.
+
+**Important side effect caught and reversed.** `kws-export`'s non-firmware code path
+unconditionally writes the canonical `.tflite`/`_data.h`/`_metadata.json` bytes *before*
+`--firmware`'s health check runs (visible in `kws_de/export.py:main` — the `(out / tflite_name)
+.write_bytes(blob)` call precedes the `if args.firmware:` block's gate) — so the failed export left
+canonical `command_v3_w48_qat.tflite` holding `run8_s1`'s bytes (`4ce8ad25`) while
+`firmware/main/gen/model_config.h` still named the old deployed `86b7105e`, an inconsistent
+half-promoted state. Caught immediately (sha256 diff against the pre-export backup) and reverted:
+canonical `.tflite`/`_data.h`/`_metadata.json` restored from the `*.pre-run8s1` backups (now back to
+`86b7105e` everywhere), backups then deleted since nothing was actually promoted.
+`firmware/main/gen/` was never touched (the health check runs before that write), confirmed by
+`KWS_MODEL_ID` in `model_config.h` reading `86b7105e` throughout. Worth a follow-up: `kws-export
+--firmware`'s write order means any future health-floor failure does this same partial-overwrite by
+construction; reordering the canonical-file write to after the health check (or writing to a temp
+path first) would make this class of failure inert instead of requiring a manual catch-and-revert.
+Not fixed here (would be a behaviour change to `kws_de/export.py` outside a host-only scoring task's
+scope) — flagged as an open question below.
+
+**Deploy decision: NOT deployed.** `run8_s1` clears the guided-only real-voice deploy rule (E52) by
+the widest margin any run in this vocabulary's history has, but is blocked by a second, independent
+correctness gate inside `kws-export` itself. Since the retrain never reached firmware-header
+regeneration, none of the downstream verification this task's brief lists (`kws-codegen`,
+`kws-fwgen --check`, `make -C firmware/test`, full `pytest`, `ruff`, `markdownlint`, Docker default
+build, `data/manifest_v3_qat.json` refresh) was run — all of it is conditional on a successful
+`--firmware` export, which did not happen. Canonical `command_v3_w48_qat.*` and
+`firmware/main/gen/` are confirmed untouched (still the deployed `86b7105e`, 23-class headers);
+`run8_s1`'s export lives only under `$KWS_DATA_ROOT/models/run8-s1/`. Per the task brief's stopping
+rule, a third seed was not attempted — two data points (E53 seed 0, this entry's seed 1) are enough
+to show the false-accept gate is seed noise, but the 26-class bootstrap's own-era test accuracy
+sitting near/under `assert_model_healthy`'s 50% floor across both seeds so far (51.1%, 46.0%) is a
+new, separate finding worth a maintainer decision before either seed's model reaches firmware:
+either the floor needs revisiting for a bootstrap-heavy label set (3 of 26 classes are 100%
+synthetic with ~25-35% own-class accuracy, pulling the whole-test-set average down structurally
+regardless of how well the other 23 classes or the real-voice guided set score), or the vocabulary
+needs real speaker data for the 3 new words (as E53 already flagged as the natural next step) before
+any seed of this recipe can actually ship. Device: pending (moot — nothing promoted to canonical).
+
+**Not done here:** no change to `kws_de/export.py`'s health-floor logic or write ordering (flagged
+above, a maintainer decision, not a host-only scoring call); no third seed; no firmware build/flash.
+
+### E55 — health-gate redesign: per-class bootstrap floor + write-order fix; run8_s1 still blocked (2026-09-09, host-only, exp/run8-compound-bootstrap)
+
+E54 flagged two problems with `kws_de/export.py`'s `--firmware` gate and left both as open questions
+for a maintainer call. This entry resolves both, per that call: lower the health floor specifically
+for bootstrap classes (zero real training clips) while keeping the existing floor meaningful for
+classes with real backing, and fix the write-order bug so a failed gate can no longer leave canonical
+files ahead of `firmware/main/gen/`.
+
+**1 — health-gate redesign.** `assert_model_healthy` now takes `bootstrap_classes` (label indices
+with zero real, i.e. non-TTS, training clips) and `class_names`. Classes in `bootstrap_classes` are
+excluded from the existing `min_accuracy` (50%) floor — which now applies only to classes that DO
+have real training backing — and are instead scored against a new `bootstrap_min_accuracy` floor
+(default 15%). Bootstrap-class membership is derived from the train split's existing `is_tts`
+provenance flag (`kws_de/data.py`), not a new tracking mechanism: a class with zero `~is_tts` rows
+in `{prefix}_train.npz` is bootstrap. `kws_de/export.py:main` computes this set right after loading
+the train npz and threads it (plus `labels`) into `assert_model_healthy`.
+
+Floor choice: 26 classes at chance is 1/26 ≈ 3.8%. E53/E54 measured the 3 bootstrap classes
+(`Küchenlicht`/`Außenlicht`/`Leselicht`) at 24.4-29.0% own-class INT8 accuracy across two seeds —
+consistent, well above chance, exactly the shape expected of a TTS-only class that hasn't collapsed
+or scrambled. 15% sits at ~4x chance: comfortably below every observed bootstrap number (safety
+margin ≥9 points) so it doesn't rubber-stamp a pass, but far enough above the ~3.8% chance rate that
+a genuinely broken class (export corruption, label-index scrambling — those land at or near chance)
+still trips it. Tests: `test_bootstrap_classes_get_a_separate_lower_floor` (a 25%-accurate bootstrap
+class passes, the mature-class accuracy computed over the *other* 23 classes is unaffected) and
+`test_bootstrap_floor_still_rejects_a_near_chance_class` (a 0%-accurate bootstrap class still raises)
+in `tests/test_export_firmware.py`.
+
+**2 — write-order fix.** `kws_de/export.py:main` previously wrote the canonical
+`command{suffix}.tflite`/`_data.h`/`_metadata.json` unconditionally, then ran `assert_model_healthy`
+only inside the `--firmware` branch afterward — so a failed gate left canonical files holding the
+rejected model's bytes while `firmware/main/gen/` still named the old one (exactly what E54 caught
+and reverted by hand). Fixed by reordering: the INT8 test-set prediction, accuracy print, and (for
+`--firmware`) the health gate now all run *before* any file is written; the gate raises straight out
+of `main()` with nothing touched. Smallest possible diff — no temp-path/rename machinery needed,
+since the gate is pure computation over already-in-memory arrays and only ever needs to run once
+before the first `write_bytes`/`write_text` call. Test:
+`test_firmware_export_leaves_canonical_files_untouched_on_health_failure` — a full `kws-export
+--firmware` run against a synthetic, deliberately-untrained model in an isolated `tmp_path`
+`KWS_DATA_ROOT`, asserting canonical files and `firmware/main/gen/model_data.h` are byte-identical
+(via pre-written sentinel content) before and after the raised `ValueError`.
+
+**3 — re-running run8_s1's export.** Canonical `command_v3_w48_qat.{tflite,_data.h,_metadata.json}`
+and the `command_v3_w48_qat/` SavedModel dir were backed up as `*.pre-run8s1` (confirmed identical to
+deployed `86b7105e` beforehand), then: `kws-export --firmware --qat --prefix features_v3 --model
+command_v3_w48_qat_run8_s1.keras --width 48` (same command E54 used). Result: **still refused**, now
+for a different, verified-genuine reason:
+
+```text
+INT8 test accuracy: 0.4598
+ValueError: model accuracy 48.2% (real-backed classes) is below the 50% floor — refusing to export a broken model
+```
+
+Excluding the 3 bootstrap classes only moves the floor-relevant accuracy from 46.0% (all 26 classes)
+to 48.2% (23 real-backed classes) — still under 50%. Per-class breakdown of the 23 mature classes on
+this seed's `features_v3_test` split (own-era INT8, n=5,322 total) confirms this is not a
+bootstrap-class artefact: `Licht`/`Kühlschrank`/`_silence_` score 80-96%, but many single-word
+classes sit well below half — `Küche` 17.6%, `Lesen` 19.6%, `fünfundsiebzig` 17.9%, `heller` 28.0%,
+`kälter` 27.7%, `an` 34.8%, `Heizung`/`Aufstelldach` 36-37% — dragging the 23-class weighted average
+under the floor on its own, independent of the 3 bootstrap classes (which score 24.4-29.0%, as
+before, and individually clear their new 15% floor with margin — the redesign works as intended).
+This own-era split is TTS-heavy and adversarial across similar-sounding numerals/compounds by
+construction (see E54); it disagrees sharply with the guided-only real-voice metric (0.9595, best of
+any model scored in this vocabulary's history) the same way E54 already documented for the
+all-26-class figure. The gate redesign did exactly its job — it stopped rubber-stamping a bootstrap
+artefact and instead surfaced that seed 1's mature-class own-era accuracy is genuinely, if narrowly,
+below the floor. Per this task's explicit stopping rule, the floor is not loosened further to force
+a pass.
+
+**Write-order fix verified on a real failure.** After the `ValueError` above, canonical
+`command_v3_w48_qat.tflite`/`_data.h`/`_metadata.json` sha256-match their `*.pre-run8s1` backups
+exactly (byte-for-byte untouched) and `firmware/main/gen/model_config.h` still reads
+`KWS_MODEL_ID "command_v3_w48_qat.tflite@86b7105e 2026-09-06"` — no partial-overwrite, no manual
+catch-and-revert needed this time. Backups deleted afterward (nothing to restore from; canonical was
+never touched).
+
+**Deploy decision: still NOT deployed.** Since `--firmware` refused the export again, none of step
+5's downstream verification (`kws-codegen`, `kws-fwgen --check`, `make -C firmware/test`, full
+`pytest`, `ruff`, `markdownlint`, Docker build, `data/manifest_v3_qat.json` refresh) applies — all
+conditional on a successful export, which did not happen. `run8_s1`'s isolated export under
+`$KWS_DATA_ROOT/models/run8-s1/` is unchanged from E54. Device: pending (moot — nothing promoted).
+The remaining path to deploying either `run8` seed is real speaker data: for the 3 new bootstrap
+words directly (their own accuracy is already known and expected to stay low without it), and
+plausibly a broader real-recording pass on the weaker mature classes surfaced above — this seed's
+own-era shortfall is not concentrated in the new vocabulary.
+
+**Not done here:** no third seed (out of scope — this entry is about the gate, not a fresh
+seed-variance search); no loosening of the 50% mature-class floor to force `run8_s1` through; no
+firmware build/flash.
+
 ## Open questions
 
+- `kws_de/export.py`'s bootstrap-aware health gate (E55) is now class-provenance-driven and covers
+  the failure mode E54 raised, but both `run8` seeds still fail it on the *mature*-class accuracy
+  alone (independent of the bootstrap floor) — the vocabulary needs real speaker data, not a further
+  gate change, before this recipe can ship. Candidate weak mature classes from E55's per-class
+  breakdown: `Küche`, `Lesen`, `fünfundsiebzig`, `heller`, `kälter`, `an`.
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
   effective n ≈ (speaker, word) pairs; `kws-benchmark --folds 5` over real speakers only, TTS always
   train-side, mean ± std + per-speaker table. Build after v3 once ≥ 5 speaker groups cover every
@@ -4545,3 +4941,13 @@ unchanged (host-only, `KWS_NOISE_DIR`/`KWS_RIR_DIR` unset).
   n-best lattice parse over the existing posteriors (≤ 8 sequences per phrase, score = ∏ probs,
   accept on tau/delta, temperature-calibrated), E11 offline re-decode of the catalog eval with
   false-accept rate on negatives as the gate; catalog DP decoding only if > 5 points remain.
+- `kws_de/export.py`'s `assert_model_healthy` floor vs. bootstrap-heavy label sets (E54): both
+  seeds of the 26-class `run8` recipe scored near/under the 50% own-era test-accuracy floor
+  (51.1%, 46.0%) despite one of them (seed 1) clearing the real-voice guided-only deploy rule by
+  the widest margin yet — a maintainer call on whether the floor should weight by real-voice
+  performance, exclude TTS-only classes from its denominator, or just needs real speaker data for
+  the 3 bootstrap classes before either seed can pass it. Also: `--firmware`'s current write order
+  overwrites the canonical `.tflite`/`_data.h`/`_metadata.json` before running this health check,
+  so a failed export leaves canonical files ahead of `firmware/main/gen/` until someone notices and
+  reverts by hand (E54 caught this once); reordering the write to after the gate (or via a temp
+  path) would make the failure mode inert instead of requiring a manual catch-and-revert.

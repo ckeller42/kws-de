@@ -5,19 +5,17 @@
 #include "gen/labels.h"
 
 /* KWS_LABELS (gen/labels.h) is generated from kws_de.config.COMMAND_LABELS in
-   exactly this order: DEVICES, ZONES, ACTIONS, then "_unknown_"/"_silence_"
-   (see kws_de/config.py). These counts mirror that layout so the label array
-   itself never has to be duplicated here -- only its structure does. A count
-   drift is caught at compile time (the _Static_assert below) and any drift in
-   WHICH label lands where is caught by test_intent.c comparing every case
-   against kws_de.grammar.parse(). */
+   exactly this order: DEVICES, ZONES, ACTIONS, "_unknown_"/"_silence_", then
+   (E53) LIGHT_COMPOUNDS appended last (see kws_de/config.py). These counts
+   mirror that layout so the label array itself never has to be duplicated
+   here -- only its structure does. A count drift is caught at compile time
+   (the _Static_assert below, once N_LIGHT_COMPOUNDS is defined) and any
+   drift in WHICH label lands where is caught by test_intent.c comparing
+   every case against kws_de.grammar.parse(). */
 #define N_DEVICES 4  /* Licht, Kühlschrank, Heizung, Aufstelldach */
 #define N_ZONES 4    /* Küche, Dach, Außen, Lesen */
 #define N_ACTIONS 13 /* an, aus, auf, zu, heller, dunkler, wärmer, kälter, leise, + 4 levels */
 #define N_LEVELS 4   /* fünfundzwanzig, fünfzig, fünfundsiebzig, hundert -- the last N_LEVELS actions */
-
-_Static_assert(N_DEVICES + N_ZONES + N_ACTIONS + 2 == KWS_NUM_LABELS,
-               "intent.c's device/zone/action layout must match gen/labels.h");
 
 /* Only Licht (label index 0) takes a zone: kws_de.config.ZONED_DEVICES. */
 static bool device_takes_zone(int device_idx) { return device_idx == 0; }
@@ -33,19 +31,27 @@ static const unsigned kDeviceActions[N_DEVICES] = {
 };
 
 /* kws_de.config.LIGHT_COMPOUNDS: fused Licht+zone words ("Küchenlicht" ->
-   "Küche"), matched here as literal strings rather than via KWS_LABELS --
-   they are not yet a trained class (KWS_MODEL_NUM_CLASSES is still 23, see
-   the _Static_assert in recognise.cc), so the device can never actually emit
-   one until the next retrain adds them (docs/paper-notes.md E50). This table
-   keeps the C port in lockstep with kws_de.grammar.parse() for that day; it
-   is unreachable in production until then. "Dach" has no natural compound --
-   see config.LIGHT_COMPOUNDS' comment -- so it is not in this table. */
+   "Küche"), matched here as literal strings rather than via KWS_LABELS/
+   label_index() -- intent_parse()'s tokenizer loop checks this table BEFORE
+   ever calling label_index(), so it still works the same way now that these
+   3 words are also present in KWS_LABELS (E53 promoted them to live model
+   classes, docs/paper-notes.md E53; they were wired here but unreachable
+   since E50). "Dach" has no natural compound -- see config.LIGHT_COMPOUNDS'
+   comment -- so it is not in this table. */
 static const struct { const char *word; const char *zone; } kLightCompounds[] = {
     {"Küchenlicht", "Küche"},
     {"Außenlicht", "Außen"},
     {"Leselicht", "Lesen"},
 };
 #define N_LIGHT_COMPOUNDS (sizeof kLightCompounds / sizeof kLightCompounds[0])
+
+/* The label layout is DEVICES+ZONES+ACTIONS+2 sentinels (unchanged since
+   before E53, so KWS_UNKNOWN_INDEX/KWS_SILENCE_INDEX below stay 21/22 the
+   device already relies on), plus N_LIGHT_COMPOUNDS appended at the end
+   (E53) -- see kws_de/config.py's COMMAND_LABELS ordering comment for why
+   the compounds are appended after, not before, the sentinels. */
+_Static_assert(N_DEVICES + N_ZONES + N_ACTIONS + 2 + N_LIGHT_COMPOUNDS == KWS_NUM_LABELS,
+               "intent.c's device/zone/action/compound layout must match gen/labels.h");
 
 static int label_index(const char *tok)
 {
