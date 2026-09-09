@@ -80,9 +80,21 @@ ESP_NN_SRCS := $(ESP_NN)/src/convolution/esp_nn_conv_ansi.c \
 ESP_NN_CFLAGS := -std=c11 -O2 -Wall -I$(ESP_NN)/include -I$(ESP_NN)/src/common
 
 # Not --depth 1 --branch: $(ESP_NN_REF) is a commit, and a shallow clone cannot
-# check one out unless it happens to be the tip.
+# check one out unless it happens to be the tip. Each git worktree gets its own
+# ignored .esp-nn, so a fresh worktree re-clones ~50 MB from GitHub by default;
+# check other worktrees for one already pinned at ESP_NN_REF and copy it
+# instead, since it's the exact same bytes either way.
 $(ESP_NN):
-	git clone --quiet https://github.com/espressif/esp-nn $(ESP_NN)
+	@for wt in $$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p'); do \
+		cand="$$wt/firmware/test/.esp-nn"; \
+		if [ "$$(git -C "$$cand" rev-parse HEAD 2>/dev/null)" = "$(strip $(ESP_NN_REF))" ]; then \
+			echo "esp-nn: copying pinned clone from $$cand (sibling worktree, no network)"; \
+			cp -R "$$cand" $(ESP_NN); \
+			exit 0; \
+		fi; \
+	done; \
+	echo "esp-nn: cloning $(strip $(ESP_NN_REF)) from network (no sibling worktree has it)"; \
+	git clone --quiet https://github.com/espressif/esp-nn $(ESP_NN); \
 	git -C $(ESP_NN) checkout --quiet --detach $(ESP_NN_REF)
 
 # Phony on purpose: the probe source is rewritten per layer by the parity test,
