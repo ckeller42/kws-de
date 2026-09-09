@@ -11,7 +11,7 @@ Overview
 Seven stages, from the device to a retrained model:
 
 1. **Remote control** (firmware, already on ``main``) — serial console
-   commands ``mode menu|record|recordwake|elicit|recognise|wake|usb`` and
+   commands ``mode menu|record|recordwake|elicit|recordscene|recognise|wake|usb`` and
    ``status`` drive the CoreS3 without touching its screen; ``mode
    usb``/``mode menu`` are what ingest uses.
 2. **Ingest** (``scripts/ingest.sh``) — pulls a recording session from the
@@ -56,6 +56,9 @@ Everything lives under ``$KWS_DATA_ROOT/data/recordings/``:
      spkNN/_elicit_/<slug>_NNN.wav         elicitation ("Situationen") takes;
                                            <slug> is derived from the EXPECTED
                                            INTENT, not the on-screen scene
+     spkNN/_scene_/<slug>_NNN.wav          scene-trigger ("Szenen") takes;
+                                           <slug> is the read trigger phrase,
+                                           which is also the prompt column
      field/spkNN/<boot>-<ms>.wav           field takes, captured in Assistent
                                            mode (set=field, no prompt)
      sessions.csv                         speaker,pulled,prompt,file,ms,
@@ -291,6 +294,18 @@ answer stays unfiled. ``expected_match`` is a proxy for how predictably a
 Situationen scene elicits its intended command (a corpus-design signal),
 not a substitute for evaluating the resulting model against real field
 usage.
+
+A **scene take** (``set=scene``, captured via the guided-recorder's Szenen
+mode) is a fixed scene-trigger phrase read whole, no wake word — so it takes
+the *words* branch's shape, not the field/elicit one. The content gate checks
+the transcript against the expected ``config.SCENE_TRIGGER_PROMPTS`` spelling
+(glued, so "Nacht Licht" and "Nachtlicht" both match) and rejects a wrong
+phrase; an approved take is filed WHOLE under a new ``approved/scene/<token>/``
+bucket (``GuteNacht``/``GutenMorgen``/``Leseratte``/``Nachtlicht``, recovered
+from the read spelling), never folded into ``approved/words/``. These are
+bootstrap positives for classes still pending in ``COMMAND_LABELS`` (paper
+notes E54/E55); ``report.md`` gets a ``## Scene`` line and ``kws-qc`` returns
+``scene_takes``/``scene_approved``/``scene_written``/``scene_skipped``.
 
 Auditing the whole tree
 ------------------------

@@ -768,10 +768,23 @@ def _tts_fill_word(
     return kept
 
 
+def tts_text_for(word: str) -> str:
+    """The text a TTS engine should actually SAY to produce a clip labelled
+    `word`. For an ordinary command label the label IS the spoken word ("Licht").
+    A config.SCENE_TRIGGERS token, though, is a space-free join ("GuteNacht") that
+    no engine pronounces correctly — its natural spelling lives in
+    config.SCENE_TRIGGER_PROMPTS ("Gute Nacht"), which is what gets synthesized.
+    This is the wiring the future retrain relies on: once a scene trigger is
+    promoted into COMMAND_LABELS, `_fill_with_tts` bootstraps it from the natural
+    spelling, not the token, with no further change (see docs/paper-notes E55)."""
+    return config.SCENE_TRIGGER_PROMPTS.get(word, word)
+
+
 def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragma: no cover
     """Top up any word (from `words`, default `config.COMMANDS`) under `target`
     real clips with TTS clips from gate-passing voices only. Returns
-    {word: n_tts_kept}."""
+    {word: n_tts_kept}. A config.SCENE_TRIGGERS token is synthesized from its
+    natural spelling (`tts_text_for`), not the space-free token."""
     import shutil
 
     words = list(words) if words is not None else config.COMMANDS
@@ -789,7 +802,9 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
             continue
         need = target - have
         print(f"[tts] {cmd}: {have} real clips, synthesizing {need} more")
-        new = _tts_fill_word(cmd.lower(), need, tmp_dir, voices_by_engine=voices_by_engine)
+        new = _tts_fill_word(
+            tts_text_for(cmd).lower(), need, tmp_dir, voices_by_engine=voices_by_engine
+        )
         clips.setdefault(cmd, []).extend(new)
         added[cmd] = len(new)
     shutil.rmtree(tmp_dir, ignore_errors=True)  # clips, and the manifest beside them

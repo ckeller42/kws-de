@@ -20,6 +20,9 @@ typedef enum {
     REC_CMD_START_ELICIT_SESSION, /**< Bump the speaker id, start the "Situationen" set
                                         (PROMPT_ELICIT); session ends when it's exhausted, no
                                         chaining into negatives — same shape as the wake session. */
+    REC_CMD_START_SCENE_SESSION, /**< Bump the speaker id, start the "Szenen" scene-trigger set
+                                        (PROMPT_SCENE); session ends when it's exhausted, no
+                                        chaining into negatives — same shape as the wake session. */
     REC_CMD_PAUSE,               /**< Pause the recorder (goes idle, waits for a command). */
     REC_CMD_FIELD_TAKE,          /**< Assist mode: copy one field take out of the audio ring and save it.
                                       The payload is set by record_post_field_take(). */

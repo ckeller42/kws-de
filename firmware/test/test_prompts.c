@@ -66,6 +66,23 @@ int main(void)
         prompt_advance(&a);
     }
 
+    /* scene ("Szenen") set: the four fixed scene-trigger phrases, read like the
+       words set (no wake word, no intent column), set name "scene", 3 takes per
+       prompt (bootstrap class wants several real samples each), the sentence cap
+       6000 ms (a two-word trigger a speaker pauses in runs past the 4000 ms word
+       cap), 1200 ms hangover so that pause doesn't cut the take. */
+    prompt_session_init(&a, PROMPT_SCENE, 1);
+    assert(a.count == KWS_NUM_SCENE_PROMPTS && a.count == 4);
+    assert(!strcmp(prompt_set_name(PROMPT_SCENE), "scene"));
+    assert(prompt_takes_per_prompt(PROMPT_SCENE) == 3);
+    assert(prompt_cap_ms(PROMPT_SCENE) == 6000);
+    assert(prompt_hangover_ms(PROMPT_SCENE) == 1200);
+    for (int i = 0; i < a.count; i++) {
+        assert(strlen(prompt_text(&a)) > 0);
+        assert(strlen(prompt_slug(&a)) > 0);
+        prompt_advance(&a);
+    }
+
     puts("test_prompts OK");
     return 0;
 }

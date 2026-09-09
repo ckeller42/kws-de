@@ -218,6 +218,19 @@ static const char *const KWS_WAKE_SLUGS[5] = {
   "hey-bus",
   "hey-bus"
 };
+#define KWS_NUM_SCENE_PROMPTS 4
+static const char *const KWS_SCENE_PROMPTS[4] = {
+  "Gute Nacht",
+  "Guten Morgen",
+  "Leseratte",
+  "Nachtlicht"
+};
+static const char *const KWS_SCENE_SLUGS[4] = {
+  "gute-nacht",
+  "guten-morgen",
+  "leseratte",
+  "nachtlicht"
+};
 #define KWS_NUM_ELICIT_PROMPTS 30
 static const char *const KWS_ELICIT_PROMPTS[30] = {
   "Es ist dunkel in der Küche.",

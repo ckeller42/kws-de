@@ -412,6 +412,10 @@ def test_run_qc_word_naming_avoids_bare_vs_phrase_collision_and_is_idempotent(tm
         "elicit_unfiled": 0,
         "elicit_expected_match": 0,
         "elicit_expected_compared": 0,
+        "scene_takes": 0,
+        "scene_approved": 0,
+        "scene_written": 0,
+        "scene_skipped": 0,
     }
     # bare guided take -> approved/words/; phrase-segmented words (context
     # origin, E48) -> approved/context/, both distinct files
@@ -1264,6 +1268,72 @@ def test_run_qc_elicit_and_field_takes_in_one_session_are_counted_separately(tmp
     assert counts["field_agree"] == 1
     report = (qcd / "report.md").read_text()
     assert "## Field" in report and "## Elicit" in report
+
+
+# --- Scene ("Szenen") --------------------------------------------------------
+# A scene take is a guided-session row whose prompt column is the fixed trigger
+# phrase read from the screen (config.SCENE_TRIGGER_PROMPTS, record.c's
+# prompt_text()), no wake word. It is verified against that phrase and filed
+# WHOLE under approved/scene/<token>/ — a class pending until the next retrain,
+# kept out of approved/words/.
+
+
+def _scene_session(tmp_path, display: str, slug: str, ms: int = 1500) -> Path:
+    inc = tmp_path / "incoming" / "sc1"
+    _wav(inc / "spk09" / "_scene_" / f"{slug}_001.wav", _tone(ms=ms))
+    (inc / "sessions.csv").write_text(
+        "speaker,pulled,prompt,file,ms,peak_dbfs,set,seed,ts\n"
+        f"spk09,t,{display},spk09/_scene_/{slug}_001.wav,{ms},-10,scene,1,1\n"
+    )
+    return inc
+
+
+def test_content_gate_scene_matches_expected_phrase_and_rejects_a_wrong_one():
+    # The trigger words are not in vocab(); the gate compares the heard transcript
+    # to the EXPECTED spelling, glued so spacing/fusing does not matter.
+    assert qc.content_gate("scene", "Gute Nacht", "Gute Nacht")[1] is None
+    assert qc.content_gate("scene", "Nachtlicht", "Nacht Licht")[1] is None  # spaced -> fused
+    assert qc.content_gate("scene", "Gute Nacht", "guten Morgen")[1] is not None
+    assert qc.content_gate("scene", "Gute Nacht", "")[1] is not None
+
+
+def test_scene_trigger_token_recovers_the_config_key_from_the_read_spelling():
+    assert qc.scene_trigger_token("Gute Nacht") == "GuteNacht"
+    assert qc.scene_trigger_token("Nachtlicht") == "Nachtlicht"
+    assert qc.scene_trigger_token("etwas ganz anderes") is None
+
+
+def test_run_qc_scene_take_is_filed_whole_under_approved_scene_bucket(tmp_path):
+    inc = _scene_session(tmp_path, "Gute Nacht", "gute-nacht")
+    qcd, appr = tmp_path / "qc" / "sc1", tmp_path / "approved"
+
+    counts = qc.run_qc(inc, qcd, appr, lambda p: {"text": "Gute Nacht", "words": []})
+    assert counts["scene_takes"] == 1
+    assert counts["scene_approved"] == 1
+    assert counts["scene_written"] == 1
+    assert counts["scene_skipped"] == 0
+
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["set"] == "scene" and row["verdict"] == "approve"
+    assert "## Scene" in (qcd / "report.md").read_text()
+
+    # whole clip filed under approved/scene/<token>/, NOT approved/words/
+    filed = list((appr / "scene" / "GuteNacht").glob("*.wav"))
+    assert len(filed) == 1
+    assert not (appr / "words").exists()
+    idx = list(csv.DictReader((appr / "scene" / "index.csv").open()))
+    assert idx[0]["prompt"] == "Gute Nacht" and idx[0]["speaker"] == "spk09"
+
+
+def test_run_qc_scene_take_with_the_wrong_phrase_is_rejected_and_unfiled(tmp_path):
+    inc = _scene_session(tmp_path, "Gute Nacht", "gute-nacht")
+    qcd, appr = tmp_path / "qc" / "sc1", tmp_path / "approved"
+    counts = qc.run_qc(inc, qcd, appr, lambda p: {"text": "guten Morgen", "words": []})
+    assert counts["scene_takes"] == 1
+    assert counts["scene_approved"] == 0
+    row = list(csv.DictReader((qcd / "qc.csv").open()))[0]
+    assert row["verdict"] == "reject"
+    assert not (appr / "scene").exists()
 
 
 def test_cli_missing_sessions_csv_exits_2(tmp_path, monkeypatch):
