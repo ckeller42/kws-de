@@ -47,6 +47,17 @@ CASES = [
     "Küchenlicht",
     "Licht Küchenlicht an",
     "Küchenlicht Küche an",
+    # Pending SCENE_TRIGGERS (kws_de.config): a single token stands for a
+    # COMPLETE intent (unlike LIGHT_COMPOUNDS, no following action needed).
+    # Same pending status -- grammar-ready, not yet a recognizable label.
+    "GuteNacht",
+    "GutenMorgen",
+    "Leseratte",
+    "Nachtlicht",
+    "Licht GuteNacht",
+    "GuteNacht Licht",
+    "Leseratte Lesen",
+    "Nachtlicht fünfzig",
 ]
 
 

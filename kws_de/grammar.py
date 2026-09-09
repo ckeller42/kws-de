@@ -19,7 +19,16 @@ def parse(events: list[str]) -> Intent | Rejection:
     toks = [e for e in events if e not in ("_unknown_", "_silence_")]
     device = zone = action = None
     for t in toks:
-        if t in config.LIGHT_COMPOUNDS:
+        if t in config.SCENE_TRIGGERS:
+            # A scene-trigger token ("GuteNacht") stands for a COMPLETE intent by
+            # itself -- unlike LIGHT_COMPOUNDS, which still needs a following
+            # action word, this sets device+zone+action all at once (see
+            # config.SCENE_TRIGGERS' docstring). Any slot already set from an
+            # earlier token is a conflict, exactly like a duplicate device.
+            if device is not None or zone is not None or action is not None:
+                return Rejection(f"duplicate device: {t}")
+            device, zone, action = config.SCENE_TRIGGERS[t]
+        elif t in config.LIGHT_COMPOUNDS:
             # A fused Licht+zone compound ("Küchenlicht") sets device+zone in one
             # token -- see config.LIGHT_COMPOUNDS' docstring for why this is not
             # yet reachable from a real recognition (pending retrain), but the
