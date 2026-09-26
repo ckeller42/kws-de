@@ -123,6 +123,41 @@ def _c_strings(name, items) -> str:
     return f"static const char *const {name}[{len(items)}] = {{\n{body}\n}};\n"
 
 
+def grammar_header() -> str:
+    """The device -> zone? -> action grammar firmware/main/intent.c parses, taken
+    from config so the C port's tables cannot drift from kws_de.grammar. The
+    asserts are the layout intent.c relies on: a reordering fails here instead of
+    silently corrupting the action bitmask."""
+    d, z, a = config.DEVICES, config.ZONES, config.ACTIONS
+    assert config.COMMAND_LABELS[: len(d) + len(z) + len(a)] == d + z + a
+    assert a[-len(config.LIGHT_LEVELS) :] == config.LIGHT_LEVELS  # levels = last actions
+    zoned = sum(1 << d.index(dev) for dev in config.ZONED_DEVICES)
+    masks = [sum(1 << a.index(act) for act in config.DEVICE_ACTIONS[dev]) for dev in d]
+    s = "#include <stddef.h>\n"
+    s += f"#define KWS_N_DEVICES {len(d)}\n#define KWS_N_ZONES {len(z)}\n"
+    s += f"#define KWS_N_ACTIONS {len(a)}\n#define KWS_N_LEVELS {len(config.LIGHT_LEVELS)}\n"
+    s += f"#define KWS_ZONED_DEVICE_MASK 0x{zoned:x}u\n"
+    s += "static const unsigned KWS_DEVICE_ACTIONS[KWS_N_DEVICES] = {"
+    s += ", ".join(f"0x{m:x}u" for m in masks) + "};\n"
+    comp = config.LIGHT_COMPOUNDS
+    s += f"#define KWS_NUM_LIGHT_COMPOUNDS {len(comp)}\n"
+    s += "typedef struct { const char *word; const char *zone; } kws_light_compound_t;\n"
+    s += "static const kws_light_compound_t KWS_LIGHT_COMPOUNDS[KWS_NUM_LIGHT_COMPOUNDS] = {\n"
+    s += ",\n".join(f'  {{"{w}", "{zone}"}}' for w, zone in comp.items()) + "\n};\n"
+    trig = config.SCENE_TRIGGERS
+    s += f"#define KWS_NUM_SCENE_TRIGGERS {len(trig)}\n"
+    s += (
+        "typedef struct { const char *word; int device_idx; const char *zone; int action_idx; }"
+        " kws_scene_trigger_t;\n"
+    )
+    s += "static const kws_scene_trigger_t KWS_SCENE_TRIGGERS[KWS_NUM_SCENE_TRIGGERS] = {\n"
+    rows = []
+    for w, (dev, zone, act) in trig.items():
+        zone_c = f'"{zone}"' if zone else "NULL"
+        rows.append(f'  {{"{w}", {d.index(dev)}, {zone_c}, {a.index(act)}}}')
+    return s + ",\n".join(rows) + "\n};\n"
+
+
 def generate(out) -> None:
     out = pathlib.Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -136,6 +171,7 @@ def generate(out) -> None:
         + f"#define KWS_UNKNOWN_INDEX {labels.index('_unknown_')}\n"
         + _c_strings("KWS_LABELS", labels)
     )
+    (out / "grammar.h").write_text(hdr + grammar_header())
 
     words, sentences, negs, wake, elicit, scene = prompt_sets()
     p = hdr
@@ -304,7 +340,7 @@ def check(committed_dir) -> list[str]:
         # wake_test_vectors.h is int-only and produced by deterministic C, so it
         # compares byte-exact through _headers_match's (float-free) string path.
         # It is skipped entirely when pymicro-features is not installed.
-        names = ["labels.h", "prompts.h", "features_config.h", "test_vectors.h"]
+        names = ["labels.h", "grammar.h", "prompts.h", "features_config.h", "test_vectors.h"]
         if (pathlib.Path(tmp) / "wake_test_vectors.h").exists():
             names.append("wake_test_vectors.h")
         for f in names:

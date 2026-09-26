@@ -129,7 +129,7 @@ def test_mel_bands_reproduce_the_dense_filterbank_exactly():
 def test_generate_is_deterministic_and_complete(tmp_path):
     firmware_gen.generate(tmp_path)
     firmware_gen.generate(tmp_path / "again")
-    for name in ("labels.h", "prompts.h", "features_config.h", "test_vectors.h"):
+    for name in ("labels.h", "grammar.h", "prompts.h", "features_config.h", "test_vectors.h"):
         a = (tmp_path / name).read_text()
         assert a == (tmp_path / "again" / name).read_text()
     labels = (tmp_path / "labels.h").read_text()
@@ -206,3 +206,22 @@ def test_check_catches_a_wake_model_that_does_not_match_its_stamp(tmp_path):
     first, comma, tail = rest.partition(",")
     (tmp_path / "wake_model_data.h").write_text(f"{head}{sep}{int(first) ^ 1}{comma}{tail}")
     assert any("wake_model_data.h" in name for name in firmware_gen.check(tmp_path))
+
+
+def test_grammar_header_action_masks_decode_to_config():
+    # The per-device action bitmask intent.c parses with must round-trip to
+    # config.DEVICE_ACTIONS exactly -- it used to be hand-copied into intent.c,
+    # where reordering ACTIONS silently corrupted it.
+    h = firmware_gen.grammar_header()
+    masks = [
+        int(m, 16)
+        for m in re.search(r"KWS_DEVICE_ACTIONS\[.*?\] = \{(.*?)\}", h)
+        .group(1)
+        .replace("u", "")
+        .split(",")
+    ]
+    for dev, mask in zip(config.DEVICES, masks, strict=True):
+        got = [a for i, a in enumerate(config.ACTIONS) if mask >> i & 1]
+        assert got == [a for a in config.ACTIONS if a in config.DEVICE_ACTIONS[dev]], dev
+    zoned = int(re.search(r"KWS_ZONED_DEVICE_MASK 0x([0-9a-f]+)u", h).group(1), 16)
+    assert [d for i, d in enumerate(config.DEVICES) if zoned >> i & 1] == config.ZONED_DEVICES

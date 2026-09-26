@@ -4745,8 +4745,18 @@ exactly the input the retrained model will emit, and mark the rejection as decod
 (grammar-constrained decoding), not a table fix. Docs: `architecture.md`'s command table drops the
 v1 devices (Campingmodus, USB, Wasser, Energie), gains the light levels and a line on the pending
 words; `architecture.md` and the two LikeC4 views say 2.5 s (`ASSIST_WINDOW_MS`) instead of "~3 s";
-`models.rst` names `kws_de.model`, not the non-existent `kws_de.models`. No model or firmware
-behaviour changed.
+`models.rst` names `kws_de.model`, not the non-existent `kws_de.models`.
+
+The review's K3: `intent.c` hand-copied the grammar's structure from `config.py` — the
+device/zone/action counts, "only device 0 takes a zone", the per-device action bitmask and the
+compound and scene-trigger tables — guarded only by a `_Static_assert` on the total. Reordering
+`ACTIONS` kept the total and silently scrambled the bitmask (the parity cases would catch it only
+where they happened to cover the moved action). `kws-fwgen` now writes those tables into
+`gen/grammar.h` from `config.py`, asserting the layout `intent.c` relies on (labels ordered
+devices, zones, actions; brightness levels last); gen-fresh CI checks the committed header is
+current, and a test decodes the generated masks back to `config.DEVICE_ACTIONS`. The generated
+tables are identical to the hand-written ones (masks `0x1e33`/`0x103`/`0xc3`/`0xc`); intent parity
+0/41, Docker `idf.py build` clean. No model or firmware behaviour changed.
 
 ## Open questions
 

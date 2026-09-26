@@ -2,65 +2,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "gen/grammar.h"
 #include "gen/labels.h"
 
-/* KWS_LABELS (gen/labels.h) is generated from kws_de.config.COMMAND_LABELS in
-   exactly this order: DEVICES, ZONES, ACTIONS, then "_unknown_"/"_silence_"
-   (see kws_de/config.py). These counts mirror that layout so the label array
-   itself never has to be duplicated here -- only its structure does. A count
-   drift is caught at compile time (the _Static_assert below) and any drift in
-   WHICH label lands where is caught by test_intent.c comparing every case
-   against kws_de.grammar.parse(). */
-#define N_DEVICES 4  /* Licht, Kühlschrank, Heizung, Aufstelldach */
-#define N_ZONES 4    /* Küche, Dach, Außen, Lesen */
-#define N_ACTIONS 13 /* an, aus, auf, zu, heller, dunkler, wärmer, kälter, leise, + 4 levels */
-#define N_LEVELS 4   /* fünfundzwanzig, fünfzig, fünfundsiebzig, hundert -- the last N_LEVELS actions */
+/* The grammar's tables -- device/zone/action counts, which devices take a zone,
+   each device's valid actions, the light compounds and the scene triggers -- are
+   generated from kws_de/config.py into gen/grammar.h by kws-fwgen, in the same
+   order as KWS_LABELS (DEVICES, ZONES, ACTIONS, then "_unknown_"/"_silence_").
+   kws-fwgen asserts that layout; gen-fresh CI checks the committed header is
+   current; test_intent.c checks every case against kws_de.grammar.parse().
+   The compounds and scene triggers are pending vocabulary: not a trained class
+   until the next retrain (docs/paper-notes.md E50/E54), matched here as literal
+   strings so the C port is already in lockstep with grammar.py. */
+#define N_DEVICES KWS_N_DEVICES
+#define N_ZONES KWS_N_ZONES
+#define N_ACTIONS KWS_N_ACTIONS
+#define N_LEVELS KWS_N_LEVELS /* the last N_LEVELS actions */
 
 _Static_assert(N_DEVICES + N_ZONES + N_ACTIONS + 2 == KWS_NUM_LABELS,
-               "intent.c's device/zone/action layout must match gen/labels.h");
+               "gen/grammar.h and gen/labels.h disagree -- rerun kws-fwgen");
 
-/* Only Licht (label index 0) takes a zone: kws_de.config.ZONED_DEVICES. */
-static bool device_takes_zone(int device_idx) { return device_idx == 0; }
+static bool device_takes_zone(int device_idx) { return (KWS_ZONED_DEVICE_MASK >> device_idx) & 1u; }
 
-/* kws_de.config.DEVICE_ACTIONS, as a bitmask over the action-local index
-   (0..N_ACTIONS-1, i.e. KWS_LABELS index minus N_DEVICES+N_ZONES):
-   an=0 aus=1 auf=2 zu=3 heller=4 dunkler=5 wärmer=6 kälter=7 leise=8, levels=9..12. */
-static const unsigned kDeviceActions[N_DEVICES] = {
-    (1u << 0) | (1u << 1) | (1u << 4) | (1u << 5) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12), /* Licht */
-    (1u << 0) | (1u << 1) | (1u << 8),                                                                /* Kühlschrank */
-    (1u << 0) | (1u << 1) | (1u << 6) | (1u << 7),                                                    /* Heizung */
-    (1u << 2) | (1u << 3),                                                                            /* Aufstelldach */
-};
-
-/* kws_de.config.LIGHT_COMPOUNDS: fused Licht+zone words ("Küchenlicht" ->
-   "Küche"), matched here as literal strings rather than via KWS_LABELS --
-   they are not yet a trained class (KWS_MODEL_NUM_CLASSES is still 23, see
-   the _Static_assert in recognise.cc), so the device can never actually emit
-   one until the next retrain adds them (docs/paper-notes.md E50). This table
-   keeps the C port in lockstep with kws_de.grammar.parse() for that day; it
-   is unreachable in production until then. "Dach" has no natural compound --
-   see config.LIGHT_COMPOUNDS' comment -- so it is not in this table. */
-static const struct { const char *word; const char *zone; } kLightCompounds[] = {
-    {"Küchenlicht", "Küche"},
-    {"Außenlicht", "Außen"},
-    {"Leselicht", "Lesen"},
-};
-#define N_LIGHT_COMPOUNDS (sizeof kLightCompounds / sizeof kLightCompounds[0])
-
-/* kws_de.config.SCENE_TRIGGERS: a single token standing for a COMPLETE intent
-   (device+zone+action all at once), unlike kLightCompounds which still needs a
-   following action word. Same pending status: not a trained class yet, matched
-   here as a literal string for the day a retrain adds it (docs/paper-notes.md
-   E50/E54). zone==NULL means "no zone" (device_takes_zone() still governs
-   whether a real zone may be attached downstream, matching grammar.py). */
-struct scene_trigger { const char *word; int device_idx; const char *zone; int action_idx; };
-static const struct scene_trigger kSceneTriggers[] = {
-    {"GuteNacht", 0, NULL, 1},     /* Licht, no zone, aus */
-    {"GutenMorgen", 0, NULL, 0},   /* Licht, no zone, an */
-    {"Leseratte", 0, "Lesen", 0},  /* Licht, Lesen, an */
-    {"Nachtlicht", 0, NULL, 9},    /* Licht, no zone, fuenfundzwanzig (25%) */
-};
-#define N_SCENE_TRIGGERS (sizeof kSceneTriggers / sizeof kSceneTriggers[0])
+/* Bitmask over the action-local index (KWS_LABELS index minus N_DEVICES+N_ZONES). */
+#define kDeviceActions KWS_DEVICE_ACTIONS
+#define kLightCompounds KWS_LIGHT_COMPOUNDS
+#define N_LIGHT_COMPOUNDS KWS_NUM_LIGHT_COMPOUNDS
+#define kSceneTriggers KWS_SCENE_TRIGGERS
+#define N_SCENE_TRIGGERS KWS_NUM_SCENE_TRIGGERS
 
 static int label_index(const char *tok)
 {
@@ -81,7 +50,7 @@ intent_t intent_parse(const char *words)
     int device_idx = -1, action_idx = -1;
     const char *zone = NULL;
     for (char *tok = strtok(buf, " "); tok; tok = strtok(NULL, " ")) {
-        const struct scene_trigger *trig = NULL;
+        const kws_scene_trigger_t *trig = NULL;
         for (size_t ti = 0; ti < N_SCENE_TRIGGERS; ti++) {
             if (strcmp(tok, kSceneTriggers[ti].word) == 0) {
                 trig = &kSceneTriggers[ti];
