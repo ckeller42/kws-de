@@ -4710,6 +4710,27 @@ pass; `tests/test_qc.py` (`content_gate`/`scene_trigger_token`/filing/reject) an
 `tests/test_firmware_gen.py` (scene block + token round-trip) added; full `pytest` 403 passed;
 `kws-fwgen --check` clean; ruff + markdownlint clean; Docker `idf.py build` passes.
 
+### E56 — `intent_rescore` stack overflow, and window buffers that drifted apart (2026-09-26)
+
+An architecture review at `a807562` flagged a memory-safety bug; confirmed and fixed.
+`intent_rescore` rebuilt the substituted token line with unbounded `strcat` into `merged[64]`.
+`window_intent` holds up to 63 bytes, and swapping `_unknown_` (9 bytes) for the longest runner-up
+label, `fünfundsiebzig` (15 bytes in UTF-8), grows it by 6. A near-full window therefore wrote up
+to 6 bytes past the stack buffer before the parse even ran. A new `test_intent.c` case (a 62-byte
+window, one fixable `_unknown_`) reproduces it: AddressSanitizer reports
+`stack-buffer-overflow intent.c:185 in intent_rescore`. The rebuild is now a bounded `snprintf`
+that returns the unrescored parse when the result would not fit the 63-byte line
+`intent_parse()` reads — truncating would have parsed a mangled token. Clean under ASan + UBSan,
+intent parity 0/34.
+
+Second finding from the same review: `recognise.cc` appended to `window_intent` (64 B),
+`window_words` (96 B) and `window_seconds` (96 B) independently. Seconds entries (`label:0.93`,
+about 13 B) are longer than intent entries (about 7 B), so `window_seconds` filled first; from then
+on `intent_rescore` saw `nw != ns` and silently stopped rescoring for the rest of the window. The
+three buffers now take each fire together or not at all, so the token counts always agree.
+A full window still drops later fires — that is the fixed-window design (review S1/S3), not
+changed here. Docker `idf.py build` passes with no warnings in either file.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
