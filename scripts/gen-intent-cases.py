@@ -58,6 +58,20 @@ CASES = [
     "GuteNacht Licht",
     "Leseratte Lesen",
     "Nachtlicht fünfzig",
+    # Embedded-word collisions: a sliding decoder also fires the class word a
+    # compound contains -- its prefix ("Küche" in "Küchenlicht", "Lesen" in
+    # "Leseratte") before it, or its "Licht" suffix after it. Both parsers
+    # reject these today; they pin the C port to grammar.py on exactly the
+    # sequences the pending words will produce once trained. Fixing the
+    # rejection is decoder work (grammar-constrained decoding), not a table
+    # change.
+    "Küche Küchenlicht an",
+    "Außen Außenlicht aus",
+    "Lesen Leselicht an",
+    "Küchenlicht Licht an",
+    "Nachtlicht Licht",
+    "Licht Nachtlicht",
+    "Lesen Leseratte",
 ]
 
 

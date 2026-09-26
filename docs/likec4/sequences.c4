@@ -8,7 +8,7 @@ views {
     user -> esp.mic 'says "Hey Bus"'
     esp.mic -> esp.mfccdev 'AFE-cleaned frames'
     esp.mfccdev -> esp.wake 'features (always-on)'
-    esp.wake -> esp.cmdmodel 'wake fired → open ~3 s command window'
+    esp.wake -> esp.cmdmodel 'wake fired → open 2.5 s command window'
     user -> esp.mic 'says "Licht Küche an"'
     esp.cmdmodel -> esp.stream 'posteriors every hop'
     esp.stream -> esp.grammar 'events: [Licht] [Küche] [an]'

@@ -13,7 +13,7 @@ Command model
 DS-CNN, 23 classes (:need:`REQ_FW_23_CLASSES`): 4 devices (``Licht``,
 ``Kühlschrank``, ``Heizung``, ``Aufstelldach``), 4 light zones, 13 actions
 (including the four light-level words), plus ``_unknown_`` and
-``_silence_``. ``kws_de.models.build_dscnn`` takes a ``width`` parameter
+``_silence_``. ``kws_de.model.build_dscnn`` takes a ``width`` parameter
 (default 32, channels on every conv/depthwise-separable block); trained
 via ``kws-train --v2 [--qat] [--width N]``, exported via ``kws-export
 --v2 --firmware [--qat] [--width N]`` (:need:`REQ_MODEL_QAT`).

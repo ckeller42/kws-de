@@ -18,7 +18,7 @@ def test_export_is_full_int8_and_runs(tmp_path):
     x = rng.integers(-128, 127, size=inp["shape"], dtype=np.int8)
     itp.set_tensor(inp["index"], x)
     itp.invoke()
-    assert itp.get_tensor(out["index"]).shape[-1] == config.NUM_CLASSES
+    assert itp.get_tensor(out["index"]).shape[-1] == len(config.COMMAND_LABELS)
 
 
 def test_c_array_header(tmp_path):

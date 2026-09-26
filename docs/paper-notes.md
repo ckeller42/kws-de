@@ -4731,6 +4731,23 @@ three buffers now take each fire together or not at all, so the token counts alw
 A full window still drops later fires — that is the fixed-window design (review S1/S3), not
 changed here. Docker `idf.py build` passes with no warnings in either file.
 
+### E57 — review follow-ups: v2 model default, collision cases, stale docs (2026-09-26)
+
+The rest of the `a807562` review's small, well-defined findings. `build_dscnn()` defaulted to the
+retired v1 vocabulary (`config.NUM_CLASSES`, 7 classes, with Camping and Wasser), so any call
+without `num_classes` built a model the firmware cannot run. The default is now
+`len(config.COMMAND_LABELS)`; every production caller already passed the count, and the three tests
+that leaned on the default now state what they mean. `intent_cases.h` gains seven embedded-word
+collisions — `Küche Küchenlicht an`, `Licht Nachtlicht`, `Lesen Leseratte` and their kin — the
+sequences a sliding decoder produces when a pending compound's prefix or `Licht` suffix fires
+alongside it. Both parsers reject all seven (parity 0/41); they pin the C port to `grammar.py` on
+exactly the input the retrained model will emit, and mark the rejection as decoder work
+(grammar-constrained decoding), not a table fix. Docs: `architecture.md`'s command table drops the
+v1 devices (Campingmodus, USB, Wasser, Energie), gains the light levels and a line on the pending
+words; `architecture.md` and the two LikeC4 views say 2.5 s (`ASSIST_WINDOW_MS`) instead of "~3 s";
+`models.rst` names `kws_de.model`, not the non-existent `kws_de.models`. No model or firmware
+behaviour changed.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
