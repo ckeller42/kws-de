@@ -4758,6 +4758,34 @@ current, and a test decodes the generated masks back to `config.DEVICE_ACTIONS`.
 tables are identical to the hand-written ones (masks `0x1e33`/`0x103`/`0xc3`/`0xc`); intent parity
 0/41, Docker `idf.py build` clean. No model or firmware behaviour changed.
 
+### E58 — one window→intent path on host and device (2026-09-26)
+
+The review's S2: host sentence figures scored `grammar.parse` over the fired words, but the device
+also drops "...Bus" tail artefacts, keeps a runner-up word per fire in fixed-size buffers, and
+retries a failed parse with one runner-up substitution (`intent_rescore`). None of that existed in
+Python, so E41's ≈0.10 exact-intent was not the number the device produces. `kws_de/window_intent.py`
+is now the Python reference for that whole path — tail drop, runner-up, the byte-capped aligned
+buffers (#104), and `rescore` — and `eval_recordings` scores phrases and negatives through it.
+`gen-intent-cases.py` emits 11 rescore cases, one per branch of the C function, which
+`test_intent.c` checks against `intent_rescore` (parity 0/11, clean under ASan + UBSan); a test pins
+the reference's constants (450 ms tail, `aus`/`_unknown_`, 0.25 floor, 64/96/96-byte buffers) to the
+firmware headers.
+
+What it leaves alone: the audio framing. The device's first window ends at the wake fire and
+reaches back into ring audio; the host's ends 1 s into the clip. Read phrases carry no "Hey Bus",
+so on them the tail drop never fires and only rescoring changes the result. Matching the framing is
+a measurement change to validate against data, not part of this entry.
+
+One behaviour the cases surfaced: rescoring runs only when the plain parse fails. In
+`Licht _unknown_ an` the plain parse already succeeds (`_unknown_` is dropped), so a zone spoken
+there but fired as `_unknown_` is lost even with a confident `Küche` runner-up — a case for
+grammar-constrained decoding (review S1), which weighs every slot rather than retrying one.
+
+**Pending:** re-measuring E41's phrase and negative figures through this path. The recordings sit
+on the external SSD, which this session could not read; the change is expected to raise
+exact-intent only where a single `_unknown_` blocked an otherwise complete command, and may add
+false accepts on negatives the same way — both are now what the device would do.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

@@ -53,3 +53,28 @@ static const intent_case_t INTENT_CASES[INTENT_CASE_COUNT] = {
   {"Licht Nachtlicht", false, NULL, NULL, NULL},
   {"Lesen Leseratte", false, NULL, NULL, NULL},
 };
+
+typedef struct {
+    const char *words;
+    const char *seconds;
+    bool valid;
+    const char *device;
+    const char *zone;
+    const char *action;
+    const char *to; /* substituted label, NULL if no substitution */
+} rescore_case_t;
+
+#define RESCORE_CASE_COUNT 11
+static const rescore_case_t RESCORE_CASES[RESCORE_CASE_COUNT] = {
+  {"Licht _unknown_", "Licht:0.90|an:0.83", true, "Licht", NULL, "an", "an"},
+  {"_unknown_ an", "Licht:0.90|an:0.83", true, "Licht", NULL, "an", "Licht"},
+  {"Licht _unknown_ an", "Licht:0.90|Küche:0.80|an:0.70", true, "Licht", NULL, "an", NULL},
+  {"Licht _unknown_", "Licht:0.90|an:0.10", false, NULL, NULL, NULL, NULL},
+  {"Licht _unknown_", "Licht:0.90|an:0.25", true, "Licht", NULL, "an", "an"},
+  {"_unknown_ _unknown_", "Licht:0.90|an:0.83", false, NULL, NULL, NULL, NULL},
+  {"Licht _unknown_", "an:0.90", false, NULL, NULL, NULL, NULL},
+  {"_unknown_ _unknown_ an", "_silence_:0.90|Licht:0.90|an:0.50", true, "Licht", NULL, "an", "Licht"},
+  {"Licht _unknown_", "Licht:0.90|Heizung:0.90", false, NULL, NULL, NULL, NULL},
+  {"Licht an", "Licht:0.90|an:0.90", true, "Licht", NULL, "an", NULL},
+  {"_unknown_ _unknown_ _unknown_ _unknown_ _unknown_ _unknown_ an", "fünfundsiebzig:0.90|Licht:0.10|Licht:0.10|Licht:0.10|Licht:0.10|Licht:0.10|an:0.10", false, NULL, NULL, NULL, NULL},
+};
