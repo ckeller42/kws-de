@@ -33,6 +33,25 @@ int main(void)
     printf("intent parity: %d/%d cases mismatch\n", bad, INTENT_CASE_COUNT);
     if (bad) return 1;
 
+    /* intent_rescore() against kws_de.window_intent.rescore(), the host reference
+       the sentence eval now scores through (architecture review S2). */
+    for (int i = 0; i < RESCORE_CASE_COUNT; i++) {
+        const rescore_case_t *c = &RESCORE_CASES[i];
+        const char *from = NULL, *to = NULL;
+        intent_t got = intent_rescore(c->words, c->seconds, INTENT_RESCORE_FLOOR, &from, &to);
+        bool ok = got.valid == c->valid && streq(got.device, c->device) && streq(got.zone, c->zone) &&
+                  streq(got.action, c->action) && streq(to, c->to) &&
+                  streq(from, c->to ? "_unknown_" : NULL);
+        if (!ok) {
+            printf("rescore case %d \"%s\" / \"%s\": got valid=%d action=%s to=%s, want valid=%d action=%s to=%s\n",
+                   i, c->words, c->seconds, got.valid, got.action ? got.action : "-", to ? to : "-",
+                   c->valid, c->action ? c->action : "-", c->to ? c->to : "-");
+            bad++;
+        }
+    }
+    printf("rescore parity: %d/%d cases mismatch\n", bad, RESCORE_CASE_COUNT);
+    if (bad) return 1;
+
     /* intent_format(): the arrow-joined text QC round-trips through normalise()
        + grammar.parse() again (kws_de/qc.py), so its exact spelling here only
        has to match kws_de.eval.intent_text's word order/level suffix, plus the

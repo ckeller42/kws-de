@@ -406,7 +406,7 @@ def eval_recordings(
 
     import soundfile as sf
 
-    from kws_de.grammar import Intent, parse
+    from kws_de.grammar import Intent
 
     approved = Path(approved)
     labels = config.COMMAND_LABELS
@@ -443,9 +443,17 @@ def eval_recordings(
             for s, r in per_spk.items()
         }
 
-    def _events(path):
+    def _window_intent(path):
+        # The device's whole window path (tail drop, runner-up capture, aligned
+        # buffers, rescore) via its Python reference, so this sentence figure
+        # is the device's (architecture review S2). The host's first window ends
+        # CLIP_MS into the clip; read phrases carry no "Hey Bus", so no fire
+        # lands in the wake tail and only rescoring differs from a plain parse.
+        from kws_de.window_intent import decode_window
+
         sig, _ = sf.read(path, dtype="float32", always_2d=True)
-        return _stream_events(predict_fn, sig[:, 0], labels, step)
+        steps = _stream_posteriors(predict_fn, sig[:, 0], step)
+        return decode_window(steps, labels, step_ms, first_ms=config.CLIP_MS)
 
     e2e = defaultdict(lambda: defaultdict(lambda: {"n": 0, "ok": 0}))
     idx = approved / "phrases" / "index.csv"
@@ -454,7 +462,7 @@ def eval_recordings(
         # `str(dst.relative_to(approved))`, so it carries the "phrases/" segment itself.
         with idx.open() as fh:
             for r in csv.DictReader(fh):
-                got = parse(_events(approved / r["file"]))
+                got = _window_intent(approved / r["file"])
                 e = e2e[figure_for("phrases", r["speaker"])][r["speaker"]]
                 e["n"] += 1
                 e["ok"] += isinstance(got, Intent) and got == prompt_intent(r["prompt"])
@@ -468,7 +476,7 @@ def eval_recordings(
     if nidx.exists():
         with nidx.open() as fh:  # `file` relative to approved/, as for phrases
             for r in csv.DictReader(fh):
-                got = parse(_events(approved / r["file"]))
+                got = _window_intent(approved / r["file"])
                 n = fa[figure_for("negatives", r["speaker"])][r["speaker"]]
                 n["n"] += 1
                 n["fired"] += isinstance(got, Intent)
@@ -639,6 +647,23 @@ def make_command_predict_fn(tflite_bytes: bytes):  # pragma: no cover - needs tf
     return predict_fn
 
 
+def _stream_posteriors(predict_fn, audio, step_samples) -> list:
+    # pragma: no cover - I/O glue (real model + real audio)
+    """The per-step posteriors `_stream_events` decodes: a trailing 1s window
+    every `step_samples`, the first ending CLIP_SAMPLES in (short clips are
+    front-padded)."""
+    n = len(audio)
+    pos = config.CLIP_SAMPLES
+    if n < pos:
+        audio = np.pad(audio, (pos - n, 0))
+        n = pos
+    out = []
+    while pos <= n:
+        out.append(predict_fn(audio[pos - config.CLIP_SAMPLES : pos]))
+        pos += step_samples
+    return out
+
+
 def _stream_events(predict_fn, audio, labels, step_samples, **stream_kwargs) -> list:
     # pragma: no cover - I/O glue (real model + real audio)
     """Slide a trailing 1s window over `audio` every `step_samples`, running
@@ -647,15 +672,8 @@ def _stream_events(predict_fn, audio, labels, step_samples, **stream_kwargs) -> 
 
     ks = KeywordStream(predict_fn, labels, **stream_kwargs)
     events = []
-    n = len(audio)
-    pos = config.CLIP_SAMPLES
-    if n < pos:
-        audio = np.pad(audio, (pos - n, 0))
-        n = pos
-    while pos <= n:
-        window = audio[pos - config.CLIP_SAMPLES : pos]
-        events += ks.push(predict_fn(window))
-        pos += step_samples
+    for post in _stream_posteriors(predict_fn, audio, step_samples):
+        events += ks.push(post)
     return events
 
 

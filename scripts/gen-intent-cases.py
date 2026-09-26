@@ -9,6 +9,7 @@ Run from the repo root: uv run python scripts/gen-intent-cases.py
 import pathlib
 
 from kws_de.grammar import Intent, parse
+from kws_de.window_intent import rescore
 
 OUT = pathlib.Path(__file__).resolve().parent.parent / "firmware/test/intent_cases.h"
 
@@ -75,6 +76,28 @@ CASES = [
 ]
 
 
+# intent_rescore() cases: (window_intent, window_seconds) as the device builds
+# them, expected verdict from kws_de.window_intent.rescore() -- one per branch.
+RESCORE_CASES = [
+    ("Licht _unknown_", "Licht:0.90|an:0.83"),  # fills the missing action
+    ("_unknown_ an", "Licht:0.90|an:0.83"),  # fills the missing device
+    # base already valid ("Licht an"): a zone lost as _unknown_ is never recovered
+    ("Licht _unknown_ an", "Licht:0.90|Küche:0.80|an:0.70"),
+    ("Licht _unknown_", "Licht:0.90|an:0.10"),  # below the floor
+    ("Licht _unknown_", "Licht:0.90|an:0.25"),  # exactly at the floor
+    ("_unknown_ _unknown_", "Licht:0.90|an:0.83"),  # two fixable slots
+    ("Licht _unknown_", "an:0.90"),  # seconds misaligned
+    ("_unknown_ _unknown_ an", "_silence_:0.90|Licht:0.90|an:0.50"),  # bad candidate, then good
+    ("Licht _unknown_", "Licht:0.90|Heizung:0.90"),  # substitution still invalid
+    ("Licht an", "Licht:0.90|an:0.90"),  # already valid: untouched
+    # near-full window + longest runner-up: would not fit intent_parse()'s line
+    (
+        "_unknown_ _unknown_ _unknown_ _unknown_ _unknown_ _unknown_ an",
+        "fünfundsiebzig:0.90|Licht:0.10|Licht:0.10|Licht:0.10|Licht:0.10|Licht:0.10|an:0.10",
+    ),
+]
+
+
 def c_str(s: str | None) -> str:
     """A C string literal holding `s` verbatim (UTF-8 source, like gen/labels.h)."""
     if s is None:
@@ -113,9 +136,33 @@ def main() -> None:
             f"{c_str(device)}, {c_str(zone)}, {c_str(action)}}},"
         )
     lines.append("};")
+    lines += [
+        "",
+        "typedef struct {",
+        "    const char *words;",
+        "    const char *seconds;",
+        "    bool valid;",
+        "    const char *device;",
+        "    const char *zone;",
+        "    const char *action;",
+        "    const char *to; /* substituted label, NULL if no substitution */",
+        "} rescore_case_t;",
+        "",
+        f"#define RESCORE_CASE_COUNT {len(RESCORE_CASES)}",
+        "static const rescore_case_t RESCORE_CASES[RESCORE_CASE_COUNT] = {",
+    ]
+    for words, seconds in RESCORE_CASES:
+        got, sub = rescore(words.split(), seconds.split("|"))
+        ok = isinstance(got, Intent)
+        d, z, a = (got.device, got.zone, got.action) if ok else (None, None, None)
+        lines.append(
+            f"  {{{c_str(words)}, {c_str(seconds)}, {'true' if ok else 'false'}, "
+            f"{c_str(d)}, {c_str(z)}, {c_str(a)}, {c_str(sub[1] if sub else None)}}},"
+        )
+    lines.append("};")
     lines.append("")
     OUT.write_text("\n".join(lines))
-    print(f"wrote {OUT} ({len(rows)} cases)")
+    print(f"wrote {OUT} ({len(rows)} parse + {len(RESCORE_CASES)} rescore cases)")
 
 
 if __name__ == "__main__":

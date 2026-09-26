@@ -37,10 +37,12 @@ class KeywordStream:
         self._run_fired = False
         self._last_fired_label = None
         self._gap_since_last_fired = 0
+        self.last_smoothed = None
 
     def push(self, posterior) -> list:
         self._hist.append(np.asarray(posterior, dtype=np.float64))
         smoothed = np.mean(self._hist, axis=0)
+        self.last_smoothed = smoothed  # stream.c's last_smoothed: the runner-up source
         idx = int(np.argmax(smoothed))
         label = self.labels[idx]
         candidate = label if (smoothed[idx] >= self.threshold and label != "_silence_") else None
