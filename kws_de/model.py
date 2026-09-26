@@ -4,12 +4,13 @@ from kws_de import config
 
 
 def build_dscnn(num_classes: int | None = None, width: int = 32) -> tf.keras.Model:
-    """Build the DS-CNN classifier. `num_classes` defaults to `config.NUM_CLASSES`
-    (v1, 7 classes); pass `len(config.COMMAND_LABELS)` for v2 (23 classes).
+    """Build the DS-CNN classifier. `num_classes` defaults to the live command
+    vocabulary, `len(config.COMMAND_LABELS)`; the retired v1 set
+    (`config.NUM_CLASSES`, 7 classes) must now be asked for explicitly.
     `width` is the channel count of every conv/depthwise-separable block
-    (default 32, the shipped size) -- narrower widths trade accuracy for
-    fewer MACs/params on device."""
-    num_classes = num_classes if num_classes is not None else config.NUM_CLASSES
+    (default 32; the deployed command model uses 48) -- narrower widths trade
+    accuracy for fewer MACs/params on device."""
+    num_classes = num_classes if num_classes is not None else len(config.COMMAND_LABELS)
     L = tf.keras.layers
     inp = L.Input((config.N_FRAMES, config.N_MFCC, 1))
     x = L.Conv2D(width, (3, 3), padding="same", use_bias=False)(inp)

@@ -35,7 +35,7 @@ holds the ESP-IDF toolchain and flashes the CoreS3; the CoreS3 runs everything o
 
 The always-on path is only mics → AFE → MFCC → wake model (tiny, tuned for low
 false-accepts/hour). The heavier command path — recogniser → `KeywordStream` (posterior
-smoothing + debounce) → grammar — runs solely inside the ~3 s post-wake window.
+smoothing + debounce) → grammar — runs solely inside the 2.5 s post-wake window (`ASSIST_WINDOW_MS`).
 
 ```{likec4-view} device
 :title: On-device runtime
@@ -63,14 +63,14 @@ Commands are single German keywords composed by a device-specific grammar
 
 | Device | Actions | Zones |
 |---|---|---|
-| Licht | an, aus, heller, dunkler | Küche, Dach, Außen, Lesen |
+| Licht | an, aus, heller, dunkler, fünfundzwanzig, fünfzig, fünfundsiebzig, hundert (Prozent) | Küche, Dach, Außen, Lesen |
 | Kühlschrank | an, aus, leise | — |
 | Heizung | an, aus, wärmer, kälter | — |
 | Aufstelldach | auf, zu | — |
-| Campingmodus | an, aus | — |
-| USB | an, aus | — |
-| Wasser | an, aus | — |
-| Energie | Eco, Max, Normal | — |
+
+Pending vocabulary, wired into the grammar but not yet a trained class (it needs a retrain with
+real recordings; see `docs/paper-notes.md` E50/E54): the light compounds Küchenlicht, Außenlicht
+and Leselicht, and the scene triggers Gute Nacht, Guten Morgen, Leseratte and Nachtlicht.
 
 Invalid combinations ("Aufstelldach an", "Heizung Küche …") are rejected by the grammar, not
 learned by the model.

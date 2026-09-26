@@ -83,7 +83,7 @@ model {
   user -> mic 'speaks "Hey Bus … Licht Küche an"'
   mic -> mfccdev 'clean audio frames'
   mfccdev -> wake 'features (always-on path)'
-  wake -> cmdmodel 'opens ~3 s command window'
+  wake -> cmdmodel 'opens 2.5 s command window'
   cmdmodel -> stream 'per-class posteriors'
   stream -> grammar 'keyword events'
   grammar -> display 'intent (shown)'
