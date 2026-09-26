@@ -91,6 +91,25 @@ int main(void)
         printf("rescore(two unknowns) unexpectedly valid or set from/to\n");
         return 1;
     }
+    /* A near-full window (window_intent holds up to 63 bytes) whose one fixable
+       "_unknown_" (9 bytes) has the longest label as runner-up ("fünfundsiebzig",
+       15 bytes in UTF-8): the substituted sequence no longer fits the 63-byte
+       line intent_parse() reads, so rescoring must give up, not write past its
+       buffer (it used to strcat unbounded into merged[64]). */
+    {
+        const char *w = "_unknown_ _unknown_ _unknown_ _unknown_ _unknown_ _unknown_ an";
+        const char *s = "fünfundsiebzig:0.90|Licht:0.10|Licht:0.10|Licht:0.10|Licht:0.10|Licht:0.10|an:0.10";
+        if (strlen(w) >= 64) {
+            puts("rescore(overflow) test window exceeds window_intent's 64 bytes");
+            return 1;
+        }
+        from = to = NULL;
+        r = intent_rescore(w, s, INTENT_RESCORE_FLOOR, &from, &to);
+        if (r.valid || from || to) {
+            printf("rescore(overflow) unexpectedly valid or set from/to\n");
+            return 1;
+        }
+    }
     /* Already valid: rescore is a no-op (no seconds needed). */
     r = intent_rescore("Licht an", NULL, INTENT_RESCORE_FLOOR, &from, &to);
     if (!r.valid) {

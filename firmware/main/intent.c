@@ -180,10 +180,16 @@ intent_t intent_rescore(const char *words, const char *seconds, float floor,
     }
     if (sub < 0) return base;
 
-    char merged[64] = {0};
+    /* Bounded rebuild: the substitute can be longer than "_unknown_" (up to
+       "fünfundsiebzig", 15 bytes), so a near-full window no longer fits the
+       63-byte line intent_parse() reads -- give up rather than truncate. */
+    char merged[64];
+    size_t len = 0;
     for (int i = 0; i < nw; i++) {
-        strcat(merged, i == sub ? KWS_LABELS[sub_idx] : wtok[i]);
-        if (i + 1 < nw) strcat(merged, " ");
+        int k = snprintf(merged + len, sizeof merged - len, "%s%s", i ? " " : "",
+                         i == sub ? KWS_LABELS[sub_idx] : wtok[i]);
+        if (k < 0 || (size_t)k >= sizeof merged - len) return base;
+        len += (size_t)k;
     }
     intent_t r = intent_parse(merged);
     if (!r.valid) return base;

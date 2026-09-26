@@ -391,17 +391,13 @@ static void recognise_task(void *)
 
                Whole entries only: snprintf would truncate safely but mid-value,
                and a tail like "|an:0.8" reads as a confidence that was never
-               measured. A dropped entry is honest, a mangled one is not. */
+               measured. A dropped entry is honest, a mangled one is not.
+
+               All three buffers take the entry or none does: intent_rescore()
+               pairs window_intent and window_seconds token by token and gives
+               up on any count mismatch, so one buffer filling before the others
+               used to switch rescoring off silently for the rest of the window. */
             const char *w = KWS_LABELS[fired];
-            char e[48];
-            size_t n = strlen(s_st.window_intent);
-            int k = snprintf(e, sizeof e, "%s%s", n ? " " : "", w);
-            if (k > 0 && (size_t)k < sizeof e && n + (size_t)k < sizeof s_st.window_intent)
-                memcpy(s_st.window_intent + n, e, (size_t)k + 1);
-            n = strlen(s_st.window_words);
-            k = snprintf(e, sizeof e, "%s%s:%.2f", n ? "|" : "", w, (double)probs[fired]);
-            if (k > 0 && (size_t)k < sizeof e && n + (size_t)k < sizeof s_st.window_words)
-                memcpy(s_st.window_words + n, e, (size_t)k + 1);
             /* Runner-up command word of this step, from the stream decoder's
                own smoothed probabilities (not the raw `probs` above) -- what
                wake.cc's intent_rescore() substitutes at an "_unknown_" slot. */
@@ -410,11 +406,20 @@ static void recognise_task(void *)
                 if (i == fired || i == KWS_UNKNOWN_INDEX || i == KWS_SILENCE_INDEX) continue;
                 if (stream.last_smoothed[i] > second_p) { second_p = stream.last_smoothed[i]; second = i; }
             }
-            n = strlen(s_st.window_seconds);
-            k = snprintf(e, sizeof e, "%s%s:%.2f", n ? "|" : "",
-                         second >= 0 ? KWS_LABELS[second] : "_unknown_", second >= 0 ? (double)second_p : 0.0);
-            if (k > 0 && (size_t)k < sizeof e && n + (size_t)k < sizeof s_st.window_seconds)
-                memcpy(s_st.window_seconds + n, e, (size_t)k + 1);
+            char ei[32], ew[48], es[48];
+            size_t ni = strlen(s_st.window_intent), nw = strlen(s_st.window_words),
+                   ns = strlen(s_st.window_seconds);
+            int ki = snprintf(ei, sizeof ei, "%s%s", ni ? " " : "", w);
+            int kw = snprintf(ew, sizeof ew, "%s%s:%.2f", nw ? "|" : "", w, (double)probs[fired]);
+            int ks = snprintf(es, sizeof es, "%s%s:%.2f", ns ? "|" : "",
+                              second >= 0 ? KWS_LABELS[second] : "_unknown_", second >= 0 ? (double)second_p : 0.0);
+            if (ki > 0 && (size_t)ki < sizeof ei && ni + (size_t)ki < sizeof s_st.window_intent &&
+                kw > 0 && (size_t)kw < sizeof ew && nw + (size_t)kw < sizeof s_st.window_words &&
+                ks > 0 && (size_t)ks < sizeof es && ns + (size_t)ks < sizeof s_st.window_seconds) {
+                memcpy(s_st.window_intent + ni, ei, (size_t)ki + 1);
+                memcpy(s_st.window_words + nw, ew, (size_t)kw + 1);
+                memcpy(s_st.window_seconds + ns, es, (size_t)ks + 1);
+            }
         }
         recognise_status_t copy = s_st;
         xSemaphoreGive(s_lock);
