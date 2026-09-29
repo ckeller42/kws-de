@@ -4836,6 +4836,17 @@ then macOS mlx is the reference.
   throughput (the 64-thread CPU dataset build, and running a seed sweep or recipe grid
   concurrently), plus retiring the flaky external SSD — not single-run latency.
 
+Review round (CodeRabbit, PR #110): one major, three minor — the major was real. `kws-qc` /
+`kws-tts-check` / the TTS gate still called `whisper_transcriber` (mlx) directly, so on Linux they
+would have exited before transcribing despite the new backend; all three now route through
+`default_transcriber`, and `--model` defaults to None so each backend picks its own correct model
+id (an mlx repo id and a faster-whisper name are not interchangeable). `kws-doctor` now flags a
+malformed `config.toml` ("present but INVALID") instead of silently showing "present" while its
+keys fall through to defaults. `docs/dev-setup.md` gives one combined `uv sync --extra …` command
+(uv sync is exact by default, so listing per-extra syncs as steps dropped earlier extras). The
+macOS repo-root default is kept deliberately (back-compat; SSD stays explicit via env/TOML, no
+invented machine path).
+
 Still open on thinky: the actual `kws-data` copy + full data cross-check (design §3), which needs
 the Mac SSD readable again.
 

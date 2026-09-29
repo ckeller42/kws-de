@@ -16,17 +16,20 @@ Whisper backend) and is the first thing to check when something looks wrong.
 
 ## Install
 
+`uv sync` is exact by default: it removes anything not in the selected set, so a
+later `uv sync --extra X` drops the extras an earlier one added. Select every
+extra you need in **one** command:
+
 ```bash
-uv sync                 # core deps (CPU training works with just this)
-uv sync --extra gpu     # + GPU backend for THIS OS (see below)
-uv sync --extra qat     # + quantisation-aware training (kws-train --qat)
-uv sync --extra qc      # + Whisper backend for recording QC (see below)
-uv sync --extra dev     # + pytest + pinned ruff (needed to run the test suite)
+# Full development setup; run once. Each extra is platform-marked, so the same
+# command resolves the right packages on macOS and Linux — no per-OS variant.
+uv sync --extra gpu --extra qat --extra qc --extra dev
 ```
 
-Extras compose: `uv sync --extra gpu --extra qat --extra qc --extra dev` installs
-them all. Each extra is platform-marked, so the same command resolves the right
-packages on each OS — no per-OS command.
+Or add `--all-extras`. Bare `uv sync` is core deps only — CPU training works, but
+without `dev` the test suite, without `qc` the recording QC, etc. The individual
+extras (`gpu`, `qat`, `qc`, `dev`) are choices to compose in that one command,
+not steps to run in sequence.
 
 | Extra | macOS installs | Linux installs |
 |---|---|---|

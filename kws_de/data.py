@@ -666,14 +666,15 @@ def _tts_combo_plan(
 def tts_gate_transcriber():  # pragma: no cover - loads Whisper
     """The transcriber the synthetic-clip gate needs: Whisper with language DETECTION on
     (not forced to German), since catching a clip that came out English is the point.
-    Returns None — gate disabled, every clip kept — when ``KWS_TTS_GATE=0`` or when
-    mlx-whisper is not installed (Linux CI has no MLX; it also builds no TTS clips)."""
+    Returns None — gate disabled, every clip kept — when ``KWS_TTS_GATE=0`` or when no
+    Whisper backend is installed. Uses the platform default (mlx on macOS, faster-whisper
+    on Linux), so the gate works on either OS when its backend is present."""
     if os.environ.get("KWS_TTS_GATE") == "0":
         return None
     try:
-        from kws_de.qc import whisper_transcriber
+        from kws_de.qc import default_transcriber
 
-        return whisper_transcriber(language=None)
+        return default_transcriber(language=None)
     except Exception as e:  # noqa: BLE001 - missing/unloadable model must not fail a build
         print(f"[tts] gate disabled — no Whisper ({type(e).__name__}: {e})")
         return None

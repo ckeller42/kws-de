@@ -68,6 +68,23 @@ def _whisper_backend() -> str:
     return f"{name} [{lib}: {avail}]"
 
 
+def _config_file_status() -> str:
+    """present / absent / INVALID for the per-machine config.toml. A malformed file is
+    silently ignored by config (returns {}), so its keys fall through to defaults; doctor
+    must say so, or a wrong data_root looks unexplained. Read-only, never fatal."""
+    import tomllib  # noqa: PLC0415
+
+    path = config._config_file_path()
+    if not path.exists():
+        return "absent"
+    try:
+        with path.open("rb") as fh:
+            tomllib.load(fh)
+        return "present"
+    except (tomllib.TOMLDecodeError, OSError) as exc:
+        return f"present but INVALID — ignored ({type(exc).__name__}); keys fall to defaults"
+
+
 def report() -> str:
     # Report the exact values the rest of the app uses (module constants),
     # plus the dynamically-resolved aux dirs.
@@ -76,8 +93,7 @@ def report() -> str:
         "kws-doctor — environment self-check",
         "",
         "Storage (resolved: env var > config.toml > per-OS default)",
-        f"  config file : {config._config_file_path()}"
-        f"  [{'present' if config._config_file_path().exists() else 'absent'}]",
+        f"  config file : {config._config_file_path()}  [{_config_file_status()}]",
         f"  data_root   : {_path_status(data_root)}",
         f"  data_dir    : {_path_status(config.DATA_DIR)}",
         f"  models_dir  : {_path_status(config.MODELS_DIR)}",
