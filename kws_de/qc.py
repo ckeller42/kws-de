@@ -1334,6 +1334,22 @@ def whisper_transcriber(
     return transcribe
 
 
+def _load_whisper_model(ctor, model_id: str, device: str, compute_type: str):
+    """Build a faster-whisper model, falling back to CPU/int8 when CUDA has no
+    room. The gate on thinky was silently disabled by `CUDA failed with error out
+    of memory` because an LLM server held ~21 GB of the 24 GB card: a busy GPU
+    must degrade to a slower gate, never to no gate. Only an automatic/CUDA
+    request falls back -- an explicit `device="cpu"` or a non-CUDA error is
+    reported as-is."""
+    try:
+        return ctor(model_id, device=device, compute_type=compute_type)
+    except RuntimeError as exc:
+        if device == "cpu" or "out of memory" not in str(exc).lower():
+            raise
+        print(f"[qc] faster-whisper: GPU out of memory ({exc}); retrying on CPU/int8")
+        return ctor(model_id, device="cpu", compute_type="int8")
+
+
 def faster_whisper_transcriber(
     model_id: str = "large-v3",
     language: str | None = "de",
@@ -1354,7 +1370,7 @@ def faster_whisper_transcriber(
     """
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(model_id, device=device, compute_type=compute_type)
+    model = _load_whisper_model(WhisperModel, model_id, device, compute_type)
 
     def transcribe(path: Path) -> Transcript:
         audio, sr = sf.read(path, dtype="float32", always_2d=True)
