@@ -4926,6 +4926,171 @@ Two things bit on the way and are fixed here:
    tests). The 3090 Ti's headroom for training is ~2.5 GB while the server runs — enough for this
    model (arena-sized batches), not for a large-batch sweep; stop the server for grids.
 
+### E63 — voice-clone spike: XTTS-v2 on isolated German words (2026-09-29, exp/voice-clone)
+
+Spec `docs/superpowers/specs/2026-09-29-voice-clone-tts-design.md`. Zero-shot XTTS-v2 (coqui-tts
+0.27, CUDA) conditioned on each scoreboard speaker's approved guided takes (spk01 13.6 s, spk02
+44.3 s, spk22 23.0 s of 16 kHz audio; XTTS takes the list of files directly). Env quirks worth a
+line each: `transformers<5` (5.x dropped `isin_mps_friendly`), `coqui-tts[codec]` (torch ≥ 2.9
+routes audio IO through torchcodec, which then wants system ffmpeg — sidestepped by loading the
+references with soundfile), and the TTS gate's CTranslate2 needs the venv's NVIDIA libs on
+`LD_LIBRARY_PATH` (else `libcublas.so.12 not found`; #114 now falls back to CPU). Synthesis ≈ 1.8
+s/clip on the 3090 Ti; ~15 s model load.
+
+**Finding: XTTS does not stop at the end of a one-word text.** It continues in the reference
+speaker's voice with material *from the reference set* — "Küchenlicht an aus auf zu heller dunkler
+wärmer kälter…", "fünfundzwanzig Heizung.", "Gute Nacht. Möcht ich jetzt raus?" — so single-word
+clips came out median 4.5 s (max 14.5 s). The standard `kws-tts-check` gate (language + target
+word present, in order) still passed 25/30 of the smoke set: it was designed for Piper, which
+says the word and stops. A strict gate (Whisper transcript == text, letters only) is the right
+instrument here; smoke set, 10 texts × 3 speakers:
+
+| variant | strict | lenient | median dur |
+|---|---|---|---|
+| default sampling | 16/30 | 25/30 | 4.5 s |
+| temp 0.3, repetition penalty 5, trailing "." | 8/30 | 19/30 | 7.3 s |
+| … + gpt_cond_len 6 s | 7/30 | 22/30 | 5.9 s |
+| default + first-utterance energy trim | **20/30** | 20/30 | 3.5 s |
+| trim + only the 6 longest references | 17/30 | 19/30 | 2.6 s |
+| spk22 conditioned on its wake-word takes | 3/10 | 3/10 | 1.5 s |
+| trim, 3 takes, keep any passing | 63/90; **29/30 word×speaker** covered | | |
+
+Sampling knobs make it worse (longer babble, occasional language flips: "Külsvánk, üdvösdök!",
+Arabic script). The generation is stochastic, so rejection sampling is the lever: trim at the
+first ≥ 300 ms pause after onset, gate strictly, take several draws. Full vocabulary (21 command
+words + 6 light compounds + 4 scene triggers) × 3 speakers × 4 takes = 372 clips in 11 min: strict
+213/372 (57 %), 87/93 word×speaker covered; worst words `fünfzig` and `Leseratte` (2 passes each
+across all speakers), `auf`/`zu`/`kälter`/`Nachtlicht` (4). 139 strict-passing command-word clips
+are materialised as the `clone:` tree (`scripts/xtts_clone.py keep`); `data.merge_recordings`
+reads it as a third tree and `force_rec_to_train` keeps clones in train (a clone of a training
+speaker must not become a val/test speaker). `--real-weight` still upweights `rec:` only.
+
+Not yet known: whether the clones *sound like* the speakers (six passing clips went to the owner
+for an ear check) and whether they help — the control-vs-clone runs are the next step
+(`docs/superpowers/plans/2026-09-29-voice-clone-handover.md`).
+
+### E64 — voice-clone experiment: control vs clone, two seeds — FAIL (2026-09-29, exp/voice-clone)
+
+Spec `docs/superpowers/specs/2026-09-29-voice-clone-tts-design.md`, recipe and clips from E63.
+Question: do 139 strict-gated XTTS-v2 clones of the three scoreboard speakers (21 command words ×
+spk01/spk02/spk22), added to the training set, beat anonymous TTS alone on the real guided-only
+scoreboard? **No.** The clone arm does not beat control in both seeds, and no run of either arm
+beats the deployed `86b7105e`. Per the spec's pass/fail rule the engine code leaves the branch;
+this entry and E63 are what is kept.
+
+**Setup.** thinky (RTX 3090 Ti, GPU free, no LLM server on the card). Deployed recipe
+`kws-train --v2 --width 48 --qat --qat-epochs 20 --real-weight 3 --epochs 40 --seed S`, S = 0, 1,
+then `kws-export --v2 --qat --width 48` into a per-run directory. One dataset build per arm
+(`kws-dataset build --cache raw_clips_v3.pkl --seed 0 --prefix features_v3_{control,clone}`), so
+"seed" here is the training seed only (init + shuffle) — narrower than E40's seed, which also
+re-drew the split. Control was built with the clone tree moved aside. Builds 2:14–2:25 (CPU),
+training 4:18–4:38 wall per run. Scoring: `eval_recordings` + `make_command_predict_fn` on
+`approved/` (the `compare_command_models.py` path, every speaker in `approved/words/` counted),
+`recipe-grid.py`'s `passes()` as the rule. The scorer reproduces E52's figures for the deployed
+model exactly (67/74, 0/85).
+
+**The two arms differ by the clone rows and nothing else.** That took three fixes to the `clone:`
+wiring of E63, each of which would have confounded the comparison:
+
+1. `_origin_flags` read `clone:` speakers as real while `assemble` had `build_dataset` treat them
+   as synthetic: 8 feature rows but 7 flags per clone clip (van augmentation on). `is_tts` came out
+   139 entries shorter than `X` and shifted against it from the first clone clip on, so
+   `--real-weight 3` would have tripled the wrong rows — silently, the indices are all in range.
+   Fix: one `SYNTHETIC_PREFIXES = ("tts:", "clone:")` read by both.
+2. `split_three_way` permutes the sorted union of speaker ids. Three extra `clone:spkNN` ids
+   re-deal every MSWC and TTS speaker across train/val/test, so a build with clones differs from
+   the one without by a whole re-split — the variation E40's seed band measures. Fix: draw the
+   split without the clone clips (`split_for_build`).
+3. Appended inside each label's clip list, the clones shifted the train split's augmentation RNG
+   stream: only 3,654 of control's 44,014 distinct train rows were still byte-identical in the
+   clone build. Both seeds of an arm share that one draw, so it does not average out. Fix: clone
+   rows are assembled from their own stream (`default_rng([seed, 64])`) and appended after the
+   split's rows (`assemble_clones`; clean + 3 SNR rows and a pitch/tempo-perturbed copy of each,
+   like TTS; no silence or context-mix rows).
+
+Also: the manifest counted clones as `mswc` (now a `clone` source key, only when present). After
+the fixes, verified on the npz: val and test hashes equal between the arms (11,788 and 4,206
+rows); clone train = control train's 44,078 rows byte-identical in `X`, `y` and `is_tts`, plus
+1,112 rows (139 clips × 8), all flagged synthetic; real rows 17,550 in both; `raw_clips_v3.pkl`
+unchanged by the builds (`[tts] added:` empty). All of it — the engine script
+`scripts/xtts_clone.py`, the `clone:` wiring with these fixes and their tests, the scorer
+`scripts/e64-score.py` — is commit `73d1e38` in PR #115's history and no longer in the tree.
+
+**Result** (guided-only isolated words n = 74, false accepts n = 85, read phrases n = 247):
+
+| | deployed `86b7105e` | control s0 `4c392009` | control s1 `3d96f71a` | clone s0 `8f8d1fcf` | clone s1 `1c49864d` |
+|---|---|---|---|---|---|
+| spk01 words (n=13) | 13 | 12 | 12 | 13 | 11 |
+| spk02 words (n=38) | 38 | 35 | 34 | 35 | 37 |
+| spk22 words (n=23) | 16 | 18 | 16 | 15 | 16 |
+| **aggregate (n=74)** | **67 = 0.905** | **65 = 0.878** | **62 = 0.838** | **63 = 0.851** | **64 = 0.865** |
+| false accepts (n=85) | 0 | 2 | 1 | 0 | 1 |
+| `passes()` | PASS | FAIL | FAIL | PASS | FAIL |
+| phrases, exact intent (n=247) | 19 | 43 | 39 | 34 | 29 |
+| val accuracy (float, best epoch) | | 0.684 | 0.678 | 0.686 | 0.683 |
+| INT8 test accuracy (n=4,206) | 0.570 | 0.537 | 0.538 | 0.563 | 0.551 |
+
+Clone minus control: −2 clips in seed 0, +2 in seed 1. One clip is 0.0135 of the aggregate, and
+the two control runs already differ by 3 clips on identical data, so the arm difference is inside
+the training-seed noise in both directions. The clone arm's means are 63.5 vs 63.5 clips: no
+effect on the scoreboard. Per word, the runs disagree on `Licht` (deployed 13 of 14; control 12,
+11; clone 9, 12), `Außen` (5 of 5; 4, 2; 3, 4), `an`, `aus`, `kälter` — no pattern that follows
+the number of clones a word has (`fünfundsiebzig` and `heller`, 10 clones each, were already at
+ceiling; `fünfzig`, 2 clones, too).
+
+What does move with the clones, in both seeds: held-out test accuracy on strangers' voices up
+(+0.026, +0.014, same test rows), false accepts down (1 vs 3 of 170), and sentence-level exact
+intent down (34, 29 vs 43, 39 of 247). Two seeds, one build: none of these is a finding, and the
+phrase figure is the one that would argue against the clones, not for them.
+
+**Pass/fail (spec).** Clone beats control in both seeds: no (seed 0 is lower). 0 false accepts:
+clone s1 has one. Beats `86b7105e`: no run does. **FAIL.** `86b7105e` stays deployed; canonical
+`models/command_v3_w48_qat.tflite` hashed `86b7105e` before and after, `firmware/main/gen/`
+untouched.
+
+**Reading.** The scoreboard speakers' own guided takes are in train in both arms (tripled by
+`--real-weight`), and the clones were conditioned on exactly those takes. A clone adds the
+speaker's timbre on a word they have mostly already recorded; what the scoreboard misses is more
+likely the variation between a speaker's takes than their timbre. The case cloning was meant for
+— classes with TTS only and no real takes (light compounds, scene triggers) — is not tested here:
+those classes are not in the 23-class vocabulary and have no real clips to score against.
+
+**Both control runs are below the deployed model too** (65, 62 vs 67), as was E49's `run7_s0`
+(64/74): at this recipe the current `approved/` tree does not reproduce `86b7105e`, which was
+trained on the 2026-09-06 tree. That is independent of cloning and still open.
+
+**E62's val 0.883 is not comparable to this entry's 0.68.** E62's build ran `kws-dataset build
+--prefix features_v3` without `--cache`, which reads the default `raw_clips_merged.pkl` — the v2
+cache, macOS `say` voices only, speaker ids carrying the rate so one voice sits on both sides of
+the split (the "TTS breadth" audit above) — not `raw_clips_v3.pkl` (Piper + `say`, gated; the
+cache of every v3 build since E27 and of `scripts/data-loop.sh`). The handover's build command had
+the same omission; this experiment used `raw_clips_v3.pkl`, which is what the spec's control arm
+("Piper + `say`") describes. Same recipe, float models, val accuracy by row origin:
+
+| model | val split | all | real rows | TTS rows |
+|---|---|---|---|---|
+| E62 `thinky_main23` | E62 build (n=8,269) | 0.883 | 0.721 | 0.937 |
+| E62 `thinky_main23` | E64 control (n=11,788) | 0.559 | 0.751 | 0.520 |
+| E64 control s0 | E62 build | 0.325 | 0.746 | 0.185 |
+| E64 control s0 | E64 control | 0.684 | 0.739 | 0.672 |
+| E64 control s1 | E62 build | 0.338 | 0.741 | 0.204 |
+| E64 control s1 | E64 control | 0.678 | 0.725 | 0.668 |
+
+Real rows agree within 0.03 in every cell. The whole gap is the TTS rows, 75–83 % of val: each
+model scores its own cache's TTS voices well and the other cache's badly. Val accuracy on a v3
+build is a statement about its TTS population first. On the real scoreboard E62's model scores
+63/74, 0 false accepts, 28/247 phrases (`46da8f93`) — the same place as the four runs above.
+
+**Not known.** Whether the clones sound like the speakers: the owner's ear check of the six
+samples (E63) was still pending when the runs were made. F5-TTS (the spec's fallback engine) was
+not tried.
+
+**State left on thinky.** Clone clips at `~/kws-data/data/recordings/clone.off/words/` (139;
+no build reads that path), synthesis output and the XTTS venv in `~/xtts-spike/`, the two builds
+as `data/features_v3_{control,clone}_*.npz` + `manifest_v3_{control,clone}.json`, models under
+`models/e64/<arm>_s<seed>/` and `models/e64_*`, logs and `e64-scores.json` in
+`archive/e64-logs/`. `features_v3_*.npz` there is still E62's `say`-only build.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
