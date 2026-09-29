@@ -1342,14 +1342,18 @@ def _load_whisper_model(ctor, model_id: str, device: str, compute_type: str):
     see pip-installed NVIDIA libs without LD_LIBRARY_PATH): a GPU that is busy or
     misconfigured must degrade to a slower gate, never to no gate. Only an
     automatic/CUDA request falls back -- an explicit `device="cpu"` request is
-    reported as-is."""
+    reported as-is. Returns ``(model, on_cpu)``; `on_cpu` reads the device the
+    model actually landed on (``"auto"`` may resolve to CPU), so the caller never
+    "falls back" to what it already has."""
     try:
-        return ctor(model_id, device=device, compute_type=compute_type)
+        model = ctor(model_id, device=device, compute_type=compute_type)
     except RuntimeError as exc:
         if device == "cpu":
             raise
         print(f"[qc] faster-whisper: GPU unusable ({exc}); retrying on CPU/int8")
-        return ctor(model_id, device="cpu", compute_type="int8")
+        return ctor(model_id, device="cpu", compute_type="int8"), True
+    # ctranslate2's model reports its device; fakes in tests have no `.model`.
+    return model, getattr(getattr(model, "model", None), "device", device) == "cpu"
 
 
 def faster_whisper_transcriber(
@@ -1372,10 +1376,8 @@ def faster_whisper_transcriber(
     """
     from faster_whisper import WhisperModel
 
-    state = {
-        "model": _load_whisper_model(WhisperModel, model_id, device, compute_type),
-        "cpu": device == "cpu",
-    }
+    model, on_cpu = _load_whisper_model(WhisperModel, model_id, device, compute_type)
+    state = {"model": model, "cpu": on_cpu}
 
     def decode(model, padded: np.ndarray) -> Transcript:
         segments, info = model.transcribe(

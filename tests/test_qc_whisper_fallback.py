@@ -20,8 +20,8 @@ class _Ctor:
 
 def test_cuda_oom_on_auto_falls_back_to_cpu_int8(capsys):
     ctor = _Ctor(RuntimeError("CUDA failed with error out of memory"))
-    got = _load_whisper_model(ctor, "large-v3", "auto", "default")
-    assert got == ("model", "large-v3", "cpu", "int8")
+    got, on_cpu = _load_whisper_model(ctor, "large-v3", "auto", "default")
+    assert got == ("model", "large-v3", "cpu", "int8") and on_cpu
     assert ctor.calls == [("large-v3", "auto", "default"), ("large-v3", "cpu", "int8")]
     assert "retrying on CPU" in capsys.readouterr().out
 
@@ -35,15 +35,27 @@ def test_explicit_cpu_request_never_retries():
 
 def test_missing_cuda_library_falls_back_too(capsys):
     ctor = _Ctor(RuntimeError("Library libcublas.so.12 is not found or cannot be loaded"))
-    got = _load_whisper_model(ctor, "large-v3", "cuda", "float16")
-    assert got[2:] == ("cpu", "int8")
+    got, on_cpu = _load_whisper_model(ctor, "large-v3", "cuda", "float16")
+    assert got[2:] == ("cpu", "int8") and on_cpu
     assert "libcublas" in capsys.readouterr().out
 
 
 def test_success_first_time_makes_one_call():
     ctor = _Ctor()
-    assert _load_whisper_model(ctor, "large-v3", "auto", "default")[2] == "auto"
+    got, on_cpu = _load_whisper_model(ctor, "large-v3", "auto", "default")
+    assert got[2] == "auto" and not on_cpu
     assert len(ctor.calls) == 1
+
+
+def test_on_cpu_reads_the_device_the_model_landed_on():
+    class Inner:
+        device = "cpu"
+
+    class Model:
+        model = Inner()
+
+    _, on_cpu = _load_whisper_model(lambda *a, **k: Model(), "large-v3", "auto", "default")
+    assert on_cpu  # "auto" resolved to CPU: a later failure must not "fall back" to CPU again
 
 
 def test_mid_transcription_gpu_failure_switches_to_cpu_once(capsys):
