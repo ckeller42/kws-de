@@ -28,7 +28,11 @@ def assemble(clips_ws, noises, rng, labels, commands, shift_ms=200, context_mix=
     copy (build_dataset `synthetic`), mirrored in the flags; `context_mix` rows
     (build_dataset) likewise."""
     clips = {lbl: [c for c, _ in items] for lbl, items in clips_ws.items()}
-    synthetic = {lbl: [s.startswith("tts:") for _, s in items] for lbl, items in clips_ws.items()}
+    # `clone:` rows are synthetic too: `--real-weight` must not triple them, and they get
+    # the same acoustic-variety augmentation TTS voices need.
+    synthetic = {
+        lbl: [s.startswith(("tts:", "clone:")) for _, s in items] for lbl, items in clips_ws.items()
+    }
     speakers = {lbl: [s for _, s in items] for lbl, items in clips_ws.items()}
     X, y = build_dataset(
         clips,
@@ -62,14 +66,16 @@ def force_rec_to_train(train: dict, *others: dict) -> int:
     (`kws-dataset build --recordings-split train`). With only one or two device
     speakers the global speaker-disjoint draw can otherwise put all of them in
     val/test, training on none of them. Context clips (`ctx:`, E48) are cut from
-    the same device speakers' takes and get the same treatment. `--recordings-
-    split auto` skips this and leaves them to the draw. Returns the number of
-    clips moved."""
+    the same device speakers' takes and get the same treatment, as do their
+    voice-cloned clips (`clone:`): a clone of a training speaker must not become
+    a val/test "speaker". `--recordings-split auto` skips this and leaves them
+    to the draw. Returns the number of clips moved."""
+    device = ("rec:", "ctx:", "clone:")
     moved = 0
     for other in others:
         for label, items in other.items():
-            keep = [(c, s) for c, s in items if not s.startswith(("rec:", "ctx:"))]
-            rec = [(c, s) for c, s in items if s.startswith(("rec:", "ctx:"))]
+            keep = [(c, s) for c, s in items if not s.startswith(device)]
+            rec = [(c, s) for c, s in items if s.startswith(device)]
             if rec:
                 train.setdefault(label, []).extend(rec)
                 other[label] = keep

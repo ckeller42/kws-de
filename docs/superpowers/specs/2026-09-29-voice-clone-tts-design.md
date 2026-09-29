@@ -73,6 +73,14 @@ paper entry only; the engine code is removed.
   CUDA as it already did on CPU.
 - The deployed recipe reproducing its Mac figures on thinky (val ≈ 0.65).
 
+## Status (2026-09-29)
+
+Prerequisites done (E61/E62). Spike run on the GPU box: XTTS-v2 clones the three speakers but
+pads one-word texts with babble from the reference audio; the working recipe is first-utterance
+trim + strict transcript match + several takes (E63). Strict-passing command-word clones are
+materialised under `recordings/clone/words/`. The experiment itself (control vs clone, seeds 0/1)
+is the next step — see `docs/superpowers/plans/2026-09-29-voice-clone-handover.md`.
+
 ## Out of scope
 
 Cloning speakers other than the three scoreboard speakers; using cloned audio for

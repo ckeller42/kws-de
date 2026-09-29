@@ -45,11 +45,18 @@ def merge_recordings(clips_ws: dict, root: Path | None = None) -> dict[str, int]
     from kws_de.recordings import load_recordings
 
     root = Path(root) if root is not None else config.DATA_DIR / "recordings"
-    word_trees = {"rec:": root / "approved" / "words", "ctx:": root / "approved" / "context"}
+    word_trees = {
+        "rec:": root / "approved" / "words",
+        "ctx:": root / "approved" / "context",
+        # Voice-cloned TTS in a device speaker's voice (scripts/xtts_clone.py, spec
+        # 2026-09-29-voice-clone-tts-design). Augmentation, never approved/ material:
+        # its own tree, its own prefix, and `--real-weight` leaves it alone.
+        "clone:": root / "clone" / "words",
+    }
     if not any(d.is_dir() for d in word_trees.values()):
         return {}
     for lbl, items in clips_ws.items():
-        clips_ws[lbl] = [(c, s) for c, s in items if not s.startswith(("rec:", "ctx:"))]
+        clips_ws[lbl] = [(c, s) for c, s in items if not s.startswith(tuple(word_trees))]
     merged: dict[str, int] = {}
     for prefix, d in word_trees.items():
         if not d.is_dir():

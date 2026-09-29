@@ -4896,6 +4896,49 @@ and configured via `config.toml`, no env vars), then confirm the recipe reproduc
 Result recorded when it lands. The voice-clone TTS experiment
 (`docs/superpowers/specs/2026-09-29-voice-clone-tts-design.md`) depends on it.
 
+### E63 — voice-clone spike: XTTS-v2 on isolated German words (2026-09-29, exp/voice-clone)
+
+Spec `docs/superpowers/specs/2026-09-29-voice-clone-tts-design.md`. Zero-shot XTTS-v2 (coqui-tts
+0.27, CUDA) conditioned on each scoreboard speaker's approved guided takes (spk01 13.6 s, spk02
+44.3 s, spk22 23.0 s of 16 kHz audio; XTTS takes the list of files directly). Env quirks worth a
+line each: `transformers<5` (5.x dropped `isin_mps_friendly`), `coqui-tts[codec]` (torch ≥ 2.9
+routes audio IO through torchcodec, which then wants system ffmpeg — sidestepped by loading the
+references with soundfile), and the TTS gate's CTranslate2 needs the venv's NVIDIA libs on
+`LD_LIBRARY_PATH` (else `libcublas.so.12 not found`; #114 now falls back to CPU). Synthesis ≈ 1.8
+s/clip on the 3090 Ti; ~15 s model load.
+
+**Finding: XTTS does not stop at the end of a one-word text.** It continues in the reference
+speaker's voice with material *from the reference set* — "Küchenlicht an aus auf zu heller dunkler
+wärmer kälter…", "fünfundzwanzig Heizung.", "Gute Nacht. Möcht ich jetzt raus?" — so single-word
+clips came out median 4.5 s (max 14.5 s). The standard `kws-tts-check` gate (language + target
+word present, in order) still passed 25/30 of the smoke set: it was designed for Piper, which
+says the word and stops. A strict gate (Whisper transcript == text, letters only) is the right
+instrument here; smoke set, 10 texts × 3 speakers:
+
+| variant | strict | lenient | median dur |
+|---|---|---|---|
+| default sampling | 16/30 | 25/30 | 4.5 s |
+| temp 0.3, repetition penalty 5, trailing "." | 8/30 | 19/30 | 7.3 s |
+| … + gpt_cond_len 6 s | 7/30 | 22/30 | 5.9 s |
+| default + first-utterance energy trim | **20/30** | 20/30 | 3.5 s |
+| trim + only the 6 longest references | 17/30 | 19/30 | 2.6 s |
+| spk22 conditioned on its wake-word takes | 3/10 | 3/10 | 1.5 s |
+| trim, 3 takes, keep any passing | 63/90; **29/30 word×speaker** covered | | |
+
+Sampling knobs make it worse (longer babble, occasional language flips: "Külsvánk, üdvösdök!",
+Arabic script). The generation is stochastic, so rejection sampling is the lever: trim at the
+first ≥ 300 ms pause after onset, gate strictly, take several draws. Full vocabulary (21 command
+words + 6 light compounds + 4 scene triggers) × 3 speakers × 4 takes = 372 clips in 11 min: strict
+213/372 (57 %), 87/93 word×speaker covered; worst words `fünfzig` and `Leseratte` (2 passes each
+across all speakers), `auf`/`zu`/`kälter`/`Nachtlicht` (4). 139 strict-passing command-word clips
+are materialised as the `clone:` tree (`scripts/xtts_clone.py keep`); `data.merge_recordings`
+reads it as a third tree and `force_rec_to_train` keeps clones in train (a clone of a training
+speaker must not become a val/test speaker). `--real-weight` still upweights `rec:` only.
+
+Not yet known: whether the clones *sound like* the speakers (six passing clips went to the owner
+for an ear check) and whether they help — the control-vs-clone runs are the next step
+(`docs/superpowers/plans/2026-09-29-voice-clone-handover.md`).
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
