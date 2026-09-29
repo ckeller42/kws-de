@@ -22,9 +22,7 @@ def test_rows_tolerate_blank_lines(ledger):
         {"stage": "qc", "size": 100.0, "seconds": 300.0, "host": eta.host_tag()},
     ]
     # blank lines (trailing newline, stray blank between rows) must not crash the reader
-    ledger.write_text(
-        json.dumps(rows[0]) + "\n\n" + json.dumps(rows[1]) + "\n\n"
-    )
+    ledger.write_text(json.dumps(rows[0]) + "\n\n" + json.dumps(rows[1]) + "\n\n")
     pred = eta.predict("qc", size=100.0)
     assert pred is not None
     assert pred.n == 2
@@ -38,8 +36,7 @@ def test_percentile_endpoints(ledger):
 
 def test_format_eta_says_single_run_not_runs(ledger):
     ledger.write_text(
-        json.dumps({"stage": "x", "size": 10.0, "seconds": 60.0, "host": eta.host_tag()})
-        + "\n"
+        json.dumps({"stage": "x", "size": 10.0, "seconds": 60.0, "host": eta.host_tag()}) + "\n"
     )
     pred = eta.predict("x", size=10.0)
     text = eta.format_eta(pred, size=10.0)
@@ -49,9 +46,7 @@ def test_format_eta_says_single_run_not_runs(ledger):
 
 def test_predict_ignores_zero_size_rows(ledger):
     ledger.write_text(
-        json.dumps({"stage": "z", "size": 0.0, "seconds": 999.0, "host": eta.host_tag()})
-        + "\n"
+        json.dumps({"stage": "z", "size": 0.0, "seconds": 999.0, "host": eta.host_tag()}) + "\n"
     )
     # a zero-size row has no rate -> predict() must refuse rather than divide by zero
     assert eta.predict("z", size=1.0) is None
-
