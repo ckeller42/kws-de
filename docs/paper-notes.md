@@ -4850,6 +4850,52 @@ invented machine path).
 Still open on thinky: the actual `kws-data` copy + full data cross-check (design §3), which needs
 the Mac SSD readable again.
 
+### E60 — data sync + verify tooling, and the migration to thinky (2026-09-29)
+
+Design §3, and the migration itself. `scripts/sync-data.sh` moves the `kws-data` tree between
+machines (rsync over ssh, `--to`/`--from` a host you pass, `--data-root`/`KWS_DATA_ROOT` or the
+resolved per-OS default, dry-run by default, `--verify` to cross-check after). `kws-verify`
+(`kws_de/verify.py`) is the pure manifest/diff underneath: `manifest [ROOT]` writes a sha256 line
+per file (sorted, `.DS_Store` skipped), `diff A B` reports only-A / only-B / changed and exits
+non-zero on any drift — no ssh/rsync in it, so it is unit-tested (`tests/test_verify.py`).
+
+Migration run (SSD readable again after the tmux/TCC restart — see the MacPorts/tmux note): the
+8.2 GB / 6834-file `kws-data` tree copied to thinky (`~/kws-data`), file counts equal both sides,
+and an `rsync -c` (checksum) dry-run reported **zero mismatches** — byte-identical. thinky is now
+the primary data home; the Mac SSD is the verified backup (refresh it with `--from thinky`). With
+E59's measured cross-machine determinism (codegen/fwgen `--check` clean on Linux) and this
+byte-identical copy, training + data can run on thinky without drift from the Mac.
+
+### E61 — the first real training run on thinky trained to chance: a stale npz and a silent CUDA failure (2026-09-29)
+
+With the byte-identical `kws-data` copy on thinky (E60), the deployed recipe (`--v2 --width 48
+--qat --qat-epochs 20 --real-weight 3 --seed 0 --epochs 40`) ran on the real `features_v3` npz:
+9:22 wall, and **chance-level accuracy** — val 0.0401 pinned for all 40 epochs, train 0.096, QAT
+0.096 (1/23 ≈ 0.043). No NaN, no error. On the Mac this recipe gives val ≈ 0.65.
+
+Two separate causes, both real:
+
+1. **The npz was stale.** The SSD's `features_v3_{train,val,test}.npz` was run 8's **26-class**
+   build (54,791 / 7,160 / 5,322 rows, labels 0–25, seed 1, built 2026-09-09, manifest listing
+   `Küchenlicht`/`Außenlicht`/`Leselicht`) — the compound-word experiment (E53/E54) never restored
+   the 23-class baseline. The migration's cross-check (E60) faithfully verified the copy
+   byte-for-byte; it cannot know a derived artifact is semantically stale against the code. Lesson:
+   npz are derived — rebuild them from `approved/` + the current config rather than trust them, and
+   the manifest's label list should be checked against `config.COMMAND_LABELS` before training.
+2. **CUDA fails silently where CPU fails loudly.** A 23-output head trained on labels up to 25: TF
+   on the Mac CPU raises an out-of-range-label error; TF on the GPU produces garbage gradients and
+   trains to chance with no diagnostic at all. A config/data mismatch that is a crash on the Mac
+   is a silently wrong model on thinky — the worst kind of cross-platform difference. Fix:
+   `kws_de.train._check_labels` asserts `0 ≤ y < n_out` for train and validation labels before
+   `fit`, with a message naming the mismatch and the rebuild command; tested for both directions
+   and both splits (`tests/test_train_label_guard.py`).
+
+Step 0 for any thinky experiment is therefore: rebuild the 23-class npz there from `approved/`
+(van noise/RIR dirs copied to thinky too — they live outside `kws-data`, another migration gap —
+and configured via `config.toml`, no env vars), then confirm the recipe reproduces its Mac figures.
+Result recorded when it lands. The voice-clone TTS experiment
+(`docs/superpowers/specs/2026-09-29-voice-clone-tts-design.md`) depends on it.
+
 ### E62 — the recipe reproduces on thinky; sharing the GPU with an LLM server (2026-09-29, fix/gpu-coexistence)
 
 Follows E59–E61 (migration verified, label guard). With the 23-class npz rebuilt on thinky from
