@@ -72,8 +72,11 @@ def build_manifest(
             spk = speakers.get(name, [])
             recording = sum(1 for s in spk if s.startswith(("rec:", "ctx:")))
             tts_n = sum(1 for s in spk if s.startswith("tts:"))
-            mswc_n = len(spk) - recording - tts_n
+            clone_n = sum(1 for s in spk if s.startswith("clone:"))
+            mswc_n = len(spk) - recording - tts_n - clone_n
             out["splits"][name]["sources"] = {"tts": tts_n, "recording": recording, "mswc": mswc_n}
+            if clone_n:  # key only when present: builds without clones stay byte-identical
+                out["splits"][name]["sources"]["clone"] = clone_n
             out["splits"][name]["speakers"] = sorted(
                 {s[4:] for s in spk if s.startswith(("rec:", "ctx:"))}
             )

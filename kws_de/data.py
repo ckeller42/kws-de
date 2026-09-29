@@ -217,6 +217,12 @@ def _random_shift(clip, rng, max_shift_ms: int = 200):
 
 VAN_SNRS = (0, 5, 10)  # dB — cabin-ish, noisier than the general snrs= default
 
+# Speaker-id prefixes of synthesised clips: anonymous TTS and voice clones of the device
+# speakers. `kws_de.dataset.assemble` (which rows build_dataset perturbs) and `_origin_flags`
+# (the `is_tts` row flag `--real-weight` reads) must agree on this set, or the flags come
+# out shorter than X and shifted against it (E64).
+SYNTHETIC_PREFIXES = ("tts:", "clone:")
+
 
 def _trimmed(clip):
     """Leading/trailing silence off (same call as `kws_de.recordings.load_recordings`)."""
@@ -823,8 +829,9 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
 def _origin_flags(
     clips_ws: dict, snrs, words=None, perturb_tts: bool = False, context_mix: int = 0
 ) -> np.ndarray:
-    """Boolean array flagging TTS-synthesized origin (speaker id prefix "tts:"),
-    aligned row-for-row to build_dataset's output for the same clips/snrs — must
+    """Boolean array flagging synthesized origin (speaker id prefix in
+    `SYNTHETIC_PREFIXES`: anonymous TTS and voice clones), aligned row-for-row to
+    build_dataset's output for the same clips/snrs — must
     mirror build_dataset's iteration order (commands then unknown, each clip's
     clean copy + one row per snr, then silence, then clean silence) exactly.
     With `perturb_tts`, TTS clips count twice (build_dataset's perturbed copy). A REAL
@@ -838,7 +845,7 @@ def _origin_flags(
     flags = []
 
     def rows(spk):
-        is_tts = spk.startswith("tts:")
+        is_tts = spk.startswith(SYNTHETIC_PREFIXES)
         base = [is_tts] * (per_clip * (2 if perturb_tts and is_tts else 1))
         return base if is_tts else base + [False] * van_rows
 
@@ -854,5 +861,5 @@ def _origin_flags(
     if context_mix:
         for cmd in words:
             for _clip, spk in clips_ws.get(cmd, []):
-                flags.extend([spk.startswith("tts:")] * (context_mix + 1))
+                flags.extend([spk.startswith(SYNTHETIC_PREFIXES)] * (context_mix + 1))
     return np.asarray(flags, dtype=bool)
