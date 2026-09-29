@@ -47,6 +47,7 @@ remote_spec="${host}:${remote_root%/}/"
 echo "sync-data: $direction  local=$data_root  remote=$remote_spec  mode=${run:-RUN}"
 common=(-a --partial --human-readable --stats --exclude='.DS_Store')
 if [ "$direction" = push ]; then
+  # shellcheck disable=SC2029  # remote_root is a local value meant to expand here, then run remotely
   ssh "$host" "mkdir -p '${remote_root%/}'"
   rsync "${common[@]}" $run "$local_spec" "$remote_spec"
 else
@@ -57,6 +58,7 @@ if [ "$verify" = 1 ] && [ -z "$run" ]; then
   echo "sync-data: verifying by sha256 manifest…"
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
   python3 -m kws_de.verify manifest "$data_root" -o "$tmp/local.manifest"
+  # shellcheck disable=SC2029  # remote_root expands locally on purpose (it names the remote dir)
   ssh "$host" "cd '${remote_root%/}' && python3 -m kws_de.verify manifest . " > "$tmp/remote.manifest" \
     || die "remote manifest failed (is kws_de importable on $host?)"
   python3 -m kws_de.verify diff "$tmp/local.manifest" "$tmp/remote.manifest"
