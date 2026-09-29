@@ -4896,6 +4896,36 @@ and configured via `config.toml`, no env vars), then confirm the recipe reproduc
 Result recorded when it lands. The voice-clone TTS experiment
 (`docs/superpowers/specs/2026-09-29-voice-clone-tts-design.md`) depends on it.
 
+### E62 — the recipe reproduces on thinky; sharing the GPU with an LLM server (2026-09-29, fix/gpu-coexistence)
+
+Follows E59–E61 (migration verified, label guard). With the 23-class npz rebuilt on thinky from
+`approved/` and the code pinned at origin/main in its own worktree, the deployed recipe
+(`--v2 --width 48 --qat --qat-epochs 20 --real-weight 3 --epochs 40`, seed 0) gives **best epoch
+37/40, val 0.8831; final train 0.8593, QAT train 0.8671; 4:08.68 wall** — inside the E40 seed band
+(0.919 ± 0.011 was the guided-word aggregate; val on the mixed split was 0.87–0.89 on the M4), so
+the Linux/CUDA path trains the same model, and the E59 synthetic benchmark (8:51) overstated the
+wall time by 2×: the real npz is smaller than the synthetic shape and the dataset build's tiling
+dominates less. thinky is now the training host of record; the Mac SSD is the backup.
+
+Two things bit on the way and are fixed here:
+
+1. **Checkout discipline.** The first run on thinky used the owner's working checkout, which was on
+   a test branch two commits ahead of main that predated the #110 backend routing — so the TTS gate
+   tried to import mlx on Linux. Experiments now run in a dedicated worktree detached at origin/main
+   (`git worktree add … --detach origin/main`); the owner's checkout is never switched. Same lesson
+   as the stale-npz trap (E60): anything derived must be re-derived from a known ref, not inherited.
+2. **The GPU is shared.** An LLM inference server on thinky holds ~21.5 GB of the 24 GB card. Two
+   consequences: TF's default of reserving the whole card at first use either fails or starves any
+   later CUDA user in the same process, and faster-whisper's `WhisperModel(...)` raised `CUDA failed
+   with error out of memory` — which the TTS gate turned into "gate disabled — no Whisper" and
+   carried on building the dataset **ungated**. Harmless this time (no TTS was synthesised), but it
+   is exactly the silent-failure shape E41/E60 warned about: a busy GPU must degrade to a slower
+   gate, never to no gate. `kws_de/model.py` now sets `set_memory_growth` on every visible GPU at
+   import (no-op on Metal/CPU), and `qc._load_whisper_model` retries on CPU/int8 when an
+   auto/CUDA request hits OOM (explicit `device="cpu"` and non-OOM errors propagate unchanged; 4
+   tests). The 3090 Ti's headroom for training is ~2.5 GB while the server runs — enough for this
+   model (arena-sized batches), not for a large-batch sweep; stop the server for grids.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

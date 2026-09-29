@@ -1334,6 +1334,28 @@ def whisper_transcriber(
     return transcribe
 
 
+def _load_whisper_model(ctor, model_id: str, device: str, compute_type: str):
+    """Build a faster-whisper model, falling back to CPU/int8 when the GPU is
+    unusable. The gate on thinky was silently disabled by `CUDA failed with error
+    out of memory` (an LLM server held ~21 GB of the 24 GB card) and, once the
+    card was free, by `Library libcublas.so.12 is not found` (CTranslate2 cannot
+    see pip-installed NVIDIA libs without LD_LIBRARY_PATH): a GPU that is busy or
+    misconfigured must degrade to a slower gate, never to no gate. Only an
+    automatic/CUDA request falls back -- an explicit `device="cpu"` request is
+    reported as-is. Returns ``(model, on_cpu)``; `on_cpu` reads the device the
+    model actually landed on (``"auto"`` may resolve to CPU), so the caller never
+    "falls back" to what it already has."""
+    try:
+        model = ctor(model_id, device=device, compute_type=compute_type)
+    except RuntimeError as exc:
+        if device == "cpu":
+            raise
+        print(f"[qc] faster-whisper: GPU unusable ({exc}); retrying on CPU/int8")
+        return ctor(model_id, device="cpu", compute_type="int8"), True
+    # ctranslate2's model reports its device; fakes in tests have no `.model`.
+    return model, getattr(getattr(model, "model", None), "device", device) == "cpu"
+
+
 def faster_whisper_transcriber(
     model_id: str = "large-v3",
     language: str | None = "de",
@@ -1354,16 +1376,10 @@ def faster_whisper_transcriber(
     """
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(model_id, device=device, compute_type=compute_type)
+    model, on_cpu = _load_whisper_model(WhisperModel, model_id, device, compute_type)
+    state = {"model": model, "cpu": on_cpu}
 
-    def transcribe(path: Path) -> Transcript:
-        audio, sr = sf.read(path, dtype="float32", always_2d=True)
-        if sr != config.SAMPLE_RATE:
-            raise ValueError(
-                f"{path}: sample rate {sr} != {config.SAMPLE_RATE} (mono 16 kHz PCM expected)"
-            )
-        pad = np.zeros(_PAD_SAMPLES, dtype=np.float32)
-        padded = np.concatenate([pad, audio[:, 0], pad])
+    def decode(model, padded: np.ndarray) -> Transcript:
         segments, info = model.transcribe(
             padded,
             language=language,
@@ -1386,7 +1402,36 @@ def faster_whisper_transcriber(
                 )
         return {"text": "".join(texts), "words": words, "language": info.language or ""}
 
+    def transcribe(path: Path) -> Transcript:
+        audio, sr = sf.read(path, dtype="float32", always_2d=True)
+        if sr != config.SAMPLE_RATE:
+            raise ValueError(
+                f"{path}: sample rate {sr} != {config.SAMPLE_RATE} (mono 16 kHz PCM expected)"
+            )
+        pad = np.zeros(_PAD_SAMPLES, dtype=np.float32)
+        padded = np.concatenate([pad, audio[:, 0], pad])
+        return _with_cpu_fallback(
+            state,
+            lambda model: decode(model, padded),
+            lambda: WhisperModel(model_id, device="cpu", compute_type="int8"),
+        )
+
     return transcribe
+
+
+def _with_cpu_fallback(state: dict, run, make_cpu):
+    """Run `run(state["model"])`; when the GPU model fails mid-decode (OOM while the
+    encoder runs on a busy card -- the load itself succeeded), swap in the CPU model
+    once and keep it: the same `state` serves every later clip. A CPU model's
+    errors propagate."""
+    try:
+        return run(state["model"])
+    except RuntimeError as exc:
+        if state["cpu"]:
+            raise
+        print(f"[qc] faster-whisper: GPU failed mid-transcription ({exc}); switching to CPU/int8")
+        state["model"], state["cpu"] = make_cpu(), True
+        return run(state["model"])
 
 
 def default_backend() -> tuple[str, str]:
