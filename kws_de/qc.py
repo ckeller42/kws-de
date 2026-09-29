@@ -1335,18 +1335,20 @@ def whisper_transcriber(
 
 
 def _load_whisper_model(ctor, model_id: str, device: str, compute_type: str):
-    """Build a faster-whisper model, falling back to CPU/int8 when CUDA has no
-    room. The gate on thinky was silently disabled by `CUDA failed with error out
-    of memory` because an LLM server held ~21 GB of the 24 GB card: a busy GPU
-    must degrade to a slower gate, never to no gate. Only an automatic/CUDA
-    request falls back -- an explicit `device="cpu"` or a non-CUDA error is
+    """Build a faster-whisper model, falling back to CPU/int8 when the GPU is
+    unusable. The gate on thinky was silently disabled by `CUDA failed with error
+    out of memory` (an LLM server held ~21 GB of the 24 GB card) and, once the
+    card was free, by `Library libcublas.so.12 is not found` (CTranslate2 cannot
+    see pip-installed NVIDIA libs without LD_LIBRARY_PATH): a GPU that is busy or
+    misconfigured must degrade to a slower gate, never to no gate. Only an
+    automatic/CUDA request falls back -- an explicit `device="cpu"` request is
     reported as-is."""
     try:
         return ctor(model_id, device=device, compute_type=compute_type)
     except RuntimeError as exc:
-        if device == "cpu" or "out of memory" not in str(exc).lower():
+        if device == "cpu":
             raise
-        print(f"[qc] faster-whisper: GPU out of memory ({exc}); retrying on CPU/int8")
+        print(f"[qc] faster-whisper: GPU unusable ({exc}); retrying on CPU/int8")
         return ctor(model_id, device="cpu", compute_type="int8")
 
 

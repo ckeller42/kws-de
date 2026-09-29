@@ -33,11 +33,11 @@ def test_explicit_cpu_request_never_retries():
     assert len(ctor.calls) == 1
 
 
-def test_non_oom_error_is_reported_not_masked():
-    ctor = _Ctor(RuntimeError("cublas handle creation failed"))
-    with pytest.raises(RuntimeError, match="cublas"):
-        _load_whisper_model(ctor, "large-v3", "auto", "default")
-    assert len(ctor.calls) == 1
+def test_missing_cuda_library_falls_back_too(capsys):
+    ctor = _Ctor(RuntimeError("Library libcublas.so.12 is not found or cannot be loaded"))
+    got = _load_whisper_model(ctor, "large-v3", "cuda", "float16")
+    assert got[2:] == ("cpu", "int8")
+    assert "libcublas" in capsys.readouterr().out
 
 
 def test_success_first_time_makes_one_call():
