@@ -11,7 +11,6 @@ import numpy as np
 
 from kws_de import config
 from kws_de.data import (
-    SYNTHETIC_PREFIXES,
     _fill_with_tts,
     _origin_flags,
     build_dataset,
@@ -29,11 +28,7 @@ def assemble(clips_ws, noises, rng, labels, commands, shift_ms=200, context_mix=
     copy (build_dataset `synthetic`), mirrored in the flags; `context_mix` rows
     (build_dataset) likewise."""
     clips = {lbl: [c for c, _ in items] for lbl, items in clips_ws.items()}
-    # `clone:` rows are synthetic too: `--real-weight` must not triple them, and they get
-    # the same acoustic-variety augmentation TTS voices need.
-    synthetic = {
-        lbl: [s.startswith(SYNTHETIC_PREFIXES) for _, s in items] for lbl, items in clips_ws.items()
-    }
+    synthetic = {lbl: [s.startswith("tts:") for _, s in items] for lbl, items in clips_ws.items()}
     speakers = {lbl: [s for _, s in items] for lbl, items in clips_ws.items()}
     X, y = build_dataset(
         clips,
@@ -67,62 +62,19 @@ def force_rec_to_train(train: dict, *others: dict) -> int:
     (`kws-dataset build --recordings-split train`). With only one or two device
     speakers the global speaker-disjoint draw can otherwise put all of them in
     val/test, training on none of them. Context clips (`ctx:`, E48) are cut from
-    the same device speakers' takes and get the same treatment, as do their
-    voice-cloned clips (`clone:`): a clone of a training speaker must not become
-    a val/test "speaker". `--recordings-split auto` skips this and leaves them
-    to the draw. Returns the number of clips moved."""
-    device = ("rec:", "ctx:", "clone:")
+    the same device speakers' takes and get the same treatment. `--recordings-
+    split auto` skips this and leaves them to the draw. Returns the number of
+    clips moved."""
     moved = 0
     for other in others:
         for label, items in other.items():
-            keep = [(c, s) for c, s in items if not s.startswith(device)]
-            rec = [(c, s) for c, s in items if s.startswith(device)]
+            keep = [(c, s) for c, s in items if not s.startswith(("rec:", "ctx:"))]
+            rec = [(c, s) for c, s in items if s.startswith(("rec:", "ctx:"))]
             if rec:
                 train.setdefault(label, []).extend(rec)
                 other[label] = keep
                 moved += len(rec)
     return moved
-
-
-def split_for_build(clips_ws: dict, seed: int, recordings_split: str = "train"):
-    """The build's split: speaker-disjoint train/val/test drawn from `seed`, device
-    recordings forced into train (`force_rec_to_train`), and the `clone:` clips set
-    aside WITHOUT taking part in the draw. `split_three_way` permutes the sorted union of
-    speaker ids, so three extra `clone:spkNN` "speakers" would re-deal every MSWC/TTS
-    speaker: a build with clones would differ from the one without by a whole re-split,
-    not by the clones (E64). Returns (train, val, test, clones) -- the three splits are
-    what a build without the clone tree gives; `clones` is `{label: [(clip, speaker)]}`,
-    train material (`assemble_clones`)."""
-    base = {
-        lbl: [(c, s) for c, s in items if not s.startswith("clone:")]
-        for lbl, items in clips_ws.items()
-    }
-    clones = {
-        lbl: [(c, s) for c, s in items if s.startswith("clone:")] for lbl, items in clips_ws.items()
-    }
-    tr_ws, va_ws, te_ws = split_three_way(base, np.random.default_rng(seed), keep_speaker=True)
-    if recordings_split == "train":
-        moved = force_rec_to_train(tr_ws, va_ws, te_ws)
-        if moved:
-            print(f"[recordings] moved {moved} device clips into train (--recordings-split train)")
-    return tr_ws, va_ws, te_ws, {lbl: items for lbl, items in clones.items() if items}
-
-
-def assemble_clones(clones_ws, noises, rng, labels, commands, shift_ms=200):
-    """Feature rows of the `clone:` clips alone -> (X, y, is_tts), to be appended to the
-    train split. Same treatment as a TTS clip in `assemble` (clean + per-snr rows, and a
-    pitch/tempo-perturbed copy of each), but from their own `rng`: drawn inside the train
-    split's stream they would shift every later augmentation draw, and the rows the two
-    arms of a with/without-clones comparison share would stop being identical (E64).
-    No context-mix rows for clones. build_dataset always emits `_silence_` rows; the
-    train split already has its own, so they are dropped here."""
-    clips = {lbl: [c for c, _ in items] for lbl, items in clones_ws.items()}
-    synthetic = {lbl: [True] * len(items) for lbl, items in clones_ws.items()}
-    X, y = build_dataset(
-        clips, noises, rng, labels=labels, commands=commands, synthetic=synthetic, shift_ms=shift_ms
-    )
-    keep = y != list(labels).index("_silence_")
-    return X[keep], y[keep], np.ones(int(keep.sum()), bool)
 
 
 def build(  # pragma: no cover - I/O
@@ -169,7 +121,11 @@ def build(  # pragma: no cover - I/O
         print(f"[recordings] merged: {merged}")
     # Split assignment is deterministic in `seed`; augmentation uses a derived stream
     # so the split (the reproducibility contract) is independent of augmentation draws.
-    tr_ws, va_ws, te_ws, clones = split_for_build(clips_ws, seed, recordings_split)
+    tr_ws, va_ws, te_ws = split_three_way(clips_ws, np.random.default_rng(seed), keep_speaker=True)
+    if recordings_split == "train":
+        moved = force_rec_to_train(tr_ws, va_ws, te_ws)
+        if moved:
+            print(f"[recordings] moved {moved} device clips into train (--recordings-split train)")
     splits = {}
     speakers = {}
     for i, (name, ws) in enumerate((("train", tr_ws), ("val", va_ws), ("test", te_ws))):
@@ -182,23 +138,9 @@ def build(  # pragma: no cover - I/O
             shift_ms=shift_ms,
             context_mix=context_mix if name == "train" else 0,
         )
-        speakers[name] = [s for items in ws.values() for _, s in items]
-        if name == "train" and clones:
-            # Appended after the split's own rows, from a stream of their own: every row
-            # above is byte-identical to the build without the clone tree.
-            Xc, yc, tc = assemble_clones(
-                clones, noises, np.random.default_rng([seed, 64]), labels, words, shift_ms
-            )
-            X, y, is_tts = (
-                np.concatenate([X, Xc]),
-                np.concatenate([y, yc]),
-                np.concatenate([is_tts, tc]),
-            )
-            clone_ids = [s for items in clones.values() for _, s in items]
-            speakers[name] += clone_ids
-            print(f"[recordings] appended {len(clone_ids)} clone clips ({len(yc)} rows) to train")
         np.savez(config.DATA_DIR / f"{out_prefix}_{name}.npz", X=X, y=y, is_tts=is_tts)
         splits[name] = (X, y, is_tts)
+        speakers[name] = [s for items in ws.values() for _, s in items]
 
     manifest = build_manifest(
         splits,

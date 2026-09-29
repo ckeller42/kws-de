@@ -45,18 +45,11 @@ def merge_recordings(clips_ws: dict, root: Path | None = None) -> dict[str, int]
     from kws_de.recordings import load_recordings
 
     root = Path(root) if root is not None else config.DATA_DIR / "recordings"
-    word_trees = {
-        "rec:": root / "approved" / "words",
-        "ctx:": root / "approved" / "context",
-        # Voice-cloned TTS in a device speaker's voice (scripts/xtts_clone.py, spec
-        # 2026-09-29-voice-clone-tts-design). Augmentation, never approved/ material:
-        # its own tree, its own prefix, and `--real-weight` leaves it alone.
-        "clone:": root / "clone" / "words",
-    }
+    word_trees = {"rec:": root / "approved" / "words", "ctx:": root / "approved" / "context"}
     if not any(d.is_dir() for d in word_trees.values()):
         return {}
     for lbl, items in clips_ws.items():
-        clips_ws[lbl] = [(c, s) for c, s in items if not s.startswith(tuple(word_trees))]
+        clips_ws[lbl] = [(c, s) for c, s in items if not s.startswith(("rec:", "ctx:"))]
     merged: dict[str, int] = {}
     for prefix, d in word_trees.items():
         if not d.is_dir():
@@ -216,12 +209,6 @@ def _random_shift(clip, rng, max_shift_ms: int = 200):
 
 
 VAN_SNRS = (0, 5, 10)  # dB — cabin-ish, noisier than the general snrs= default
-
-# Speaker-id prefixes of synthesised clips: anonymous TTS and voice clones of the device
-# speakers. `kws_de.dataset.assemble` (which rows build_dataset perturbs) and `_origin_flags`
-# (the `is_tts` row flag `--real-weight` reads) must agree on this set, or the flags come
-# out shorter than X and shifted against it (E64).
-SYNTHETIC_PREFIXES = ("tts:", "clone:")
 
 
 def _trimmed(clip):
@@ -829,9 +816,8 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
 def _origin_flags(
     clips_ws: dict, snrs, words=None, perturb_tts: bool = False, context_mix: int = 0
 ) -> np.ndarray:
-    """Boolean array flagging synthesized origin (speaker id prefix in
-    `SYNTHETIC_PREFIXES`: anonymous TTS and voice clones), aligned row-for-row to
-    build_dataset's output for the same clips/snrs — must
+    """Boolean array flagging TTS-synthesized origin (speaker id prefix "tts:"),
+    aligned row-for-row to build_dataset's output for the same clips/snrs — must
     mirror build_dataset's iteration order (commands then unknown, each clip's
     clean copy + one row per snr, then silence, then clean silence) exactly.
     With `perturb_tts`, TTS clips count twice (build_dataset's perturbed copy). A REAL
@@ -845,7 +831,7 @@ def _origin_flags(
     flags = []
 
     def rows(spk):
-        is_tts = spk.startswith(SYNTHETIC_PREFIXES)
+        is_tts = spk.startswith("tts:")
         base = [is_tts] * (per_clip * (2 if perturb_tts and is_tts else 1))
         return base if is_tts else base + [False] * van_rows
 
@@ -861,5 +847,5 @@ def _origin_flags(
     if context_mix:
         for cmd in words:
             for _clip, spk in clips_ws.get(cmd, []):
-                flags.extend([spk.startswith(SYNTHETIC_PREFIXES)] * (context_mix + 1))
+                flags.extend([spk.startswith("tts:")] * (context_mix + 1))
     return np.asarray(flags, dtype=bool)

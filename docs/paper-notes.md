@@ -5012,8 +5012,9 @@ Also: the manifest counted clones as `mswc` (now a `clone` source key, only when
 the fixes, verified on the npz: val and test hashes equal between the arms (11,788 and 4,206
 rows); clone train = control train's 44,078 rows byte-identical in `X`, `y` and `is_tts`, plus
 1,112 rows (139 clips × 8), all flagged synthetic; real rows 17,550 in both; `raw_clips_v3.pkl`
-unchanged by the builds (`[tts] added:` empty). The code is in this branch's history
-(`git log exp/voice-clone -- kws_de/dataset.py`, PR #115) and no longer in the tree.
+unchanged by the builds (`[tts] added:` empty). All of it — the engine script
+`scripts/xtts_clone.py`, the `clone:` wiring with these fixes and their tests, the scorer
+`scripts/e64-score.py` — is commit `73d1e38` in PR #115's history and no longer in the tree.
 
 **Result** (guided-only isolated words n = 74, false accepts n = 85, read phrases n = 247):
 
@@ -5089,7 +5090,6 @@ no build reads that path), synthesis output and the XTTS venv in `~/xtts-spike/`
 as `data/features_v3_{control,clone}_*.npz` + `manifest_v3_{control,clone}.json`, models under
 `models/e64/<arm>_s<seed>/` and `models/e64_*`, logs and `e64-scores.json` in
 `archive/e64-logs/`. `features_v3_*.npz` there is still E62's `say`-only build.
-
 
 ## Open questions
 

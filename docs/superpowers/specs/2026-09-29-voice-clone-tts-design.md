@@ -1,6 +1,6 @@
 # Voice-cloned TTS for training data — experiment design
 
-**Status:** approved as a bounded spike (brainstorm 2026-09-29; private use, so a
+**Status: FAIL (2026-09-29, paper E64) — closed; engine code removed.** Was: approved as a bounded spike (brainstorm 2026-09-29; private use, so a
 non-commercial TTS licence is acceptable). **Question:** does synthesizing the
 vocabulary in the *real speakers' cloned voices* beat anonymous TTS on the real
 scoreboard? **Kept code if it wins:** the clone-synthesis engine + `clone:`
@@ -73,13 +73,20 @@ paper entry only; the engine code is removed.
   CUDA as it already did on CPU.
 - The deployed recipe reproducing its Mac figures on thinky (val ≈ 0.65).
 
-## Status (2026-09-29)
+## Status (2026-09-29): FAIL
 
-Prerequisites done (E61/E62). Spike run on the GPU box: XTTS-v2 clones the three speakers but
-pads one-word texts with babble from the reference audio; the working recipe is first-utterance
-trim + strict transcript match + several takes (E63). Strict-passing command-word clones are
-materialised under `recordings/clone/words/`. The experiment itself (control vs clone, seeds 0/1)
-is the next step — see `docs/superpowers/plans/2026-09-29-voice-clone-handover.md`.
+Prerequisites done (E61/E62). Spike (E63): XTTS-v2 clones the three speakers but pads one-word
+texts with babble from the reference audio; first-utterance trim + strict transcript match +
+several takes gave 139 usable command-word clones. Experiment (E64): clone 63/74 (0 false
+accepts) and 64/74 (1) against control 65/74 (2) and 62/74 (1) on the guided-only scoreboard,
+deployed `86b7105e` 67/74 (0). The clone arm does not beat control in both seeds and no run beats
+the deployed model, so by the rule above the engine code and the `clone:` provenance are removed;
+the paper entries E63/E64 are what is kept. The code is commit `73d1e38` in PR #115's history.
+Post-mortem: `docs/superpowers/plans/2026-09-29-voice-clone-handover.md`.
+
+Not tested, and the part of the question still open: TTS-only classes (light compounds, scene
+triggers), which have no real takes to score against; the F5-TTS fallback; the owner's ear check
+of the clones.
 
 ## Out of scope
 
