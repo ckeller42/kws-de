@@ -1602,7 +1602,7 @@ def test_tts_check_quarantine_moves_the_failing_clips(tmp_path):
 
 def test_tts_check_cli_exits_non_zero_when_a_clip_fails(tmp_path, monkeypatch, capsys):
     tr = _tts_dir(tmp_path)
-    monkeypatch.setattr(qc, "whisper_transcriber", lambda *a, **k: tr)
+    monkeypatch.setattr(qc, "default_transcriber", lambda *a, **k: tr)  # backend-agnostic
     monkeypatch.setattr("sys.argv", ["kws-tts-check", str(tmp_path)])
     with pytest.raises(SystemExit) as e:
         qc.tts_check_main()
@@ -1615,7 +1615,7 @@ def test_tts_check_cli_exits_zero_when_every_clip_passes(tmp_path, monkeypatch):
 
     tts.append_manifest(_wav(tmp_path / "ok.wav", _tone(ms=900)), "licht an", "Anna", "say")
     tr = _fake_tts_transcriber({"ok.wav": ("Licht an.", "de")})
-    monkeypatch.setattr(qc, "whisper_transcriber", lambda *a, **k: tr)
+    monkeypatch.setattr(qc, "default_transcriber", lambda *a, **k: tr)  # backend-agnostic
     monkeypatch.setattr("sys.argv", ["kws-tts-check", str(tmp_path / tts.MANIFEST_NAME)])
     qc.tts_check_main()  # no SystemExit
 
