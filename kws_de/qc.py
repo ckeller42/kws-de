@@ -1372,16 +1372,12 @@ def faster_whisper_transcriber(
     """
     from faster_whisper import WhisperModel
 
-    model = _load_whisper_model(WhisperModel, model_id, device, compute_type)
+    state = {
+        "model": _load_whisper_model(WhisperModel, model_id, device, compute_type),
+        "cpu": device == "cpu",
+    }
 
-    def transcribe(path: Path) -> Transcript:
-        audio, sr = sf.read(path, dtype="float32", always_2d=True)
-        if sr != config.SAMPLE_RATE:
-            raise ValueError(
-                f"{path}: sample rate {sr} != {config.SAMPLE_RATE} (mono 16 kHz PCM expected)"
-            )
-        pad = np.zeros(_PAD_SAMPLES, dtype=np.float32)
-        padded = np.concatenate([pad, audio[:, 0], pad])
+    def decode(model, padded: np.ndarray) -> Transcript:
         segments, info = model.transcribe(
             padded,
             language=language,
@@ -1404,7 +1400,36 @@ def faster_whisper_transcriber(
                 )
         return {"text": "".join(texts), "words": words, "language": info.language or ""}
 
+    def transcribe(path: Path) -> Transcript:
+        audio, sr = sf.read(path, dtype="float32", always_2d=True)
+        if sr != config.SAMPLE_RATE:
+            raise ValueError(
+                f"{path}: sample rate {sr} != {config.SAMPLE_RATE} (mono 16 kHz PCM expected)"
+            )
+        pad = np.zeros(_PAD_SAMPLES, dtype=np.float32)
+        padded = np.concatenate([pad, audio[:, 0], pad])
+        return _with_cpu_fallback(
+            state,
+            lambda model: decode(model, padded),
+            lambda: WhisperModel(model_id, device="cpu", compute_type="int8"),
+        )
+
     return transcribe
+
+
+def _with_cpu_fallback(state: dict, run, make_cpu):
+    """Run `run(state["model"])`; when the GPU model fails mid-decode (OOM while the
+    encoder runs on a busy card -- the load itself succeeded), swap in the CPU model
+    once and keep it: the same `state` serves every later clip. A CPU model's
+    errors propagate."""
+    try:
+        return run(state["model"])
+    except RuntimeError as exc:
+        if state["cpu"]:
+            raise
+        print(f"[qc] faster-whisper: GPU failed mid-transcription ({exc}); switching to CPU/int8")
+        state["model"], state["cpu"] = make_cpu(), True
+        return run(state["model"])
 
 
 def default_backend() -> tuple[str, str]:

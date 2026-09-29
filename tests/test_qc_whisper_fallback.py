@@ -1,6 +1,6 @@
 import pytest
 
-from kws_de.qc import _load_whisper_model
+from kws_de.qc import _load_whisper_model, _with_cpu_fallback
 
 
 class _Ctor:
@@ -44,3 +44,29 @@ def test_success_first_time_makes_one_call():
     ctor = _Ctor()
     assert _load_whisper_model(ctor, "large-v3", "auto", "default")[2] == "auto"
     assert len(ctor.calls) == 1
+
+
+def test_mid_transcription_gpu_failure_switches_to_cpu_once(capsys):
+    state = {"model": "gpu", "cpu": False}
+    calls = []
+
+    def run(model):
+        calls.append(model)
+        if model == "gpu":
+            raise RuntimeError("CUDA failed with error out of memory")
+        return f"text from {model}"
+
+    assert _with_cpu_fallback(state, run, lambda: "cpu") == "text from cpu"
+    assert calls == ["gpu", "cpu"] and state == {"model": "cpu", "cpu": True}
+    assert "switching to CPU" in capsys.readouterr().out
+    assert _with_cpu_fallback(state, run, lambda: "cpu2") == "text from cpu"  # kept, not rebuilt
+
+
+def test_cpu_model_errors_propagate():
+    state = {"model": "cpu", "cpu": True}
+
+    def run(_model):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _with_cpu_fallback(state, run, lambda: "cpu")
