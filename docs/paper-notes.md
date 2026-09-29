@@ -4850,6 +4850,22 @@ invented machine path).
 Still open on thinky: the actual `kws-data` copy + full data cross-check (design §3), which needs
 the Mac SSD readable again.
 
+### E60 — data sync + verify tooling, and the migration to thinky (2026-09-29)
+
+Design §3, and the migration itself. `scripts/sync-data.sh` moves the `kws-data` tree between
+machines (rsync over ssh, `--to`/`--from` a host you pass, `--data-root`/`KWS_DATA_ROOT` or the
+resolved per-OS default, dry-run by default, `--verify` to cross-check after). `kws-verify`
+(`kws_de/verify.py`) is the pure manifest/diff underneath: `manifest [ROOT]` writes a sha256 line
+per file (sorted, `.DS_Store` skipped), `diff A B` reports only-A / only-B / changed and exits
+non-zero on any drift — no ssh/rsync in it, so it is unit-tested (`tests/test_verify.py`).
+
+Migration run (SSD readable again after the tmux/TCC restart — see the MacPorts/tmux note): the
+8.2 GB / 6834-file `kws-data` tree copied to thinky (`~/kws-data`), file counts equal both sides,
+and an `rsync -c` (checksum) dry-run reported **zero mismatches** — byte-identical. thinky is now
+the primary data home; the Mac SSD is the verified backup (refresh it with `--from thinky`). With
+E59's measured cross-machine determinism (codegen/fwgen `--check` clean on Linux) and this
+byte-identical copy, training + data can run on thinky without drift from the Mac.
+
 ### E61 — the first real training run on thinky trained to chance: a stale npz and a silent CUDA failure (2026-09-29)
 
 With the byte-identical `kws-data` copy on thinky (E60), the deployed recipe (`--v2 --width 48
