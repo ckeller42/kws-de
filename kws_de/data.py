@@ -248,8 +248,9 @@ def van_augmentation_enabled() -> bool:
     """Van-cabin augmentation for REAL clips (rec:/MSWC) is opt-in: set both
     KWS_NOISE_DIR (recommended: `<mww-train>/data/fma_16k`, or `negative_datasets`)
     and KWS_RIR_DIR (recommended: `<mww-train>/data/mit_rirs`) to directories of 16kHz
-    wav files. No default — this repo commits no path to that external training data."""
-    return bool(os.environ.get("KWS_NOISE_DIR")) and bool(os.environ.get("KWS_RIR_DIR"))
+    wav files, or set noise_dir/rir_dir in config.toml. No default — this repo commits
+    no path to that external training data."""
+    return config.noise_dir() is not None and config.rir_dir() is not None
 
 
 _VAN_FILES: dict[tuple[str, str], tuple[list[Path], list[Path]]] = {}
@@ -262,7 +263,7 @@ def _van_noise_and_rir(rng):
     wav lists are globbed once per directory pair and kept in `_VAN_FILES`."""
     import soundfile as sf
 
-    dirs = os.environ["KWS_NOISE_DIR"], os.environ["KWS_RIR_DIR"]
+    dirs = (str(config.noise_dir()), str(config.rir_dir()))
     if dirs not in _VAN_FILES:
         noises, rirs = (sorted(Path(d).glob("*.wav")) for d in dirs)
         if not noises or not rirs:

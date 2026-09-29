@@ -161,6 +161,9 @@ results and why 32 stays the recommendation.
 
 ## Development
 
+Full cross-platform setup (macOS + Linux) — extras, storage config, GPU notes, and
+`kws-doctor` as the self-check: [`docs/dev-setup.md`](docs/dev-setup.md).
+
 ```bash
 ./scripts/setup-hooks.sh   # once per clone: activate the git hooks (.githooks/)
 uv run ruff check . && uv run ruff format --check .

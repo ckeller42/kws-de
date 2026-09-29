@@ -5,7 +5,6 @@ is the only caller that writes its output to `data/manifest.json`.
 """
 
 import hashlib
-import os
 from datetime import UTC, datetime
 
 import numpy as np
@@ -33,7 +32,8 @@ def build_manifest(
     (counts by origin, "rec:" and "ctx:" both counted as "recording") and
     "speakers" (sorted numeric ids of device recordings only, "rec:"/"ctx:"
     stripped) — provenance for QC-approved device recordings mixed into the
-    build. "van_dirs" records KWS_NOISE_DIR / KWS_RIR_DIR (None when unset), so a
+    build. "van_dirs" records the resolved noise/rir dirs (KWS_NOISE_DIR / KWS_RIR_DIR
+    or config.toml; None when unset), so a
     build without van-cabin augmentation is visible in its manifest. "shift_ms" is
     the ±time-shift range of the clean/noisy word rows (`kws-dataset build --shift-ms`);
     "context_mix" the K of `--context-mix` (0 = no multi-word context rows)."""
@@ -42,7 +42,9 @@ def build_manifest(
         "shift_ms": shift_ms,
         "context_mix": context_mix,
         "built_at": datetime.now(UTC).isoformat(),
-        "van_dirs": [os.environ.get("KWS_NOISE_DIR"), os.environ.get("KWS_RIR_DIR")],
+        "van_dirs": [
+            str(d) if d is not None else None for d in (config.noise_dir(), config.rir_dir())
+        ],
         "labels": list(labels),
         "mfcc": {
             "n_mfcc": config.N_MFCC,

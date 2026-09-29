@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import logging
 import re
+import sys
 import unicodedata
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -1333,9 +1334,93 @@ def whisper_transcriber(
     return transcribe
 
 
+def faster_whisper_transcriber(
+    model_id: str = "large-v3",
+    language: str | None = "de",
+    device: str = "auto",
+    compute_type: str = "default",
+) -> Transcriber:  # pragma: no cover - model
+    """faster-whisper (CTranslate2) as a `Transcriber`, the Linux/CUDA counterpart of
+    `whisper_transcriber`. Returns the SAME contract — a callable ``(Path) -> {"text",
+    "words": [{"word","start","end"}], "language"}`` — so `qc.py` needs no change to swap
+    backends. ``language=None`` lets Whisper DETECT the language (what `tts_gate` judges);
+    the default "de" is the more accurate decode for known-German recording takes. Padding,
+    the initial prompt, and the word-timestamp offset match the mlx path so both backends
+    read the same clip the same way.
+
+    NOTE (design §2, coordinator follow-up): the faster-whisper-vs-mlx label-agreement
+    check on a real clip set — same language ID + transcript decision — is NOT done here.
+    See docs/paper-notes.md; it gates flipping QC to faster-whisper on Linux.
+    """
+    from faster_whisper import WhisperModel
+
+    model = WhisperModel(model_id, device=device, compute_type=compute_type)
+
+    def transcribe(path: Path) -> Transcript:
+        audio, sr = sf.read(path, dtype="float32", always_2d=True)
+        if sr != config.SAMPLE_RATE:
+            raise ValueError(
+                f"{path}: sample rate {sr} != {config.SAMPLE_RATE} (mono 16 kHz PCM expected)"
+            )
+        pad = np.zeros(_PAD_SAMPLES, dtype=np.float32)
+        padded = np.concatenate([pad, audio[:, 0], pad])
+        segments, info = model.transcribe(
+            padded,
+            language=language,
+            word_timestamps=True,
+            temperature=0.0,
+            initial_prompt=_QC_PROMPT,
+        )
+        offset = _PAD_SAMPLES / config.SAMPLE_RATE
+        texts: list[str] = []
+        words: list[dict] = []
+        for seg in segments:  # generator: iterating runs the decode
+            texts.append(seg.text)
+            for w in seg.words or []:
+                words.append(
+                    {
+                        "word": w.word.strip(),
+                        "start": max(0.0, float(w.start) - offset),
+                        "end": max(0.0, float(w.end) - offset),
+                    }
+                )
+        return {"text": "".join(texts), "words": words, "language": info.language or ""}
+
+    return transcribe
+
+
+def default_backend() -> tuple[str, str]:
+    """(display name, import module) of the preferred Whisper backend for this platform,
+    WITHOUT importing it — mlx-whisper on macOS, faster-whisper on Linux (design §2).
+    `kws-doctor` uses this to report the selection cheaply."""
+    if sys.platform.startswith("linux"):
+        return "faster-whisper", "faster_whisper"
+    return "mlx-whisper", "mlx_whisper"
+
+
+def default_transcriber(language: str | None = "de") -> Transcriber:  # pragma: no cover - model
+    """Build the platform-appropriate transcriber: mlx-whisper on macOS, faster-whisper on
+    Linux (design §2). Falls back to the other backend on ImportError so a machine with only
+    one installed still works. QC decision logic is unchanged — it just takes whatever
+    `Transcriber` this returns."""
+    if sys.platform.startswith("linux"):
+        order = (faster_whisper_transcriber, whisper_transcriber)
+    else:
+        order = (whisper_transcriber, faster_whisper_transcriber)
+    last: ImportError | None = None
+    for builder in order:
+        try:
+            return builder(language=language)
+        except ImportError as exc:
+            last = exc
+    raise ImportError(
+        "no Whisper backend available: install the 'qc' extra "
+        "(mlx-whisper on macOS, faster-whisper on Linux)"
+    ) from last
+
+
 def main() -> None:  # pragma: no cover - I/O wrapper
     import argparse
-    import sys
 
     ap = argparse.ArgumentParser(
         prog="kws-qc", description="quality-control a pulled recording session"
@@ -1428,7 +1513,6 @@ def tts_check(manifest: Path, transcriber: Transcriber, quarantine: bool = False
 
 def tts_check_main() -> None:  # pragma: no cover - I/O wrapper
     import argparse
-    import sys
 
     ap = argparse.ArgumentParser(
         prog="kws-tts-check",

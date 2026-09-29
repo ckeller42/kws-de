@@ -4786,6 +4786,36 @@ on the external SSD, which this session could not read; the change is expected t
 exact-intent only where a single `_unknown_` blocked an otherwise complete command, and may add
 false accepts on negatives the same way — both are now what the device would do.
 
+### E59 — cross-platform storage + Whisper backend, ahead of the thinky (Linux/CUDA) move (2026-09-29, host-only, feat/cross-platform-storage)
+
+Design: `docs/superpowers/specs/2026-09-29-cross-platform-thinky-migration-design.md` (§1, §2, §6).
+Groundwork so the data + training tooling runs the same on macOS (Apple Silicon) and Linux (CUDA),
+before `kws-data` moves to the `thinky` box.
+
+Storage (§1): `kws_de/config.py` now resolves the data root and each aux dir in the order explicit
+env var (`KWS_DATA_ROOT` / `KWS_NOISE_DIR` / `KWS_RIR_DIR`) → per-machine
+`${XDG_CONFIG_HOME:-~/.config}/kws-de/config.toml` (`data_root` / `noise_dir` / `rir_dir`) →
+per-OS default. The default is always computed — repo root on macOS (unchanged), `~/kws-data` on
+Linux — never a committed machine path; `KWS_DATA_ROOT` set reproduces exactly the old behaviour.
+Noise/rir stay off unless configured (via functions read live, so `data.py`/`manifest.py` pick up
+either source). New read-only `kws-doctor` (`kws_de/doctor.py`) prints the resolved paths + whether
+each is readable, platform, Python/TF versions, GPU (Metal vs CUDA), and the selected Whisper
+backend — the check that would have made this session's SSD-EPERM week trivial.
+
+Whisper QC backend (§2): `qc.py` gains `faster_whisper_transcriber()` (CTranslate2/CUDA) beside the
+mlx one, same `Transcriber` contract, and `default_transcriber()` picks mlx on macOS /
+faster-whisper on Linux with an ImportError fallback. QC decision logic untouched (injected
+transcriber). `pyproject.toml`: new `gpu` extra (tensorflow-metal on darwin, `tensorflow[and-cuda]`
+on linux; `metal` kept as alias), `qc` extra now platform-marked (mlx-whisper darwin /
+faster-whisper linux). TF pin held `>=2.16,<2.19` on both OSes for cross-machine determinism.
+
+**Pending (coordinator, on thinky):** the faster-whisper-vs-mlx label-agreement check — same
+language ID + transcript decision on a fixed real clip set — is NOT done here (needs both backends +
+the SSD clips this session couldn't read). It gates flipping QC to faster-whisper on Linux; until
+then macOS mlx is the reference. Also open on thinky: whether `kws-fwgen`'s float MFCC tables drift
+across machines (BLAS/numpy) — measure before any Linux-generated header is committed (design §4),
+or keep header generation on one reference machine.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
