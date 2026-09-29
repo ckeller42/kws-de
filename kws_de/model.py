@@ -2,6 +2,19 @@ import tensorflow as tf
 
 from kws_de import config
 
+# Grow GPU memory on demand instead of TF's default of reserving the whole card
+# at first use. On a shared GPU (thinky runs an LLM server that holds ~21 GB of
+# the 24 GB card) TF's grab either fails outright or starves anything that needs
+# CUDA in the same process afterwards -- faster-whisper for the TTS gate, the
+# voice-clone TTS engine. Growth is the standard coexistence setting; it costs
+# nothing on macOS/Metal or CPU-only, and must be set before the first GPU op,
+# which is why it lives next to the import every training path goes through.
+for _gpu in tf.config.list_physical_devices("GPU"):
+    try:
+        tf.config.experimental.set_memory_growth(_gpu, True)
+    except RuntimeError:  # already initialised elsewhere -- too late to change, not fatal
+        pass
+
 
 def build_dscnn(num_classes: int | None = None, width: int = 32) -> tf.keras.Model:
     """Build the DS-CNN classifier. `num_classes` defaults to the live command
