@@ -4812,9 +4812,32 @@ faster-whisper linux). TF pin held `>=2.16,<2.19` on both OSes for cross-machine
 **Pending (coordinator, on thinky):** the faster-whisper-vs-mlx label-agreement check — same
 language ID + transcript decision on a fixed real clip set — is NOT done here (needs both backends +
 the SSD clips this session couldn't read). It gates flipping QC to faster-whisper on Linux; until
-then macOS mlx is the reference. Also open on thinky: whether `kws-fwgen`'s float MFCC tables drift
-across machines (BLAS/numpy) — measure before any Linux-generated header is committed (design §4),
-or keep header generation on one reference machine.
+then macOS mlx is the reference.
+
+**Measured on thinky (2026-09-29, RTX 3090 Ti, Threadripper 3975WX, Linux, driver 595.84):**
+
+- Env brings up clean: `uv sync --extra gpu --extra qc` resolves the Linux markers, installs
+  `tensorflow[and-cuda]` 2.18.1 (sees GPU:0) and faster-whisper 1.2.1; `kws-doctor` reports the
+  Linux default `~/kws-data`, the GPU as CUDA, and the qc backend as faster-whisper. So the §2
+  extras and the resolver work end-to-end on Linux.
+- **Cross-machine determinism (design §4) — clears.** On thinky, `kws-codegen --check` (byte-exact
+  integer inference) and `kws-fwgen --check` (float MFCC mel/DCT/window tables, tolerance path)
+  both exit 0 against the committed Mac-generated headers. A Linux box regenerates the same
+  firmware artifacts, so training/codegen can move without drifting `gen/`. The float-table risk
+  flagged above did not materialise within the existing tolerance; header generation need not be
+  pinned to one machine.
+- **GPU training benchmark (§5).** Full deployed recipe (`--v2 --width 48 --qat --qat-epochs 20
+  --real-weight 3 --epochs 40`) on a synthetic dataset of the real shape (40k rows, 49×10, 23
+  classes; measures speed, not accuracy): **8:51 wall on the GPU vs ~26 min on the M4 CPU
+  (E49) ≈ 2.9×**. Pure GPU compute is ~1.9 s/epoch (60 epochs ≈ 2 min); the remaining ~7 min is
+  fixed overhead (TF/CUDA init, npz load, `--real-weight` row tripling, float→QAT reload, saves,
+  validation), which a faster GPU does not shrink. Batch 256 was slower than 128 (2.60 vs 1.93
+  s/epoch) — the model is overhead/data-bound, not flop-bound. thinky's real leverage is
+  throughput (the 64-thread CPU dataset build, and running a seed sweep or recipe grid
+  concurrently), plus retiring the flaky external SSD — not single-run latency.
+
+Still open on thinky: the actual `kws-data` copy + full data cross-check (design §3), which needs
+the Mac SSD readable again.
 
 ## Open questions
 
