@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import logging
 import re
+import sys
 import unicodedata
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -1333,15 +1334,111 @@ def whisper_transcriber(
     return transcribe
 
 
+def faster_whisper_transcriber(
+    model_id: str = "large-v3",
+    language: str | None = "de",
+    device: str = "auto",
+    compute_type: str = "default",
+) -> Transcriber:  # pragma: no cover - model
+    """faster-whisper (CTranslate2) as a `Transcriber`, the Linux/CUDA counterpart of
+    `whisper_transcriber`. Returns the SAME contract — a callable ``(Path) -> {"text",
+    "words": [{"word","start","end"}], "language"}`` — so `qc.py` needs no change to swap
+    backends. ``language=None`` lets Whisper DETECT the language (what `tts_gate` judges);
+    the default "de" is the more accurate decode for known-German recording takes. Padding,
+    the initial prompt, and the word-timestamp offset match the mlx path so both backends
+    read the same clip the same way.
+
+    NOTE (design §2, coordinator follow-up): the faster-whisper-vs-mlx label-agreement
+    check on a real clip set — same language ID + transcript decision — is NOT done here.
+    See docs/paper-notes.md; it gates flipping QC to faster-whisper on Linux.
+    """
+    from faster_whisper import WhisperModel
+
+    model = WhisperModel(model_id, device=device, compute_type=compute_type)
+
+    def transcribe(path: Path) -> Transcript:
+        audio, sr = sf.read(path, dtype="float32", always_2d=True)
+        if sr != config.SAMPLE_RATE:
+            raise ValueError(
+                f"{path}: sample rate {sr} != {config.SAMPLE_RATE} (mono 16 kHz PCM expected)"
+            )
+        pad = np.zeros(_PAD_SAMPLES, dtype=np.float32)
+        padded = np.concatenate([pad, audio[:, 0], pad])
+        segments, info = model.transcribe(
+            padded,
+            language=language,
+            word_timestamps=True,
+            temperature=0.0,
+            initial_prompt=_QC_PROMPT,
+        )
+        offset = _PAD_SAMPLES / config.SAMPLE_RATE
+        texts: list[str] = []
+        words: list[dict] = []
+        for seg in segments:  # generator: iterating runs the decode
+            texts.append(seg.text)
+            for w in seg.words or []:
+                words.append(
+                    {
+                        "word": w.word.strip(),
+                        "start": max(0.0, float(w.start) - offset),
+                        "end": max(0.0, float(w.end) - offset),
+                    }
+                )
+        return {"text": "".join(texts), "words": words, "language": info.language or ""}
+
+    return transcribe
+
+
+def default_backend() -> tuple[str, str]:
+    """(display name, import module) of the preferred Whisper backend for this platform,
+    WITHOUT importing it — mlx-whisper on macOS, faster-whisper on Linux (design §2).
+    `kws-doctor` uses this to report the selection cheaply."""
+    if sys.platform.startswith("linux"):
+        return "faster-whisper", "faster_whisper"
+    return "mlx-whisper", "mlx_whisper"
+
+
+def default_transcriber(
+    model: str | None = None, language: str | None = "de"
+) -> Transcriber:  # pragma: no cover - model
+    """Build the platform-appropriate transcriber: mlx-whisper on macOS, faster-whisper on
+    Linux (design §2). Falls back to the other backend on ImportError so a machine with only
+    one installed still works. `model` overrides the backend's default model id — leave it
+    None so each backend uses its own correct default (an mlx repo id and a faster-whisper
+    name are NOT interchangeable, so a caller's `--model` must reach the backend that will
+    actually run, which is what routing through here achieves). QC decision logic is
+    unchanged — it just takes whatever `Transcriber` this returns."""
+    if sys.platform.startswith("linux"):
+        order = (faster_whisper_transcriber, whisper_transcriber)
+    else:
+        order = (whisper_transcriber, faster_whisper_transcriber)
+    extra = {"model_id": model} if model else {}
+    last: ImportError | None = None
+    for builder in order:
+        try:
+            return builder(language=language, **extra)
+        except ImportError as exc:
+            last = exc
+    raise ImportError(
+        "no Whisper backend available: install the 'qc' extra "
+        "(mlx-whisper on macOS, faster-whisper on Linux)"
+    ) from last
+
+
 def main() -> None:  # pragma: no cover - I/O wrapper
     import argparse
-    import sys
 
     ap = argparse.ArgumentParser(
         prog="kws-qc", description="quality-control a pulled recording session"
     )
     ap.add_argument("incoming")
-    ap.add_argument("--model", default="mlx-community/whisper-large-v3-mlx")
+    ap.add_argument(
+        "--model",
+        default=None,
+        help="Whisper model id; default picks the platform backend's own (mlx on macOS, "
+        "faster-whisper large-v3 on Linux). A model id is backend-specific — pass one only "
+        "with the matching backend installed.",
+    )
     ap.add_argument(
         "--out", default=None, help="qc dir (default data/recordings/qc/<incoming name>)"
     )
@@ -1363,13 +1460,16 @@ def main() -> None:  # pragma: no cover - I/O wrapper
     qc_dir = Path(a.out) if a.out else config.DATA_DIR / "recordings" / "qc" / inc.name
     approved = Path(a.approved) if a.approved else config.DATA_DIR / "recordings" / "approved"
     try:
-        tr = whisper_transcriber(a.model)
+        tr = default_transcriber(model=a.model)
     except Exception as e:  # noqa: BLE001 - model download/import failure is a user-facing exit
-        print(f"could not load {a.model}: {e} (exit 4)", file=sys.stderr)
+        print(
+            f"could not load Whisper backend ({a.model or 'default'}): {e} (exit 4)",
+            file=sys.stderr,
+        )
         raise SystemExit(4) from e
     counts = run_qc(inc, qc_dir, approved, tr)
     with (qc_dir / "report.md").open("a") as fh:
-        fh.write(f"\nModel: `{a.model}`\n")
+        fh.write(f"\nModel: `{a.model or default_backend()[0] + ' default'}`\n")
     print(f"qc: {counts} -> {qc_dir}")
 
 
@@ -1428,14 +1528,18 @@ def tts_check(manifest: Path, transcriber: Transcriber, quarantine: bool = False
 
 def tts_check_main() -> None:  # pragma: no cover - I/O wrapper
     import argparse
-    import sys
 
     ap = argparse.ArgumentParser(
         prog="kws-tts-check",
         description="gate synthesised clips: really German, really the intended text",
     )
     ap.add_argument("target", help="directory holding a manifest.csv, or the manifest itself")
-    ap.add_argument("--model", default="mlx-community/whisper-large-v3-mlx")
+    ap.add_argument(
+        "--model",
+        default=None,
+        help="Whisper model id; default picks the platform backend's own (mlx on macOS, "
+        "faster-whisper large-v3 on Linux).",
+    )
     ap.add_argument("--quarantine", action="store_true", help="move failing clips to rejected/")
     a = ap.parse_args()
     target = Path(a.target)
@@ -1445,9 +1549,12 @@ def tts_check_main() -> None:  # pragma: no cover - I/O wrapper
         raise SystemExit(2)
     try:
         # language=None: the gate's whole point is catching a clip that came out English.
-        transcriber = whisper_transcriber(a.model, language=None)
+        transcriber = default_transcriber(model=a.model, language=None)
     except Exception as e:  # noqa: BLE001 - model download/import failure is a user-facing exit
-        print(f"could not load {a.model}: {e} (exit 4)", file=sys.stderr)
+        print(
+            f"could not load Whisper backend ({a.model or 'default'}): {e} (exit 4)",
+            file=sys.stderr,
+        )
         raise SystemExit(4) from e
     counts = tts_check(man, transcriber, quarantine=a.quarantine)
     for key, (n_ok, n_bad) in sorted(counts["by_voice"].items()):

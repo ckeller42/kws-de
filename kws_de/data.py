@@ -248,8 +248,9 @@ def van_augmentation_enabled() -> bool:
     """Van-cabin augmentation for REAL clips (rec:/MSWC) is opt-in: set both
     KWS_NOISE_DIR (recommended: `<mww-train>/data/fma_16k`, or `negative_datasets`)
     and KWS_RIR_DIR (recommended: `<mww-train>/data/mit_rirs`) to directories of 16kHz
-    wav files. No default — this repo commits no path to that external training data."""
-    return bool(os.environ.get("KWS_NOISE_DIR")) and bool(os.environ.get("KWS_RIR_DIR"))
+    wav files, or set noise_dir/rir_dir in config.toml. No default — this repo commits
+    no path to that external training data."""
+    return config.noise_dir() is not None and config.rir_dir() is not None
 
 
 _VAN_FILES: dict[tuple[str, str], tuple[list[Path], list[Path]]] = {}
@@ -262,7 +263,7 @@ def _van_noise_and_rir(rng):
     wav lists are globbed once per directory pair and kept in `_VAN_FILES`."""
     import soundfile as sf
 
-    dirs = os.environ["KWS_NOISE_DIR"], os.environ["KWS_RIR_DIR"]
+    dirs = (str(config.noise_dir()), str(config.rir_dir()))
     if dirs not in _VAN_FILES:
         noises, rirs = (sorted(Path(d).glob("*.wav")) for d in dirs)
         if not noises or not rirs:
@@ -665,14 +666,15 @@ def _tts_combo_plan(
 def tts_gate_transcriber():  # pragma: no cover - loads Whisper
     """The transcriber the synthetic-clip gate needs: Whisper with language DETECTION on
     (not forced to German), since catching a clip that came out English is the point.
-    Returns None — gate disabled, every clip kept — when ``KWS_TTS_GATE=0`` or when
-    mlx-whisper is not installed (Linux CI has no MLX; it also builds no TTS clips)."""
+    Returns None — gate disabled, every clip kept — when ``KWS_TTS_GATE=0`` or when no
+    Whisper backend is installed. Uses the platform default (mlx on macOS, faster-whisper
+    on Linux), so the gate works on either OS when its backend is present."""
     if os.environ.get("KWS_TTS_GATE") == "0":
         return None
     try:
-        from kws_de.qc import whisper_transcriber
+        from kws_de.qc import default_transcriber
 
-        return whisper_transcriber(language=None)
+        return default_transcriber(language=None)
     except Exception as e:  # noqa: BLE001 - missing/unloadable model must not fail a build
         print(f"[tts] gate disabled — no Whisper ({type(e).__name__}: {e})")
         return None

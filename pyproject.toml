@@ -21,6 +21,16 @@ dependencies = [
 dev = ["pytest>=8", "ruff==0.16.5"]
 # Apple-Silicon GPU (MPS) acceleration — optional, CPU training works without it.
 metal = ["tensorflow-metal>=1.1"]
+# Portable GPU extra: `uv sync --extra gpu` resolves the right backend per OS —
+# tensorflow-metal on Apple Silicon, TF's bundled CUDA userspace on Linux. The
+# top-level tensorflow>=2.16,<2.19 pin (for the tensorflow-metal ABI) still binds
+# here; if a `tensorflow[and-cuda]` build ever needs a wider/matching pin for a
+# CUDA-driver match, adjust the top-level pin, not this line. `metal` stays as a
+# back-compat alias; `gpu` is the portable one.
+gpu = [
+  "tensorflow-metal>=1.1 ; sys_platform == 'darwin'",
+  "tensorflow[and-cuda] ; sys_platform == 'linux'",
+]
 # Piper neural TTS engine (offline, permissive-licensed German voices).
 tts = ["piper-tts>=1.2"]
 # Wake-stage training only (Piper TTS "Hey Bus" positives + microWakeWord's
@@ -30,9 +40,15 @@ train = ["microwakeword @ git+https://github.com/kahrendt/microWakeWord"]
 # Firmware requirements-traceability docs (docs/sphinx): sphinx-needs for
 # req/test traceability, breathe for the Doxygen C API reference.
 docs = ["sphinx>=7", "breathe>=4.35", "sphinx-needs>=2"]
-# kws-qc CLI's real transcriber (Apple-Silicon MLX Whisper). Core qc.py runs
-# without it via an injected Transcriber; only whisper_transcriber() needs it.
-qc = ["mlx-whisper>=0.4"]
+# kws-qc CLI's real transcriber, platform-marked: MLX Whisper on Apple Silicon,
+# faster-whisper (CTranslate2, CUDA) on Linux. Core qc.py runs without either via
+# an injected Transcriber; whisper_transcriber() needs mlx-whisper and
+# faster_whisper_transcriber() needs faster-whisper. default_transcriber() picks
+# per platform (see kws_de/qc.py).
+qc = [
+  "mlx-whisper>=0.4 ; sys_platform == 'darwin'",
+  "faster-whisper>=1.0 ; sys_platform == 'linux'",
+]
 # The TFLite-Micro audio frontend microWakeWord trains against, exposed as a
 # Python extension. Only needed to regenerate the wake front-end golden vector
 # (`kws-fwgen`); the committed header and the firmware need nothing extra.
@@ -55,6 +71,7 @@ kws-codegen = "kws_de.codegen:main"
 kws-transducer = "kws_de.transducer:main"
 kws-distill = "kws_de.distill:main"
 kws-qc = "kws_de.qc:main"
+kws-doctor = "kws_de.doctor:main"
 kws-tts-check = "kws_de.qc:tts_check_main"
 kws-eta = "kws_de.eta:main"
 kws-model-graph = "kws_de.model_graph:main"

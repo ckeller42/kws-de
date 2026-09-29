@@ -1,4 +1,7 @@
+import functools
 import os
+import sys
+import tomllib
 from pathlib import Path
 
 SAMPLE_RATE = 16000
@@ -27,11 +30,79 @@ MAX_MACS = 5_000_000
 MAX_LATENCY_MS = 30
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-# data/ and models/ are gitignored; their physical home is a local detail. Set
-# KWS_DATA_ROOT to keep ONE root (<root>/data, <root>/models) outside every
-# worktree — e.g. on an external SSD — shared by all checkouts and the ingest
-# scripts; unset, they stay repo-relative. Never commit a machine path here.
-_DATA_ROOT = Path(os.environ.get("KWS_DATA_ROOT", _REPO_ROOT))
+
+# --- Storage resolver (design §1) -------------------------------------------
+# data/ and models/ are gitignored; their physical home is a per-machine detail.
+# Each location resolves in this order: explicit env var → per-machine config
+# file → per-OS default. A default is always COMPUTED (never a committed machine
+# path), so a fresh clone works with no configuration and no hardcoded volume.
+#
+#   data root : KWS_DATA_ROOT → config.toml [data_root] → repo root (macOS) /
+#               ~/kws-data (Linux)
+#   noise dir : KWS_NOISE_DIR → config.toml [noise_dir] → None (van aug off)
+#   rir dir   : KWS_RIR_DIR   → config.toml [rir_dir]   → None (van aug off)
+#
+# The config file lives at ${XDG_CONFIG_HOME:-~/.config}/kws-de/config.toml and
+# is never committed. Setting KWS_DATA_ROOT reproduces exactly the previous
+# behaviour (one shared <root>/data + <root>/models for every worktree). Run
+# `kws-doctor` to print what actually resolved.
+
+
+def _config_file_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+    return Path(base) / "kws-de" / "config.toml"
+
+
+@functools.lru_cache(maxsize=1)
+def _config_file() -> dict:
+    """Parse the per-machine config.toml once. Missing/unreadable/malformed file
+    resolves to {} — configuration is optional, never fatal. The env var is read
+    live (not cached) so tests and shells can override without a cache reset."""
+    path = _config_file_path()
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except (FileNotFoundError, IsADirectoryError, PermissionError, tomllib.TOMLDecodeError):
+        return {}
+
+
+def _default_data_root() -> Path:
+    # macOS keeps the historical repo-root default (an external SSD is opted into
+    # via env/config, never hardcoded here); Linux defaults to ~/kws-data.
+    if sys.platform.startswith("linux"):
+        return Path.home() / "kws-data"
+    return _REPO_ROOT
+
+
+def _resolve_dir(env_var: str, file_key: str, default: Path | None) -> Path | None:
+    val = os.environ.get(env_var)
+    if val:
+        return Path(val)
+    file_val = _config_file().get(file_key)
+    if file_val:
+        return Path(str(file_val))
+    return default
+
+
+def _resolve_data_root() -> Path:
+    root = _resolve_dir("KWS_DATA_ROOT", "data_root", _default_data_root())
+    assert root is not None  # data_root always has a computed default
+    return root
+
+
+def noise_dir() -> Path | None:
+    """Resolved van-augmentation noise directory, or None when unconfigured
+    (van augmentation stays off). Read dynamically so env changes take effect."""
+    return _resolve_dir("KWS_NOISE_DIR", "noise_dir", None)
+
+
+def rir_dir() -> Path | None:
+    """Resolved van-augmentation room-impulse-response directory, or None when
+    unconfigured. Read dynamically so env changes take effect."""
+    return _resolve_dir("KWS_RIR_DIR", "rir_dir", None)
+
+
+_DATA_ROOT = _resolve_data_root()
 DATA_DIR = _DATA_ROOT / "data"
 MODELS_DIR = _DATA_ROOT / "models"
 

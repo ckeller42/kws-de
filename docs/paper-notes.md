@@ -4786,6 +4786,70 @@ on the external SSD, which this session could not read; the change is expected t
 exact-intent only where a single `_unknown_` blocked an otherwise complete command, and may add
 false accepts on negatives the same way — both are now what the device would do.
 
+### E59 — cross-platform storage + Whisper backend, ahead of the thinky (Linux/CUDA) move (2026-09-29, host-only, feat/cross-platform-storage)
+
+Design: `docs/superpowers/specs/2026-09-29-cross-platform-thinky-migration-design.md` (§1, §2, §6).
+Groundwork so the data + training tooling runs the same on macOS (Apple Silicon) and Linux (CUDA),
+before `kws-data` moves to the `thinky` box.
+
+Storage (§1): `kws_de/config.py` now resolves the data root and each aux dir in the order explicit
+env var (`KWS_DATA_ROOT` / `KWS_NOISE_DIR` / `KWS_RIR_DIR`) → per-machine
+`${XDG_CONFIG_HOME:-~/.config}/kws-de/config.toml` (`data_root` / `noise_dir` / `rir_dir`) →
+per-OS default. The default is always computed — repo root on macOS (unchanged), `~/kws-data` on
+Linux — never a committed machine path; `KWS_DATA_ROOT` set reproduces exactly the old behaviour.
+Noise/rir stay off unless configured (via functions read live, so `data.py`/`manifest.py` pick up
+either source). New read-only `kws-doctor` (`kws_de/doctor.py`) prints the resolved paths + whether
+each is readable, platform, Python/TF versions, GPU (Metal vs CUDA), and the selected Whisper
+backend — the check that would have made this session's SSD-EPERM week trivial.
+
+Whisper QC backend (§2): `qc.py` gains `faster_whisper_transcriber()` (CTranslate2/CUDA) beside the
+mlx one, same `Transcriber` contract, and `default_transcriber()` picks mlx on macOS /
+faster-whisper on Linux with an ImportError fallback. QC decision logic untouched (injected
+transcriber). `pyproject.toml`: new `gpu` extra (tensorflow-metal on darwin, `tensorflow[and-cuda]`
+on linux; `metal` kept as alias), `qc` extra now platform-marked (mlx-whisper darwin /
+faster-whisper linux). TF pin held `>=2.16,<2.19` on both OSes for cross-machine determinism.
+
+**Pending (coordinator, on thinky):** the faster-whisper-vs-mlx label-agreement check — same
+language ID + transcript decision on a fixed real clip set — is NOT done here (needs both backends +
+the SSD clips this session couldn't read). It gates flipping QC to faster-whisper on Linux; until
+then macOS mlx is the reference.
+
+**Measured on thinky (2026-09-29, RTX 3090 Ti, Threadripper 3975WX, Linux, driver 595.84):**
+
+- Env brings up clean: `uv sync --extra gpu --extra qc` resolves the Linux markers, installs
+  `tensorflow[and-cuda]` 2.18.1 (sees GPU:0) and faster-whisper 1.2.1; `kws-doctor` reports the
+  Linux default `~/kws-data`, the GPU as CUDA, and the qc backend as faster-whisper. So the §2
+  extras and the resolver work end-to-end on Linux.
+- **Cross-machine determinism (design §4) — clears.** On thinky, `kws-codegen --check` (byte-exact
+  integer inference) and `kws-fwgen --check` (float MFCC mel/DCT/window tables, tolerance path)
+  both exit 0 against the committed Mac-generated headers. A Linux box regenerates the same
+  firmware artifacts, so training/codegen can move without drifting `gen/`. The float-table risk
+  flagged above did not materialise within the existing tolerance; header generation need not be
+  pinned to one machine.
+- **GPU training benchmark (§5).** Full deployed recipe (`--v2 --width 48 --qat --qat-epochs 20
+  --real-weight 3 --epochs 40`) on a synthetic dataset of the real shape (40k rows, 49×10, 23
+  classes; measures speed, not accuracy): **8:51 wall on the GPU vs ~26 min on the M4 CPU
+  (E49) ≈ 2.9×**. Pure GPU compute is ~1.9 s/epoch (60 epochs ≈ 2 min); the remaining ~7 min is
+  fixed overhead (TF/CUDA init, npz load, `--real-weight` row tripling, float→QAT reload, saves,
+  validation), which a faster GPU does not shrink. Batch 256 was slower than 128 (2.60 vs 1.93
+  s/epoch) — the model is overhead/data-bound, not flop-bound. thinky's real leverage is
+  throughput (the 64-thread CPU dataset build, and running a seed sweep or recipe grid
+  concurrently), plus retiring the flaky external SSD — not single-run latency.
+
+Review round (CodeRabbit, PR #110): one major, three minor — the major was real. `kws-qc` /
+`kws-tts-check` / the TTS gate still called `whisper_transcriber` (mlx) directly, so on Linux they
+would have exited before transcribing despite the new backend; all three now route through
+`default_transcriber`, and `--model` defaults to None so each backend picks its own correct model
+id (an mlx repo id and a faster-whisper name are not interchangeable). `kws-doctor` now flags a
+malformed `config.toml` ("present but INVALID") instead of silently showing "present" while its
+keys fall through to defaults. `docs/dev-setup.md` gives one combined `uv sync --extra …` command
+(uv sync is exact by default, so listing per-extra syncs as steps dropped earlier extras). The
+macOS repo-root default is kept deliberately (back-compat; SSD stays explicit via env/TOML, no
+invented machine path).
+
+Still open on thinky: the actual `kws-data` copy + full data cross-check (design §3), which needs
+the Mac SSD readable again.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
