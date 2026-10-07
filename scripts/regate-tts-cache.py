@@ -5,7 +5,7 @@ into babble in 202 of 202 sampled clips. Real clips (MSWC, `rec:`) are never tou
 
 Backs the cache up as `<cache>.pre-regate.pkl` (only if that file does not exist yet, so a
 second run cannot overwrite the original) and writes `<cache>.regate.csv`
-(word, speaker, ok, reason -- `tts_gate` returns no transcript).
+(word, speaker, ok, reason, transcript).
 
 Usage:
   uv run --no-sync python scripts/regate-tts-cache.py <cache.pkl> [--dry-run]
@@ -38,6 +38,13 @@ def main() -> int:
     clips = cached["clips"]
     tmp = Path(tempfile.mkdtemp())
     rows, counts = [], {}
+    seen: dict = {}
+
+    def watched(path):  # keep the transcript the gate looked at (as qc.tts_check does)
+        result = transcriber(path)
+        seen["text"] = result.get("text", "")
+        return result
+
     for word, items in clips.items():
         text = tts_text_for(word).lower()
         kept = []
@@ -47,8 +54,17 @@ def main() -> int:
                 continue
             wav = tmp / "clip.wav"
             sf.write(wav, clip, config.SAMPLE_RATE, subtype="PCM_16")
-            ok, reason = tts_gate(wav, text, transcriber)
-            rows.append({"word": word, "speaker": speaker, "ok": int(ok), "reason": reason or ""})
+            seen.clear()
+            ok, reason = tts_gate(wav, text, watched)
+            rows.append(
+                {
+                    "word": word,
+                    "speaker": speaker,
+                    "ok": int(ok),
+                    "reason": reason or "",
+                    "transcript": seen.get("text", "").strip(),
+                }
+            )
             if ok:
                 kept.append((clip, speaker))
         counts[word] = (len(items), len(kept))
@@ -56,7 +72,7 @@ def main() -> int:
             clips[word] = kept
     shutil.rmtree(tmp, ignore_errors=True)
     with open(a.cache.with_suffix(".regate.csv"), "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["word", "speaker", "ok", "reason"])
+        w = csv.DictWriter(fh, fieldnames=["word", "speaker", "ok", "reason", "transcript"])
         w.writeheader()
         w.writerows(rows)
     for word, (before, after) in counts.items():
