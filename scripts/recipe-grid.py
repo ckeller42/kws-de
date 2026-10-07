@@ -94,17 +94,18 @@ def beats_deployed(candidates: list[dict], deployed: dict) -> bool:
     the deployed figure). The deployed figure is the best of several draws on the scoreboard
     (E65: same data, same recipe, 62-63 of 74 vs its 67; E66: 46-48 of 51 vs 51), so a single
     run can only lose to it. A candidate is now its SEEDS: `candidates` are >= 2 runs of one
-    recipe/build (rows as `score()` returns them, `int8_test_acc` measured on the candidate
+    recipe/build (rows as `score()` returns them, `int8_real_acc` measured on the candidate
     build's test split), `deployed` the deployed model scored on that same test split. It wins
     when the mean guided-only count is within one clip of the deployed count and the mean
-    held-out INT8 accuracy is at least the deployed model's. `passes()` still applies per run."""
+    held-out INT8 accuracy on the split's REAL rows is at least the deployed model's (the TTS
+    rows measure TTS voices and carry E66's level shortcut). `passes()` still applies per run."""
     if len(candidates) < 2:
         return False
     n = float(deployed["aggregate_n"])
     mean_ok = sum(float(c["aggregate_words"]) * n for c in candidates) / len(candidates)
-    mean_int8 = sum(float(c["int8_test_acc"]) for c in candidates) / len(candidates)
+    mean_int8 = sum(float(c["int8_real_acc"]) for c in candidates) / len(candidates)
     return mean_ok >= float(deployed["aggregate_words"]) * n - 1 and mean_int8 >= float(
-        deployed["int8_test_acc"]
+        deployed["int8_real_acc"]
     )
 
 
@@ -140,6 +141,10 @@ def score(tflite_bytes: bytes, test_npz: Path) -> dict:
     X, y = d["X"], d["y"]
     preds = _tflite_predict(tflite_bytes, X)
     int8_acc = float((preds == y).mean())
+    # Real rows only (E67): the split's TTS rows measure TTS voices, and carry the
+    # level shortcut (E66) a level-matched candidate is built not to learn.
+    real = ~d["is_tts"] if "is_tts" in d.files else np.ones(len(y), bool)
+    int8_real_acc = float((preds[real] == y[real]).mean()) if real.any() else float("nan")
 
     predict_fn = make_command_predict_fn(tflite_bytes)
     res = eval_recordings(APPROVED, predict_fn, manifest_path=MANIFEST, qc_root=None)
@@ -161,6 +166,7 @@ def score(tflite_bytes: bytes, test_npz: Path) -> dict:
     aggregate_words = agg_ok / agg_n if agg_n else float("nan")
     return {
         "int8_test_acc": int8_acc,
+        "int8_real_acc": int8_real_acc,
         "words": words,
         "aggregate_words": aggregate_words,
         "aggregate_n": agg_n,

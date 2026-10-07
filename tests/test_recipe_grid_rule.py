@@ -9,7 +9,7 @@ _SPEC.loader.exec_module(grid)
 
 
 def _row(ok, n=51, int8=0.83):
-    return {"aggregate_words": ok / n, "aggregate_n": n, "int8_test_acc": int8}
+    return {"aggregate_words": ok / n, "aggregate_n": n, "int8_real_acc": int8}
 
 
 def test_beats_deployed_needs_two_seeds_within_one_clip_and_held_out_parity():
