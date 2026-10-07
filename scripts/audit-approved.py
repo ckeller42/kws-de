@@ -91,9 +91,9 @@ def sources(recordings: Path) -> dict[str, str]:
 def transcriber_or_none(enabled: bool):
     if not enabled:
         return None
-    from kws_de.qc import whisper_transcriber
+    from kws_de.qc import default_transcriber  # platform backend, not the macOS one (E66)
 
-    return whisper_transcriber()
+    return default_transcriber()
 
 
 WORD_CENTRE_TOL_MS = 150

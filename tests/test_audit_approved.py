@@ -60,3 +60,12 @@ def test_audit_word_content_check_splits_guided_vs_context(tmp_path, monkeypatch
     assert "guided" in out and "context" in out
     section = out.split("## Word content check")[1]
     assert "guided" in section and "context" in section
+
+
+def test_transcriber_routes_through_platform_default(monkeypatch):
+    # E66: the audit called the macOS backend directly, so the word-content check never
+    # ran on Linux; it must take whatever default_transcriber picks for the platform.
+    sentinel = object()
+    monkeypatch.setattr("kws_de.qc.default_transcriber", lambda: sentinel)
+    assert audit.transcriber_or_none(True) is sentinel
+    assert audit.transcriber_or_none(False) is None
