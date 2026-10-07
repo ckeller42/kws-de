@@ -71,7 +71,7 @@ def main() -> int:
         if not a.dry_run:
             clips[word] = kept
     shutil.rmtree(tmp, ignore_errors=True)
-    with open(a.cache.with_suffix(".regate.csv"), "w", newline="") as fh:
+    with open(a.cache.with_suffix(".regate.csv"), "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=["word", "speaker", "ok", "reason", "transcript"])
         w.writeheader()
         w.writerows(rows)
