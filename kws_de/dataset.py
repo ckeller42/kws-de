@@ -141,8 +141,9 @@ def build(  # pragma: no cover - I/O
             words,
             shift_ms=shift_ms,
             context_mix=context_mix if name == "train" else 0,
-            # train only, like context_mix: val/test stay identical to a build without it
-            synthetic_level=synthetic_level if name == "train" else None,
+            # every split (E68; E67 applied it to train only): a val/test TTS row at TTS
+            # level rewards the level shortcut the option exists to remove
+            synthetic_level=synthetic_level,
         )
         np.savez(config.DATA_DIR / f"{out_prefix}_{name}.npz", X=X, y=y, is_tts=is_tts)
         splits[name] = (X, y, is_tts)
@@ -194,8 +195,8 @@ def main() -> None:  # pragma: no cover - CLI wrapper
         default=None,
         metavar=("LO_DB", "HI_DB"),
         dest="synthetic_level",
-        help="scale every synthetic (TTS/clone) TRAIN clip to a random RMS level in "
-        "[LO_DB, HI_DB] dBFS before augmentation (E67; the device band is about -36 -24); "
+        help="scale every synthetic (TTS/clone) clip, all splits, to a random RMS level in "
+        "[LO_DB, HI_DB] dBFS before augmentation (E67/E68; the device band is about -36 -24); "
         "default off",
     )
     ap.add_argument("--cache", default="raw_clips_merged.pkl", help="raw clip cache under data/")
