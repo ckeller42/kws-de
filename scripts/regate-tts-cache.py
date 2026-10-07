@@ -3,8 +3,9 @@
 voice gate passes a voice on one sentence, but Piper `mls-medium#N` turned single words
 into babble in 202 of 202 sampled clips. Real clips (MSWC, `rec:`) are never touched.
 
-Backs the cache up as `<cache>.pre-regate.pkl` and writes `<cache>.regate.csv`
-(word, speaker, ok, reason, transcript).
+Backs the cache up as `<cache>.pre-regate.pkl` (only if that file does not exist yet, so a
+second run cannot overwrite the original) and writes `<cache>.regate.csv`
+(word, speaker, ok, reason -- `tts_gate` returns no transcript).
 
 Usage:
   uv run --no-sync python scripts/regate-tts-cache.py <cache.pkl> [--dry-run]
@@ -64,10 +65,12 @@ def main() -> int:
     n_ok = sum(r["ok"] for r in rows)
     print(f"tts clips: {n_ok} ok / {len(rows) - n_ok} dropped")
     if not a.dry_run:
-        shutil.copy2(a.cache, a.cache.with_suffix(".pre-regate.pkl"))
+        backup = a.cache.with_suffix(".pre-regate.pkl")
+        if not backup.exists():  # a second run must not replace the original with gated data
+            shutil.copy2(a.cache, backup)
         with open(a.cache, "wb") as fh:
             pickle.dump(cached, fh)
-        print(f"wrote {a.cache} (backup {a.cache.with_suffix('.pre-regate.pkl')})")
+        print(f"wrote {a.cache} (backup {backup})")
     return 0
 
 
