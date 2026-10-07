@@ -5091,6 +5091,55 @@ as `data/features_v3_{control,clone}_*.npz` + `manifest_v3_{control,clone}.json`
 `models/e64/<arm>_s<seed>/` and `models/e64_*`, logs and `e64-scores.json` in
 `archive/e64-logs/`. `features_v3_*.npz` there is still E62's `say`-only build.
 
+### E65 — why every retrain scores below the deployed `86b7105e`: it is the selection, not the tree (2026-10-07, exp/retrain-gap)
+
+E49, E52 and E64 all noted the same thing: honest retrains of the deployed recipe on the current
+`approved/` tree land at 62–65 of the 74 guided-only scoreboard clips, below the deployed model's
+67. The ready explanation was the tree — E45/E47/E48 rewrote the word cutter and split guided from
+context clips after `86b7105e` was trained. Tested directly here: the deployed model's own training
+data still exists (`features_v3_*.npz.pre-run4`, hash-identical to `manifest_v3_qat.json`, E37's
+build, 38,646 train rows, 23 labels in today's order). The deployed recipe (`--v2 --width 48 --qat
+--qat-epochs 20 --real-weight 3 --epochs 40`) retrained on it on thinky, seeds 0 and 1, exported
+and scored exactly as in E64:
+
+| | deployed `86b7105e` | sep06 s0 `787d1051` | sep06 s1 `ce1c9bcb` | control s0 (E64) | control s1 (E64) |
+|---|---|---|---|---|---|
+| training data | E37 build | E37 build | E37 build | current tree | current tree |
+| spk01 / spk02 / spk22 | 13 / 38 / 16 | 12 / 36 / 14 | 12 / 35 / 16 | 12 / 35 / 18 | 12 / 34 / 16 |
+| **aggregate (n=74)** | **67** | **62** | **63** | **65** | **62** |
+| false accepts (n=85) | 0 | 2 | 0 | 2 | 1 |
+| INT8 test acc (E37 test split, n=11,291) | 0.694 | 0.694 | 0.693 | — | — |
+| phrases exact intent (n=247) | 19 | 23 | 19 | 43 | 39 |
+
+**Same data, same recipe, same held-out accuracy to three decimals — and 62/63 on the scoreboard,
+not 67.** The current tree is not what costs the clips: with it the runs sit at 65/62, i.e. the same
+band. Six independent runs of this recipe are now on the current scoreboard (E49 run7 64, E64
+control 65/62, E64's E62-model 63, this entry 62/63): mean 63.2, range 62–65. `86b7105e` was picked
+in E36/E37 as the best of a grid on this very scoreboard (and E40's seeds spread 0.91–0.93 on the
+old one), so its 67 is the maximum of several draws, not the recipe's expectation — the winner's
+curse. One clip is 1.35 points; the deployed figure sits about 3 clips above the mean, which is
+exactly the spread between seeds.
+
+Per clip, the deployed model's 7 misses are all spk22 (not in its training; `an`/spk22 ×3,
+`aus`/spk22 ×2, `Küche`, `Licht`). Every retrain misses the same spk22 core and in addition 1–4
+spk01/spk02 clips (`Außen`/spk02, `auf`/spk01, `hundert`/spk02 …) that the deployed model gets —
+clips that are in training for both. Those are the seed-dependent ones.
+
+**Consequence for the deploy rule.** "Clears `passes()` and beats the deployed model" (E52) sets
+the bar at the deployed model's lucky draw; the recipe's expectation is ~4 clips lower, so an
+honest retrain fails it by construction, whatever its data. No change is made here (the rule is
+the coordinator's), but the options are: compare the mean of ≥ 2 seeds against the deployed
+figure minus the seed spread; or grow the guided-only scoreboard (74 clips is 1.35 points per
+clip) before any retrain is judged; or judge on the held-out INT8 test split as well, where
+`86b7105e` and its retrains are indistinguishable. Until one of those, the deployed model stays
+deployed by the rule, and every data improvement will keep looking like a regression.
+
+Side effect of this entry's setup, recorded for the record: `features_v3_*.npz` on thinky was
+rebuilt from `raw_clips_v3.pkl` (E62's copy was the `say`-only default-cache build, E64) and is
+byte-identical to E64's control build; the E62 files are kept as `*.e62-say-only`. The sep06
+runs: `models/e64/sep06_s{0,1}/`, logs and `sep06-scores.json` in `archive/e64-logs/`.
+`86b7105e` unchanged, `firmware/main/gen/` untouched.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
