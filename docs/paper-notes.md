@@ -5117,8 +5117,8 @@ band. Six independent runs of this recipe are now on the current scoreboard (E49
 control 65/62, E64's E62-model 63, this entry 62/63): mean 63.2, range 62–65. `86b7105e` was picked
 in E36/E37 as the best of a grid on this very scoreboard (and E40's seeds spread 0.91–0.93 on the
 old one), so its 67 is the maximum of several draws, not the recipe's expectation — the winner's
-curse. One clip is 1.35 points; the deployed figure sits about 3 clips above the mean, which is
-exactly the spread between seeds.
+curse. One clip is 1.35 points; the deployed figure sits 3.8 clips above the six-run mean of
+63.2, and the two E64 control seeds alone differ by 3 clips on identical data.
 
 Per clip, the deployed model's 7 misses are all spk22 (not in its training; `an`/spk22 ×3,
 `aus`/spk22 ×2, `Küche`, `Licht`). Every retrain misses the same spk22 core and in addition 1–4
