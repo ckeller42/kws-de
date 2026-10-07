@@ -21,7 +21,9 @@ from kws_de.data import (
 from kws_de.manifest import build_manifest
 
 
-def assemble(clips_ws, noises, rng, labels, commands, shift_ms=200, context_mix=0):
+def assemble(
+    clips_ws, noises, rng, labels, commands, shift_ms=200, context_mix=0, synthetic_level=None
+):
     """Raw (clip, speaker) dict for one split -> (X, y, is_tts). Wraps build_dataset
     (features + labels) and _origin_flags (per-row real/TTS origin, same iteration
     order) -- neither is duplicated here, just composed. TTS clips get one perturbed
@@ -40,6 +42,7 @@ def assemble(clips_ws, noises, rng, labels, commands, shift_ms=200, context_mix=
         shift_ms=shift_ms,
         context_mix=context_mix,
         speakers=speakers,
+        synthetic_level=synthetic_level,
     )
     is_tts = _origin_flags(
         clips_ws, snrs=(20, 10, 0), words=commands, perturb_tts=True, context_mix=context_mix
@@ -84,6 +87,7 @@ def build(  # pragma: no cover - I/O
     recordings_split: str = "train",
     shift_ms: int = 200,
     context_mix: int = 0,
+    synthetic_level=None,
 ):
     """Dataset build, deterministic from one seed given the cached raw clips (Piper TTS
     synthesis itself is stochastic per call, so newly-filled clips are persisted back to
@@ -137,6 +141,8 @@ def build(  # pragma: no cover - I/O
             words,
             shift_ms=shift_ms,
             context_mix=context_mix if name == "train" else 0,
+            # train only, like context_mix: val/test stay identical to a build without it
+            synthetic_level=synthetic_level if name == "train" else None,
         )
         np.savez(config.DATA_DIR / f"{out_prefix}_{name}.npz", X=X, y=y, is_tts=is_tts)
         splits[name] = (X, y, is_tts)
@@ -181,6 +187,17 @@ def main() -> None:  # pragma: no cover - CLI wrapper
         help="K multi-word context rows per train word clip (+1 gap-centred _unknown_ "
         "row each; default 0 = off, see kws_de.data.build_dataset)",
     )
+    ap.add_argument(
+        "--synthetic-level",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("LO_DB", "HI_DB"),
+        dest="synthetic_level",
+        help="scale every synthetic (TTS/clone) TRAIN clip to a random RMS level in "
+        "[LO_DB, HI_DB] dBFS before augmentation (E67; the device band is about -36 -24); "
+        "default off",
+    )
     ap.add_argument("--cache", default="raw_clips_merged.pkl", help="raw clip cache under data/")
     ap.add_argument("--prefix", default="features", help="output npz prefix (features_v3 ...)")
     ap.add_argument(
@@ -200,4 +217,5 @@ def main() -> None:  # pragma: no cover - CLI wrapper
         recordings_split=args.recordings_split,
         shift_ms=args.shift_ms,
         context_mix=args.context_mix,
+        synthetic_level=tuple(args.synthetic_level) if args.synthetic_level else None,
     )

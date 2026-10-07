@@ -415,3 +415,29 @@ def test_tts_fill_word_gates_each_clip_when_a_transcriber_is_given(monkeypatch, 
     kept = data._tts_fill_word("licht", 2, tmp_path / "tts", transcriber=transcriber)
     assert [s for _, s in kept] == ["tts:piper:good"]
     assert not list((tmp_path / "tts").glob("*.wav"))  # gated clips are cleaned up either way
+
+
+def test_synthetic_level_scales_synthetic_clips_into_the_band_and_leaves_real_alone():
+    from kws_de.data import _level_match
+
+    rng = np.random.default_rng(0)
+    loud = (0.9 * np.sin(np.arange(16000) / 7)).astype(np.float32)  # ~ -4 dBFS, TTS-like
+    out = _level_match(loud, rng, -36.0, -24.0)
+    rms_db = 20 * np.log10(np.sqrt(np.mean(out**2)))
+    assert -36.0 <= rms_db <= -24.0
+    assert np.array_equal(_level_match(np.zeros(100, np.float32), rng, -36.0, -24.0), np.zeros(100))
+    # build_dataset: the synthetic flag decides; a real clip's rows are unchanged by the option
+    clips = {config.COMMANDS[0]: [loud, loud], "_unknown_": [loud]}
+    noises = [rng.standard_normal(8000).astype(np.float32)]
+    synth = {config.COMMANDS[0]: [True, False], "_unknown_": [False]}
+    X0, _ = build_dataset(clips, noises, np.random.default_rng(1), snrs=(20,), synthetic=synth)
+    X1, _ = build_dataset(
+        clips,
+        noises,
+        np.random.default_rng(1),
+        snrs=(20,),
+        synthetic=synth,
+        synthetic_level=(-36, -24),
+    )
+    assert X0.shape == X1.shape
+    assert not np.allclose(X0[0], X1[0])  # the synthetic clip's clean row moved

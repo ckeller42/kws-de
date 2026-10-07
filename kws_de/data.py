@@ -211,6 +211,19 @@ def _random_shift(clip, rng, max_shift_ms: int = 200):
 VAN_SNRS = (0, 5, 10)  # dB — cabin-ish, noisier than the general snrs= default
 
 
+def _level_match(clip, rng, lo_db: float, hi_db: float):
+    """Scale `clip` to a random RMS level in [lo_db, hi_db] dBFS. E66: TTS clips sit at
+    -18 dBFS, device recordings at -31 (spk22 -38); with no level normalisation in the
+    MFCC front-end, absolute level separates synthetic from real. `build_dataset
+    synthetic_level=(lo, hi)` applies this to synthetic clips only (E67)."""
+    clip = np.asarray(clip, np.float32)
+    rms = float(np.sqrt(np.mean(clip**2)))
+    if rms <= 0:
+        return clip
+    target = 10 ** (rng.uniform(lo_db, hi_db) / 20)
+    return clip * (target / rms)
+
+
 def _trimmed(clip):
     """Leading/trailing silence off (same call as `kws_de.recordings.load_recordings`)."""
     import librosa
@@ -286,6 +299,7 @@ def build_dataset(
     shift_ms: int = 200,
     context_mix: int = 0,
     speakers=None,
+    synthetic_level=None,
 ):
     """Build (X, y) from raw clips. `labels`/`commands` default to the v1 vocab
     (`config.LABELS`/`config.COMMANDS`) so existing v1 callers are unaffected;
@@ -334,6 +348,8 @@ def build_dataset(
         y.append(labels.index(label))
 
     def add_word_clip(clip, label, perturbed=False):
+        if perturbed and synthetic_level is not None:
+            clip = _level_match(clip, rng, *synthetic_level)
         add(_random_shift(clip, rng, shift_ms), label)
         for snr in snrs:
             noise = noises[int(rng.integers(0, len(noises)))]
