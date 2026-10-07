@@ -5313,6 +5313,48 @@ Recommended next: level-match val/test as well (so `val_accuracy` stops rewardin
 shortcut and the all-rows INT8 figure becomes comparable), then a 3-seed run against the
 rule.
 
+### E68 — level matching on every split, three seeds: the deployed model was using the level shortcut (2026-10-07, exp/level-gain)
+
+E67 level-matched synthetic TRAIN clips only and could not read its own held-out figure: the
+test split's TTS rows stayed at −18 dBFS, so "all rows" went down while real rows went up.
+Now `--synthetic-level -36 -24` applies to every split (`features_v3_gain2_*`, same clips,
+same split draw as E66/E67's builds, 31,879 / 3,919 / 6,690 rows), and the deployed model is
+re-scored on this split like any candidate. Deployed recipe, seeds 0/1/2, scored as before:
+
+| | deployed `86b7105e` | gain2 s0 `3d80dec5` | gain2 s1 `e6063c81` | gain2 s2 `05ff578c` | mean |
+|---|---|---|---|---|---|
+| **guided-only (n=51)** | **51** | 49 | 50 | 51 | 50.0 |
+| false accepts (n=85) | 0 | 0 | 0 | 1 | |
+| phrases, exact intent (n=247) | 19 | 28 | 28 | 33 | 29.7 |
+| INT8 test, real rows (n=2,314) | 0.725 | 0.755 | 0.743 | 0.729 | **0.742** |
+| INT8 test, TTS rows, level-matched (n=4,376) | **0.741** | 0.898 | 0.901 | 0.896 | 0.898 |
+| INT8 test, all rows | 0.736 | 0.848 | 0.846 | 0.838 | |
+| val (float, best epoch) | — | 0.789 | 0.801 | 0.777 | |
+| `passes()` | PASS | PASS | PASS | FAIL (1 FA) | |
+
+**The deployed model needs the level.** On the same TTS test rows it scores 0.869 at TTS level
+(E67) and 0.741 at device level: 13 points of its held-out accuracy were the loudness of the
+synthetic rows, and the first-choice error on the field clips (E43: `Licht` read as `Außen`,
+`Lesen`) now has a candidate mechanism. The level-matched models hold 0.90 on the same rows.
+
+**Rule.** `beats_deployed()` over the three seeds: mean 50.0 is exactly the deployed 51 minus one
+clip, and the mean real-row accuracy 0.742 is above the deployed 0.725 with every seed above it
+— yes, by the letter, at the edge of clause (a) (the two passing seeds alone average 49.5 and
+would not). `passes()`: seeds 0 and 1, 0 false accepts; seed 2 fires on `spk10`'s "wie spät ist
+es" (`Licht aus`). E67's two false accepts were also spk10 negatives ("ich gehe kurz **raus**" →
+`Heizung aus`, twice; "die Kinder schlafen schon" → `Kühlschrank an`): spk10 is in training only
+as context cuts, and "raus" contains "aus". The false-accept set is 85 clips from six speakers,
+41 of them spk22; the clause is sound, the sample is thin.
+
+**Deploy decision: candidate meets the rule; left to the owner.** Standing policy is to deploy a
+candidate that clears the rule and beats the deployed model without asking. The rule it clears
+was redefined one entry ago (E67) and is unmerged, the margin on clause (a) is zero, and a deploy
+replaces the canonical model and the firmware header — so this entry stops at the recommendation:
+deploy `gain2_s1` (50/51, 0 FA, 0.743 real rows, 28/247 phrases) if the rule is accepted, after
+listening to its 50 scoreboard clips and the single spk22 miss. `--synthetic-level -36 -24` is
+left opt-in in the CLI until that decision; the build that produced these numbers is
+`features_v3_gain2_*` on thinky, models under `models/e64/gain2_s{0,1,2}/`.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
