@@ -664,8 +664,8 @@ def _tts_combo_plan(
 
 
 def tts_gate_transcriber():  # pragma: no cover - loads Whisper
-    """The transcriber the synthetic-clip gate needs: Whisper with language DETECTION on
-    (not forced to German), since catching a clip that came out English is the point.
+    """The transcriber the synthetic-clip gate needs: Whisper forced to German; the
+    content check (`kws_de.qc.tts_gate`) is what catches a clip that came out English.
     Returns None — gate disabled, every clip kept — when ``KWS_TTS_GATE=0`` or when no
     Whisper backend is installed. Uses the platform default (mlx on macOS, faster-whisper
     on Linux), so the gate works on either OS when its backend is present."""
@@ -674,7 +674,10 @@ def tts_gate_transcriber():  # pragma: no cover - loads Whisper
     try:
         from kws_de.qc import default_transcriber
 
-        return default_transcriber(language=None)
+        # Forced German, not detection (E66): on a sub-second single word Whisper's
+        # language id is noise (`say` clips: 82/120 "de", 112/120 say the word under
+        # forced de), and content catches an English voice anyway ("Licht" -> "lichten").
+        return default_transcriber(language="de")
     except Exception as e:  # noqa: BLE001 - missing/unloadable model must not fail a build
         print(f"[tts] gate disabled — no Whisper ({type(e).__name__}: {e})")
         return None

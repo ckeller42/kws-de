@@ -69,3 +69,14 @@ def test_transcriber_routes_through_platform_default(monkeypatch):
     monkeypatch.setattr("kws_de.qc.default_transcriber", lambda: sentinel)
     assert audit.transcriber_or_none(True) is sentinel
     assert audit.transcriber_or_none(False) is None
+
+
+def test_word_content_flags_does_not_judge_centre_on_a_clamped_start(tmp_path):
+    # E66: faster-whisper puts a clip's first word at start 0; the centre rule must not
+    # read that as "200 ms early". A real start that is off-centre is still flagged.
+    wav = tmp_path / "Licht.wav"
+    sf.write(wav, _tone(), 16000, subtype="PCM_16")
+    clamped = lambda _: {"words": [{"word": "Licht", "start": 0.0, "end": 0.6}]}  # noqa: E731
+    assert audit.word_content_flags(wav, "Licht", clamped) == (False, False)
+    early = lambda _: {"words": [{"word": "Licht", "start": 0.05, "end": 0.25}]}  # noqa: E731
+    assert audit.word_content_flags(wav, "Licht", early) == (False, True)
