@@ -57,6 +57,18 @@ def upweight_real(X, y, is_tts, weight: int):
     return X[idx], y[idx]
 
 
+def _check_labels(y, n_out: int, split: str) -> None:
+    """Refuse labels outside [0, n_out). Cheap, and the only place this fails the
+    same way on macOS (Metal/CPU) and Linux (CUDA) -- see the note in `train`."""
+    y = np.asarray(y)
+    if y.size and (int(y.min()) < 0 or int(y.max()) >= n_out):
+        raise ValueError(
+            f"{split} labels span {int(y.min())}..{int(y.max())} but the model has {n_out} "
+            f"outputs (config.COMMAND_LABELS has {len(config.COMMAND_LABELS)}). The npz was "
+            "built against a different vocabulary -- rebuild it with `kws-dataset build`."
+        )
+
+
 def train(
     X,
     y,
@@ -82,6 +94,14 @@ def train(
     y = np.asarray(y)
     if model is None:
         model = build_dscnn(num_classes=num_classes, width=width)
+    # Labels must fit the head. TF on CPU raises on an out-of-range label; TF on
+    # CUDA does NOT -- it trains to chance silently (val accuracy pinned at 1/N,
+    # no NaN, no error). Seen on thinky when a stale 26-class npz met the 23-class
+    # config (docs/paper-notes.md E61). Fail loudly on every platform instead.
+    n_out = int(model.output_shape[-1])
+    _check_labels(y, n_out, "train")
+    if validation_data is not None:
+        _check_labels(np.asarray(validation_data[1]), n_out, "validation")
     optimizer = "adam"
     if cosine:
         steps = epochs * math.ceil(len(y) / config.BATCH_SIZE)

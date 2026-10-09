@@ -388,3 +388,56 @@ def test_split_three_way_no_leak_across_labels():
     assert train_spk.isdisjoint(test_spk)
     assert val_spk.isdisjoint(test_spk)
     assert val_spk and test_spk
+
+
+def test_tts_fill_word_gates_each_clip_when_a_transcriber_is_given(monkeypatch, tmp_path):
+    # E66: a voice can pass the sentence gate and still babble on a single word, so with a
+    # transcriber every clip is transcribed; a clip whose transcript is not the word is dropped.
+    import soundfile as sf
+
+    from kws_de import data
+
+    def fake_synth(word, engine, voice, rate, out_wav):
+        sig = (0.3 * np.sin(np.arange(8000) / 10)).astype(np.float32)
+        sf.write(out_wav, sig, config.SAMPLE_RATE, subtype="PCM_16")
+        return sig
+
+    monkeypatch.setattr(data.tts, "synthesize", fake_synth)
+    monkeypatch.setattr(data, "tts_engines", lambda: ["piper"])
+    monkeypatch.setattr(
+        data, "_tts_combo_plan", lambda *a, **k: [("piper", "good", 160), ("piper", "babble", 160)]
+    )
+    heard = {"0": "licht", "1": "heizung"}  # job index is the wav's suffix (licht_0, licht_1)
+
+    def transcriber(path):
+        return {"language": "de", "text": heard[path.stem.rsplit("_", 1)[1]]}
+
+    kept = data._tts_fill_word("licht", 2, tmp_path / "tts", transcriber=transcriber)
+    assert [s for _, s in kept] == ["tts:piper:good"]
+    assert not list((tmp_path / "tts").glob("*.wav"))  # gated clips are cleaned up either way
+
+
+def test_synthetic_level_scales_synthetic_clips_into_the_band_and_leaves_real_alone():
+    from kws_de.data import _level_match
+
+    rng = np.random.default_rng(0)
+    loud = (0.9 * np.sin(np.arange(16000) / 7)).astype(np.float32)  # ~ -4 dBFS, TTS-like
+    out = _level_match(loud, rng, -36.0, -24.0)
+    rms_db = 20 * np.log10(np.sqrt(np.mean(out**2)))
+    assert -36.0 <= rms_db <= -24.0
+    assert np.array_equal(_level_match(np.zeros(100, np.float32), rng, -36.0, -24.0), np.zeros(100))
+    # build_dataset: the synthetic flag decides; a real clip's rows are unchanged by the option
+    clips = {config.COMMANDS[0]: [loud, loud], "_unknown_": [loud]}
+    noises = [rng.standard_normal(8000).astype(np.float32)]
+    synth = {config.COMMANDS[0]: [True, False], "_unknown_": [False]}
+    X0, _ = build_dataset(clips, noises, np.random.default_rng(1), snrs=(20,), synthetic=synth)
+    X1, _ = build_dataset(
+        clips,
+        noises,
+        np.random.default_rng(1),
+        snrs=(20,),
+        synthetic=synth,
+        synthetic_level=(-36, -24),
+    )
+    assert X0.shape == X1.shape
+    assert not np.allclose(X0[0], X1[0])  # the synthetic clip's clean row moved

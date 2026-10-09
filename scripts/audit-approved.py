@@ -91,9 +91,9 @@ def sources(recordings: Path) -> dict[str, str]:
 def transcriber_or_none(enabled: bool):
     if not enabled:
         return None
-    from kws_de.qc import whisper_transcriber
+    from kws_de.qc import default_transcriber  # platform backend, not the macOS one (E66)
 
-    return whisper_transcriber()
+    return default_transcriber()
 
 
 WORD_CENTRE_TOL_MS = 150
@@ -112,9 +112,13 @@ def word_content_flags(wav: Path, label: str, transcriber) -> tuple[bool, bool]:
     multi = sum(1 for t, _ in flat if t in _V) >= 2
     lab = normalise(label)[0]
     hit = next((w for t, w in flat if t == lab), None)
-    offcentre = hit is None or abs(
-        (float(hit["start"]) + float(hit["end"])) / 2 * 1000 - centre_ms
-    ) > (WORD_CENTRE_TOL_MS)
+    if hit is None:
+        return multi, True
+    # faster-whisper anchors a clip's first word at the segment start, which the
+    # transcriber's pad offset clamps to 0 (E66): a start of 0 is unknown, not early,
+    # so only a word with a real start is judged against the centre.
+    start, end = float(hit["start"]), float(hit["end"])
+    offcentre = start > 0 and abs((start + end) / 2 * 1000 - centre_ms) > WORD_CENTRE_TOL_MS
     return multi, offcentre
 
 
