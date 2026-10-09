@@ -5140,6 +5140,287 @@ byte-identical to E64's control build; the E62 files are kept as `*.e62-say-only
 runs: `models/e64/sep06_s{0,1}/`, logs and `sep06-scores.json` in `archive/e64-logs/`.
 `86b7105e` unchanged, `firmware/main/gen/` untouched.
 
+### E66 — data quality review: a misfiled scoreboard, a TTS pool that does not say its words, and the gates that let both through (2026-10-07, fix/data-quality)
+
+A review of what is actually in the training and test data, prompted by E65 (every retrain
+below the deployed model, every miss on spk22). The tree-level audit (`scripts/audit-approved.py
+--no-transcribe`) reports 0 problems; the problems are inside the clips. Three findings, two
+QC defects behind them, fixes for all, and a retrain to measure them.
+
+**Finding 1 — the "guided-only" scoreboard was 51 guided takes plus 23 field cuts.** spk22's
+23 clips under `approved/words/` came from QC stamp `2026-09-08-2120`: 21 field takes, cut
+by the word cutter 30 minutes after E48 landed, with a checkout that predated it, so the cuts
+went to `words/` instead of `context/` (`qc/2026-09-08-2120/words.csv` lists the source take
+and span of each). 21 of the 23 have a second vocabulary word inside their 1 s window
+(`Licht` 2880–3360 ms and `an` 3470–3740 ms of the same take, each clip's window holding
+the other); Whisper reads two words in 21/23 of them and one word in 48/51 of spk01/spk02's
+guided takes. The audit's E47/E48 content check would have flagged them — see defect A.
+These 23 clips are the whole miss core of E64/E65: on the 51 real guided takes the deployed
+model scores 51/51 and every retrain 46–48.
+
+Fix: `kws-qc incoming/2026-09-08-2120` with current code. `written.txt` cleared exactly that
+stamp's 60 files and refiled: same 26 takes, same single reject (`spk23/hey-bus/005`), the
+23 words now under `context/` (spk22 context 255 → 278), wake/phrases/negatives unchanged
+(76/247/85). `approved/words/` is now spk01 13 + spk02 38 = 51. The scoreboard before and after,
+all models scored so far (false accepts unchanged, n=85):
+
+| | deployed `86b7105e` | control s0 / s1 (E64) | sep06 s0 / s1 (E65) | clone s0 / s1 (E64) | E62 model |
+|---|---|---|---|---|---|
+| old scoreboard (n=74) | 67 | 65 / 62 | 62 / 63 | 63 / 64 | 63 |
+| guided-only (n=51) | **51** | 47 / 46 | 48 / 47 | 48 / 48 | 47 |
+| false accepts | 0 | 2 / 1 | 2 / 0 | 0 / 1 | 0 |
+
+E65's reading stands on clean data: the deployed model is a best-of-several draw; the recipe's
+expectation is ~47/51 (0.92), and one clip is now 1.96 points.
+
+**Finding 2 — half of the TTS pool did not say its word.** Whisper spot-check of
+`raw_clips_v3.pkl`, 25 clips per word per source, exact transcript match, the instrument
+calibrated on the human-verified guided takes (spk01/spk02: 48/51 exact, 51/51 contain the
+label):
+
+| source | exact | share of cached TTS |
+|---|---|---|
+| macOS `say` | 214/214 | 48 % |
+| Piper `mls-medium#N` | **0/202** | 49 % (2,342 clips) |
+| other Piper | 5/9 | 3 % |
+| MSWC (real) | 112/150 | — |
+
+`Dach` → "Heizung" (11×), `Küche` → "hübsch", "a", "Heizung", `Aufstelldach` →
+"Wetterwetterwetter", `Heizung` → "fünfzig fünfundsiebzig hundert". With their perturbed
+copies the mls clips were ~42 % of all training rows, and 14 of the 21 words have no MSWC
+clips at all, so for those words the only real speech is the device recordings. MSWC's 25 %
+is the usual crowd-sourced noise ("Richtig" for `Licht`, "tausend" for `Außen`) plus some
+Whisper hallucination; it is real speech and is left alone.
+
+Why the gate let them through (defect B): `tts_voice_gate.json` passes a VOICE on one full
+sentence (252 of 259 passed), and a Piper fill then only runs `tts_cheap_gate` (duration,
+silence) per clip. A voice that reads the gate sentence fine still turns a single word into
+babble; the failure mode is per clip, not per voice.
+
+Fix: per-clip `tts_gate` in `_tts_fill_word` whenever a transcriber is available, and
+`scripts/regate-tts-cache.py` to apply the same gate to an existing cache. First attempt
+used the gate as designed (language detection on): 3,974 of 5,722 clips dropped, 3,368 of
+them on `language:` alone — `an`, `Küche`, `zu` down to one clip, `heller` to none. On a
+sub-second single word Whisper's language id is noise: 120 `say` clips, 82 detected "de",
+95 pass content under detection, 112 under forced German; the English voice the detection
+exists for (`say` Samantha, `tts_check_sample`) still fails content under forced German
+("Licht" → "lichten"). So `tts_gate_transcriber()` is forced to German and content decides
+(`kws-tts-check` for played sentence clips keeps detection). Re-gate: 2,852 kept / 2,870
+dropped, all on content: `say` 2,666/2,783, mls 97/2,774, other Piper 89/165; every word
+keeps 118–231 clips (`raw_clips_v3.regate.csv`, backup `raw_clips_v3.pre-regate.pkl`).
+
+The rebuild's own top-up then ran through the new gate: 2,711 Piper clips synthesised on
+thinky, **61 kept** — thinky's Piper voices (`kerstin-low`, `eva_k-x_low`, `karlsson-low`
+too, not only mls) babble on single words. Build: train 31,879 (real 17,807, TTS 14,072)
+/ val 3,919 / test 6,690; the speaker draw moved with the smaller TTS pool, so the splits are
+not E64's.
+
+**Finding 3 — level is a shortcut.** TTS clips sit at −18 dBFS RMS (peak 0.97), device
+clips at −31 dBFS (peak 0.19; spk22 0.07); the MFCC front-end has no level normalisation
+and the device no AGC. Not changed here; a random-gain augmentation is the obvious next
+single-variable experiment.
+
+**Defect A — the audit's content check never ran on Linux.** `transcriber_or_none` called
+the macOS `whisper_transcriber()` directly (the class of bug #116 fixed in the CLIs); on
+thinky it raised and the check was skipped. Routed through `default_transcriber`. Running, it
+flagged 47 of 51 guided clips: faster-whisper anchors a clip's first word at the segment
+start, which the transcriber's 500 ms pad offset clamps to 0, so every single-word clip's
+midpoint read ~200 ms early. A clamped start is unknown, not early, and is no longer judged
+against the centre. Result: guided 2/51 flagged (both Whisper repetition hallucinations),
+context 573/628 (what a context cut is). Before the refile it would have flagged the 23 clips.
+
+**Retrain on the cleaned data** (deployed recipe, seeds 0/1, scored as E64/E65, scoreboard
+n=51):
+
+| | deployed `86b7105e` | regated s0 `9067d8d0` | regated s1 `a32375b5` | control s0 / s1 (E64, old data) |
+|---|---|---|---|---|
+| spk01 / spk02 | 13 / 38 | 12 / 36 | 13 / 38 | 12 / 35 — 12 / 34 |
+| **guided-only (n=51)** | **51** | **48 = 0.941** | **51 = 1.000** | 47 / 46 |
+| false accepts (n=85) | 0 | 0 | 1 | 2 / 1 |
+| phrases, exact intent (n=247) | 19 | 26 | 34 | 43 / 39 |
+| val (float, best epoch) | — | 0.796 | 0.787 | 0.684 / 0.678 |
+| INT8 test, this build's split (n=6,690) | 0.819 | 0.835 | 0.832 | — |
+| `passes()` | PASS | PASS | FAIL (1 FA) | FAIL / FAIL |
+
+Seed 1 is the first retrain since E37 to reach the deployed model's scoreboard figure, and
+both seeds beat it on the held-out INT8 test split of the cleaned build (0.835/0.832 vs
+0.819, the same 6,690 rows) and on sentence-level intent. On the 51-clip scoreboard the gain
+over E64's control (+1 and +5 clips) is inside the seed spread E65 measured, so no claim is
+made there; val 0.79 vs 0.68 is mostly the cleaner val split and not comparable. Not deployed:
+seed 1 has one false accept, seed 0 does not beat 51/51 — E65's rule problem, unchanged.
+Training rows fell from 44,078 to 31,879 (TTS 26,528 → 14,072) and the model did not get
+worse anywhere, which is the point: those rows were not teaching the words they were
+labelled with.
+
+**State on thinky.** `approved/` refiled (backup `archive/approved-pre-refile-2026-10-07.tgz`);
+`raw_clips_v3.pkl` re-gated and topped up (the detection-mode CSV is
+`archive/e64-logs/regate-detect-mode.csv`); `features_v3_*.npz` + `manifest_v3.json` are the
+cleaned build; E64's builds stay under `features_v3_{control,clone}_*`. `86b7105e` unchanged.
+
+### E67 — deploy rule over seeds, and a single-variable test of level-matching synthetic clips (2026-10-07, exp/level-gain)
+
+Two follow-ups to E65/E66, on the cleaned data.
+
+**Deploy rule: `beats_deployed()` over seeds.** E52's "beats the deployed model" compared one
+run's scoreboard count with the deployed model's — a figure that E65 and E66 showed to be the
+best of several draws (same data, same recipe: 62–63 of 74 against its 67; 46–48 of 51 against
+its 51). On the 51-clip scoreboard one clip is 1.96 points and the deployed model is at the
+ceiling, so a single run could only tie or lose. Redefined (`scripts/recipe-grid.py
+beats_deployed`, tested): a candidate is its ≥ 2 seeds of one recipe and build; it beats the
+deployed model when (a) its mean guided-only count is within one clip of the deployed count
+and (b) its mean INT8 accuracy on the REAL rows of the candidate build's held-out test split
+(MSWC strangers; the split's TTS rows measure TTS voices and carry E66's level shortcut) is
+at least the deployed model's measured on that same split. `passes()` (≥ 0.785, 0 false accepts) still
+applies to every run. Applied to E66's retrains (48 and 51 of 51; real-row INT8 0.732/0.705 vs the deployed 0.724
+on that split): mean 49.5 is below 50 and mean 0.718 below 0.724 — not a win; one false accept
+in seed 1 fails `passes()` regardless. The rule is deliberately not easier than that:
+with a scoreboard this small the clause (b) is what carries the information.
+
+**Level matching (`kws-dataset build --synthetic-level LO HI`).** E66 measured TTS clips at
+−18 dBFS RMS (peak 0.97) against device recordings at −31 dBFS (spk22 −38), with no level
+normalisation in the MFCC front-end and no AGC on the device: absolute level is a feature
+that separates synthetic from real, and quiet speech is out of the training distribution.
+`--synthetic-level -36 -24` scales every synthetic (TTS, clone) TRAIN clip to a random RMS
+level in that band — the device clips' p10–p90 — before shift/noise augmentation; real clips
+and the val/test splits are untouched, so this build shares val and test byte for byte with
+E66's (`features_v3_gain_*` vs `features_v3_*`: same 31,879 train rows, same clips, same
+split; only the synthetic rows' level and the augmentation draws differ). The top-up was
+disabled for the build (`KWS_TTS_ENGINES=" "`) so the cache stayed identical. Deployed recipe,
+seeds 0/1, scored as E64–E66:
+
+| | deployed `86b7105e` | regated s0 / s1 (E66, no level match) | gain s0 `e388c84f` / s1 `f81acb03` |
+|---|---|---|---|
+| **guided-only (n=51)** | **51** | 48 / 51 (mean 49.5) | **50 / 51 (mean 50.5)** |
+| false accepts (n=85) | 0 | 0 / 1 | 1 / 1 |
+| phrases, exact intent (n=247) | 19 | 26 / 34 | 28 / 31 |
+| INT8 test, all rows (n=6,690) | 0.819 | 0.835 / 0.832 | 0.805 / 0.792 |
+| INT8 test, real rows (n=2,314) | 0.724 | 0.732 / 0.705 (mean 0.718) | **0.752 / 0.714 (mean 0.733)** |
+| INT8 test, TTS rows (n=4,376) | 0.869 | 0.889 / 0.899 | 0.834 / 0.833 |
+| val (float, best epoch) | — | 0.796 / 0.787 | 0.758 / 0.758 |
+| `passes()` | PASS | PASS / FAIL | FAIL / FAIL (1 FA each) |
+| `beats_deployed()` | — | no (49.5 < 50; 0.718 < 0.724) | **yes** (50.5 ≥ 50; 0.733 ≥ 0.724) |
+
+Every number moved the way a removed shortcut should: real held-out speech up (+1.5 points
+mean, both seeds above E66's), the device-level scoreboard up one clip in both seeds, and the
+loud TTS test rows down 6 points — those rows are the shortcut, and val (65 % TTS at −18
+dBFS) drops with them for the same reason, so neither is evidence against the change. Two
+seeds and 51 clips do not make the scoreboard gain significant (E65's seed spread is 2–3
+clips); the real-row test (n=2,314) is the figure to trust, and it is up in both seeds. The
+gain arm is the first candidate to satisfy `beats_deployed()`; it is not deployed because
+both seeds carry one false accept (`passes()`), the same single clip in each (to be read
+per clip before the next round). Not made the default here: one experiment, two seeds.
+Recommended next: level-match val/test as well (so `val_accuracy` stops rewarding the
+shortcut and the all-rows INT8 figure becomes comparable), then a 3-seed run against the
+rule.
+
+### E68 — level matching on every split, three seeds: the deployed model was using the level shortcut (2026-10-07, exp/level-gain)
+
+E67 level-matched synthetic TRAIN clips only and could not read its own held-out figure: the
+test split's TTS rows stayed at −18 dBFS, so "all rows" went down while real rows went up.
+Now `--synthetic-level -36 -24` applies to every split (`features_v3_gain2_*`, same clips,
+same split draw as E66/E67's builds, 31,879 / 3,919 / 6,690 rows), and the deployed model is
+re-scored on this split like any candidate. Deployed recipe, seeds 0/1/2, scored as before:
+
+| | deployed `86b7105e` | gain2 s0 `3d80dec5` | gain2 s1 `e6063c81` | gain2 s2 `05ff578c` | mean |
+|---|---|---|---|---|---|
+| **guided-only (n=51)** | **51** | 49 | 50 | 51 | 50.0 |
+| false accepts (n=85) | 0 | 0 | 0 | 1 | |
+| phrases, exact intent (n=247) | 19 | 28 | 28 | 33 | 29.7 |
+| INT8 test, real rows (n=2,314) | 0.725 | 0.755 | 0.743 | 0.729 | **0.742** |
+| INT8 test, TTS rows, level-matched (n=4,376) | **0.741** | 0.898 | 0.901 | 0.896 | 0.898 |
+| INT8 test, all rows | 0.736 | 0.848 | 0.846 | 0.838 | |
+| val (float, best epoch) | — | 0.789 | 0.801 | 0.777 | |
+| `passes()` | PASS | PASS | PASS | FAIL (1 FA) | |
+
+**The deployed model needs the level.** On the same TTS test rows it scores 0.869 at TTS level
+(E67) and 0.741 at device level: 13 points of its held-out accuracy were the loudness of the
+synthetic rows, and the first-choice error on the field clips (E43: `Licht` read as `Außen`,
+`Lesen`) now has a candidate mechanism. The level-matched models hold 0.90 on the same rows.
+
+**Rule.** `beats_deployed()` over the three seeds: mean 50.0 is exactly the deployed 51 minus one
+clip, and the mean real-row accuracy 0.742 is above the deployed 0.725 with every seed above it
+— yes, by the letter, at the edge of clause (a) (the two passing seeds alone average 49.5 and
+would not). `passes()`: seeds 0 and 1, 0 false accepts; seed 2 fires on `spk10`'s "wie spät ist
+es" (`Licht aus`). E67's two false accepts were also spk10 negatives ("ich gehe kurz **raus**" →
+`Heizung aus`, twice; "die Kinder schlafen schon" → `Kühlschrank an`): spk10 is in training only
+as context cuts, and "raus" contains "aus". The false-accept set is 85 clips from six speakers,
+41 of them spk22; the clause is sound, the sample is thin.
+
+**Deploy decision: candidate meets the rule; left to the owner.** Standing policy is to deploy a
+candidate that clears the rule and beats the deployed model without asking. The rule it clears
+was redefined one entry ago (E67) and is unmerged, the margin on clause (a) is zero, and a deploy
+replaces the canonical model and the firmware header — so this entry stops at the recommendation:
+deploy `gain2_s1` (50/51, 0 FA, 0.743 real rows, 28/247 phrases) if the rule is accepted, after
+listening to its 50 scoreboard clips and the single spk22 miss. `--synthetic-level -36 -24` is
+left opt-in in the CLI until that decision; the build that produced these numbers is
+`features_v3_gain2_*` on thinky, models under `models/e64/gain2_s{0,1,2}/`.
+
+### E69 — few-shot enrollment: match against a user's own recordings instead of a fixed classifier (2026-10-09, host-only, exp/e67-enroll-match)
+
+**Question.** The owner accepts a short list of enrolled users who record their commands. Can a
+recogniser that matches new speech against those recordings (query-by-example) replace or
+back up the 23-class CNN, especially for whole sentences, where `86b7105e` gets 19/247 exact
+intents? Three arms, all behind one interface (`make_matcher(templates) -> match(sig)`):
+(a) MFCC-DTW (`mfcc_sequence`, per-utterance CMVN, length-normalised path cost); (b) the deployed
+INT8 model's 48-d global-average-pool output as embedding, prototype for short clips and cosine
+DTW over 1 s windows (hop 100 ms) for longer ones; (c) a 13,120-param DS-CNN encoder (64-d,
+L2-normalised) trained with AM-softmax plus a fixed reject logit for `_unknown_`/`_silence_`
+(after a batch-hard triplet loss collapsed every embedding to one point).
+
+**Protocol** (`scripts/e69_enroll_eval.py`). Leave-one-take-out over two pools: W = guided
+`words/` + `context/` cuts (651 held-out clips, 6 recording ids), P = `phrases/` labelled by intent
+(228 clips, 49 intents). **Every real recording is the owner's voice**: the `spkNN` ids are recording sessions
+(different days, rooms, microphones, field vs guided), not different people. Templates: at most
+5 takes per (id, label), pooled over all ids or from the query's own id only. Open set: the 85 negatives,
+streamed (W: 1 s windows every 100 ms, fire on 2 consecutive steps; P: whole clip + 2.5 s
+windows). The reject threshold is calibrated on one id fold of the negatives (spk20+spk22
+vs spk02/10/18/19) and tested on the other; "≤1 FA" is the operating point over all 85.
+
+| | W top-1 pooled | W same-id | W spk22 | W open-set AC (FA) | P top-1 pooled | P same-id | P open-set AC (FA) | P ≤1 FA | ms/match W / P |
+|---|---|---|---|---|---|---|---|---|---|
+| deployed `86b7105e` | 0.730 | — | 0.662 | — | 0.061 | — | — | — | — |
+| (a) MFCC-DTW | **0.856** | 0.782 | **0.896** | **0.610 (1)** | **0.895** | 0.868 | 0.439 (1) | **0.864** | 40 / 93 |
+| (b) deployed embedding | 0.790 | 0.727 | 0.759 | 0.244 (2) | 0.877 | 0.803 | **0.776 (1)** | 0.798 | 3.5 / 63 |
+| (c) AM-softmax s0 / s1, proto (W) | 0.757 / 0.759 | 0.71 / 0.72 | 0.709 / 0.719 | 0.386 / 0.313 (2) | 0.864 / 0.886 | 0.82 | 0.781 / 0.789 (1–2) | 0.78 | 0.6 / 61 |
+
+AC = held-out clips accepted and correct at the calibrated threshold (mean of the two folds);
+FA = false accepts summed over both test folds, out of 85.
+
+**Finding 1 — closed-set, enrollment wins.** Every arm beats the deployed model on the same clips,
+and on sentences by an order of magnitude (0.86–0.90 vs 0.06). Plain MFCC-DTW is the best arm and
+the best on spk22, the only id in no training set (0.896 vs 0.662) — an unseen session of the
+same voice, not an unseen speaker.
+
+**Finding 2 — rejection is the problem, not recognition.** At 0–1 false accepts, the best arms
+accept only 0.61 (W, DTW) and 0.78 (P, embedding) of real commands; the deploy rule's 0.785 with
+0 FA is met by none. One negative (spk18, "Lieberwurst-Bananenbrot", matched to `Licht aus`) sits at DTW
+distance 1.55 against ≥2.47 for every other negative (next: "wir sind gleich da" and
+"gläselicht an" → `Licht an`) and alone decides P/DTW (0.013 vs 0.864 depending on the fold). A d1/d2 ratio score
+helps only there and hurts elsewhere.
+
+**Finding 3 — the learned encoder does not pay.** Arm (c) roughly doubles word-pool rejection over
+(b) in proto mode, but loses closed-set accuracy and is worse on spk22; DTW-mode rejection swings
+0.24 → 0.05 between seeds; 15k steps change nothing. With 24 classes a 13k-param encoder does not
+generalise to an unseen session better than the classifier embedding. Leak check: W rows for spk02/10/18/
+19/20 were in (c)'s training (only spk22, phrases and negatives are clean of those clips; none is
+clean of the voice); without any approved
+recording W drops to 0.644, so the non-spk22 W numbers of (b) and (c) are optimistic.
+
+**Not known.** How any of this works for a second person: there is no other real voice in the
+data, so "pooled vs same-id" measures session coverage, and the negatives test rejection of the
+owner's own non-command speech only, not of passengers or radio. The result fits the actual use
+case (the owner enrolls their own commands) and says nothing beyond it. W leave-one-take-out is not session-out: neighbouring `context/` cuts of one
+sentence can be template and query (likely optimistic for W). The negatives are 85 clips, 41 of
+them from one session (spk22). Nothing ran on the device; DTW at ~380 templates costs 40–93 ms per match on a desktop
+CPU, far too slow to run every 100 ms on the ESP without pruning to the enrolled users' few
+templates.
+
+**Decision.** No deployment change. Next step if pursued: keep the wake word as the gate, run a
+single enrollment match per utterance after it (not a sliding stream), and add an explicit reject
+model or more negatives before judging open-set again. Artifacts: `scripts/e69_{enroll_eval,dtw,
+embed,triplet}.py`; models `models/e69_triplet_*` on the data host. `86b7105e` and
+`firmware/main/gen/` untouched.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

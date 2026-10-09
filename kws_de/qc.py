@@ -560,14 +560,17 @@ def tts_gate(path: Path, text: str, transcriber: Transcriber) -> tuple[bool, str
     """Is the clip at ``path`` really ``text``, really spoken in German?
 
     Cheap checks first (readable, then `tts_cheap_gate` — duration, not silent — no
-    model), then ONE transcription: the detected language must be German, and the
+    model), then ONE transcription: the reported language must be German, and the
     transcript must also pass the same content rules a recorded take does: the ``wake``
     rule for the wake phrase, the order-tolerant ``sentences`` rule for anything else.
 
-    ``transcriber`` must report the DETECTED language, i.e.
-    ``whisper_transcriber(language=None)`` — one that forces ``language="de"`` would
-    answer "de" for an English clip. A transcript carrying no language at all is
-    rejected (``language:?``) rather than trusted.
+    With a language-DETECTING ``transcriber`` (``language=None``, as `kws-tts-check` uses
+    for played sentence clips) the language check catches a clip that came out English.
+    With one forced to German (`kws_de.data.tts_gate_transcriber`, E66: detection on a
+    sub-second single word is noise) the language field is trivially "de" and the content
+    rules are the check — an English voice saying "Licht" transcribes as "lichten" and
+    fails them. A transcript carrying no language at all is rejected (``language:?``)
+    rather than trusted.
     """
     path = Path(path)
     try:
