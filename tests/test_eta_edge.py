@@ -40,8 +40,7 @@ def test_format_eta_says_single_run_not_runs(ledger):
     )
     pred = eta.predict("x", size=10.0)
     text = eta.format_eta(pred, size=10.0)
-    assert "from 1 run" in text
-    assert "runs" not in text.replace("run", "")
+    assert text.endswith("from 1 run)")
 
 
 def test_predict_ignores_zero_size_rows(ledger):
