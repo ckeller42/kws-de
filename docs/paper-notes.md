@@ -5421,6 +5421,31 @@ model or more negatives before judging open-set again. Artifacts: `scripts/e69_{
 embed,triplet}.py`; models `models/e69_triplet_*` on the data host. `86b7105e` and
 `firmware/main/gen/` untouched.
 
+### E70 — firmware moves to ESP-IDF v6.1, the satellite's framework (2026-10-09, chore/idf-6.1)
+
+Why: the plan is to run the wake word + command recogniser on the camper's ESP32-S3 satellite
+(open-california), which is built on ESP-IDF v6.1 with the M5Stack CoreS3 BSP 4.1.0. One
+framework on both sides means the recogniser can be moved over as a component instead of
+being ported at the same time. v6.1 is the newest stable IDF release at this date.
+
+What changed: IDF v5.5.5 → v6.1, BSP `^2` → `^4` (LVGL 9.6), esp_tinyusb `^1` → `^2`. The
+USB-storage code moved to esp_tinyusb 2's handle-based MSC API (`tinyusb_msc_new_storage_*`,
+mount point switched with `tinyusb_msc_set_storage_mount_point`, which does not report mount
+failures, so the mount is now checked through the VFS). The BSP's `bsp_sdcard` global became
+`bsp_sdcard_get_handle()`, and the USB-Serial-JTAG driver is now its own component. No
+inference code changed: esp-nn stays pinned at 1.3.1, so the bit-exactness chain is the same.
+
+Checked: the default build and the TFLM-fallback build compile without warnings, and the host
+parity tests pass. Size on v6.1: DIRAM 212,330 of 341,760 B, command arena 47,040 B in PSRAM,
+IRAM 100 %. Not yet checked on the device (the board was offline): recording, USB-drive mode,
+and the wake/recogniser timings all need a flash before the timings in this log can be quoted
+for v6.1.
+
+Satellite budget, for context (measured by the open-california side on its v6.1 build with
+WiFi, NimBLE and the display up): 96,719 B internal heap free, largest free block 31,744 B.
+The recogniser fits only with its wake arena and scratch as static buffers and the default
+32 KB data cache; the 64 KB cache used here would not fit.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

@@ -10,12 +10,14 @@
 #include "esp_partition.h"
 #include "esp_vfs_fat.h"
 #include "ff.h"
-#include "tusb_msc_storage.h"          /* esp_tinyusb: MSC and FAT share one media handle */
+#include "sdmmc_cmd.h"
+#include "tinyusb_msc.h"               /* esp_tinyusb: MSC and FAT share one media handle */
 #include "wear_levelling.h"
 
 static const char *TAG = "storage";
 static sdmmc_card_t *s_card;                       /* non-NULL once a microSD is the recording volume */
 static wl_handle_t s_wl = WL_INVALID_HANDLE;
+static tinyusb_msc_storage_handle_t s_msc;        /* the one medium esp_tinyusb holds */
 
 /* Four files can be open at once in the worst case: the take being written, its
    session.csv, wake.log and recognise.log. esp_tinyusb defaults to 2. */
@@ -49,14 +51,17 @@ static void sd_vfs_detach(void)
 static esp_err_t sd_init(void)
 {
     ESP_RETURN_ON_ERROR(bsp_sdcard_mount(), TAG, "microSD mount");
-    s_card = bsp_sdcard;
+    s_card = bsp_sdcard_get_handle();
     sdmmc_card_print_info(stdout, s_card);
     sd_vfs_detach();
-    const tinyusb_msc_sdmmc_config_t cfg = {
-        .card = s_card,
-        .mount_config = {.max_files = STORAGE_MAX_FILES},
+    const tinyusb_msc_storage_config_t cfg = {
+        .medium.card = s_card,
+        .fat_fs = {.base_path = (char *)BSP_SD_MOUNT_POINT, .config.max_files = STORAGE_MAX_FILES},
+        .mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP,
     };
-    return tinyusb_msc_storage_init_sdmmc(&cfg);
+    esp_err_t err = tinyusb_msc_new_storage_sdmmc(&cfg, &s_msc);
+    if (err != ESP_OK) s_card = NULL;              /* storage_root() must not point at a card nobody mounted */
+    return err;
 }
 
 static esp_err_t flash_init(void)
@@ -64,11 +69,12 @@ static esp_err_t flash_init(void)
     const esp_partition_t *part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "storage");
     ESP_RETURN_ON_FALSE(part, ESP_ERR_NOT_FOUND, TAG, "no storage partition");
     ESP_RETURN_ON_ERROR(wl_mount(part, &s_wl), TAG, "wl_mount");
-    const tinyusb_msc_spiflash_config_t cfg = {
-        .wl_handle = s_wl,
-        .mount_config = {.max_files = STORAGE_MAX_FILES},
+    const tinyusb_msc_storage_config_t cfg = {
+        .medium.wl_handle = s_wl,
+        .fat_fs = {.base_path = "/rec", .config.max_files = STORAGE_MAX_FILES},
+        .mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP,
     };
-    return tinyusb_msc_storage_init_spiflash(&cfg);
+    return tinyusb_msc_new_storage_spiflash(&cfg, &s_msc);
 }
 
 /* Write a file and read it back. A dying or counterfeit card can report every
@@ -116,9 +122,12 @@ static void set_label(void)
     ESP_LOGI(TAG, "label \"%s\" -> \"%s\" on drive %u: (%d)", label, STORAGE_LABEL, pdrv, res);
 }
 
+/* The volume is mounted for the app by now (created that way, or switched back
+   by storage_mount()). tinyusb_msc_set_storage_mount_point() swallows mount
+   failures, so whether it really is there is asked of the VFS instead. */
 static esp_err_t mount_root(void)
 {
-    esp_err_t err = tinyusb_msc_storage_mount(storage_root());
+    esp_err_t err = storage_total_bytes() ? ESP_OK : ESP_FAIL;
     if (err == ESP_OK) set_label();
     ESP_LOGI(TAG, "mount %s (%s): %s, %llu of %llu KB free", storage_root(),
              storage_is_sdcard() ? "microSD" : "flash", esp_err_to_name(err),
@@ -129,13 +138,16 @@ static esp_err_t mount_root(void)
 esp_err_t storage_mount(void)
 {
     static bool inited;
-    if (inited) return mount_root();       /* re-mount after USB mode: media already chosen */
+    if (inited) {                          /* re-mount after USB mode: media already chosen */
+        tinyusb_msc_set_storage_mount_point(s_msc, TINYUSB_MSC_STORAGE_MOUNT_APP);
+        return mount_root();
+    }
     inited = true;
     if (sd_init() == ESP_OK) {
         if (mount_root() == ESP_OK && sd_write_probe()) return ESP_OK;
         ESP_LOGE(TAG, "microSD mounted but does not keep what is written to it — ignoring the card");
-        tinyusb_msc_storage_unmount();
-        tinyusb_msc_storage_deinit();
+        tinyusb_msc_delete_storage(s_msc);
+        s_msc = NULL;
         s_card = NULL;
     }
     ESP_LOGW(TAG, "recording to the flash partition (one guided session; insert a microSD for more)");
@@ -145,7 +157,7 @@ esp_err_t storage_mount(void)
 
 esp_err_t storage_unmount(void)
 {
-    return tinyusb_msc_storage_unmount();
+    return tinyusb_msc_set_storage_mount_point(s_msc, TINYUSB_MSC_STORAGE_MOUNT_USB);
 }
 
 uint64_t storage_free_bytes(void)
