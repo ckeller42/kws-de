@@ -5393,8 +5393,9 @@ same voice, not an unseen speaker.
 
 **Finding 2 — rejection is the problem, not recognition.** At 0–1 false accepts, the best arms
 accept only 0.61 (W, DTW) and 0.78 (P, embedding) of real commands; the deploy rule's 0.785 with
-0 FA is met by none. One spk20/spk22 negative sits at DTW distance 1.55 against ≥2.47 for every
-other negative and alone decides P/DTW (0.013 vs 0.864 depending on the fold). A d1/d2 ratio score
+0 FA is met by none. One negative (spk18, "Lieberwurst-Bananenbrot", matched to `Licht aus`) sits at DTW
+distance 1.55 against ≥2.47 for every other negative (next: "wir sind gleich da" and
+"gläselicht an" → `Licht an`) and alone decides P/DTW (0.013 vs 0.864 depending on the fold). A d1/d2 ratio score
 helps only there and hurts elsewhere.
 
 **Finding 3 — the learned encoder does not pay.** Arm (c) roughly doubles word-pool rejection over
