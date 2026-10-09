@@ -21,7 +21,8 @@ permissions:
 # One run per ref, and a newer push to the same ref supersedes the older run. The
 # previous workflow-wide `pages` group was shared by every branch: pushes to two PRs a
 # few minutes apart queued in one slot and GitHub cancelled the superseded run -- which
-# was the other PR's required docs-build/firmware-docs checks (E69). Pages deploys are
+# was the other PR's required docs-build/firmware-docs checks (PRs #118/#119, 2026-10-07).
+# Pages deploys are
 # still serialised, by the deploy job's own group below.
 concurrency:
   group: docs-${{ github.ref }}
