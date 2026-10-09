@@ -5368,14 +5368,15 @@ L2-normalised) trained with AM-softmax plus a fixed reject logit for `_unknown_`
 (after a batch-hard triplet loss collapsed every embedding to one point).
 
 **Protocol** (`scripts/e69_enroll_eval.py`). Leave-one-take-out over two pools: W = guided
-`words/` + `context/` cuts (651 held-out clips, 6 speakers), P = `phrases/` labelled by intent
-(228 clips, 49 intents). Templates: at most 5 takes per (speaker, label), pooled over enrolled
-users (the device does not know who speaks) or same-speaker only. Open set: the 85 negatives,
+`words/` + `context/` cuts (651 held-out clips, 6 recording ids), P = `phrases/` labelled by intent
+(228 clips, 49 intents). **Every real recording is the owner's voice**: the `spkNN` ids are recording sessions
+(different days, rooms, microphones, field vs guided), not different people. Templates: at most
+5 takes per (id, label), pooled over all ids or from the query's own id only. Open set: the 85 negatives,
 streamed (W: 1 s windows every 100 ms, fire on 2 consecutive steps; P: whole clip + 2.5 s
-windows). The reject threshold is calibrated on one speaker fold of the negatives (spk20+spk22
+windows). The reject threshold is calibrated on one id fold of the negatives (spk20+spk22
 vs spk02/10/18/19) and tested on the other; "≤1 FA" is the operating point over all 85.
 
-| | W top-1 pooled | W same-spk | W spk22 | W open-set AC (FA) | P top-1 pooled | P same-spk | P open-set AC (FA) | P ≤1 FA | ms/match W / P |
+| | W top-1 pooled | W same-id | W spk22 | W open-set AC (FA) | P top-1 pooled | P same-id | P open-set AC (FA) | P ≤1 FA | ms/match W / P |
 |---|---|---|---|---|---|---|---|---|---|
 | deployed `86b7105e` | 0.730 | — | 0.662 | — | 0.061 | — | — | — | — |
 | (a) MFCC-DTW | **0.856** | 0.782 | **0.896** | **0.610 (1)** | **0.895** | 0.868 | 0.439 (1) | **0.864** | 40 / 93 |
@@ -5387,7 +5388,8 @@ FA = false accepts summed over both test folds, out of 85.
 
 **Finding 1 — closed-set, enrollment wins.** Every arm beats the deployed model on the same clips,
 and on sentences by an order of magnitude (0.86–0.90 vs 0.06). Plain MFCC-DTW is the best arm and
-the best on spk22, the only speaker in no training set (0.896 vs 0.662).
+the best on spk22, the only id in no training set (0.896 vs 0.662) — an unseen session of the
+same voice, not an unseen speaker.
 
 **Finding 2 — rejection is the problem, not recognition.** At 0–1 false accepts, the best arms
 accept only 0.61 (W, DTW) and 0.78 (P, embedding) of real commands; the deploy rule's 0.785 with
@@ -5398,13 +5400,17 @@ helps only there and hurts elsewhere.
 **Finding 3 — the learned encoder does not pay.** Arm (c) roughly doubles word-pool rejection over
 (b) in proto mode, but loses closed-set accuracy and is worse on spk22; DTW-mode rejection swings
 0.24 → 0.05 between seeds; 15k steps change nothing. With 24 classes a 13k-param encoder does not
-generalise to new voices better than the classifier embedding. Leak check: W rows for spk02/10/18/
-19/20 were in (c)'s training (only spk22, phrases and negatives are clean); without any approved
+generalise to an unseen session better than the classifier embedding. Leak check: W rows for spk02/10/18/
+19/20 were in (c)'s training (only spk22, phrases and negatives are clean of those clips; none is
+clean of the voice); without any approved
 recording W drops to 0.644, so the non-spk22 W numbers of (b) and (c) are optimistic.
 
-**Not known.** W leave-one-take-out is not session-out: neighbouring `context/` cuts of one
+**Not known.** How any of this works for a second person: there is no other real voice in the
+data, so "pooled vs same-id" measures session coverage, and the negatives test rejection of the
+owner's own non-command speech only, not of passengers or radio. The result fits the actual use
+case (the owner enrolls their own commands) and says nothing beyond it. W leave-one-take-out is not session-out: neighbouring `context/` cuts of one
 sentence can be template and query (likely optimistic for W). The negatives are 85 clips, 41 of
-them spk22. Nothing ran on the device; DTW at ~380 templates costs 40–93 ms per match on a desktop
+them from one session (spk22). Nothing ran on the device; DTW at ~380 templates costs 40–93 ms per match on a desktop
 CPU, far too slow to run every 100 ms on the ESP without pruning to the enrolled users' few
 templates.
 
