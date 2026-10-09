@@ -664,8 +664,8 @@ def _tts_combo_plan(
 
 
 def tts_gate_transcriber():  # pragma: no cover - loads Whisper
-    """The transcriber the synthetic-clip gate needs: Whisper with language DETECTION on
-    (not forced to German), since catching a clip that came out English is the point.
+    """The transcriber the synthetic-clip gate needs: Whisper forced to German; the
+    content check (`kws_de.qc.tts_gate`) is what catches a clip that came out English.
     Returns None — gate disabled, every clip kept — when ``KWS_TTS_GATE=0`` or when no
     Whisper backend is installed. Uses the platform default (mlx on macOS, faster-whisper
     on Linux), so the gate works on either OS when its backend is present."""
@@ -674,7 +674,10 @@ def tts_gate_transcriber():  # pragma: no cover - loads Whisper
     try:
         from kws_de.qc import default_transcriber
 
-        return default_transcriber(language=None)
+        # Forced German, not detection (E66): on a sub-second single word Whisper's
+        # language id is noise (`say` clips: 82/120 "de", 112/120 say the word under
+        # forced de), and content catches an English voice anyway ("Licht" -> "lichten").
+        return default_transcriber(language="de")
     except Exception as e:  # noqa: BLE001 - missing/unloadable model must not fail a build
         print(f"[tts] gate disabled — no Whisper ({type(e).__name__}: {e})")
         return None
@@ -728,6 +731,7 @@ def _tts_fill_word(
     tmp_dir: Path,
     max_workers: int = 4,
     voices_by_engine: dict[str, list[str]] | None = None,
+    transcriber=None,
 ) -> list:
     # pragma: no cover - shells out / loads models
     """Synthesize up to n clips of `word` across all engines from `tts_engines()`
@@ -741,10 +745,15 @@ def _tts_fill_word(
     then only needs `kws_de.qc.tts_cheap_gate` (duration, not silent — no model) before
     being kept, since the voice-level gate already answered "is this German and does
     this voice say what it's told". `voices_by_engine=None` synthesizes from every known
-    voice, ungated — the caller decides."""
+    voice, ungated — the caller decides.
+
+    With `transcriber`, every clip is ALSO transcribed (`kws_de.qc.tts_gate`): E66 found
+    a voice that reads the gate sentence fine can still turn a single word into babble
+    (Piper `mls-medium#N`: 0 of 202 sampled clips said their word), so the voice gate
+    alone is not a clip gate."""
     from concurrent.futures import ThreadPoolExecutor
 
-    from kws_de.qc import tts_cheap_gate
+    from kws_de.qc import tts_cheap_gate, tts_gate
 
     combos = _tts_combo_plan(word, n, tts_engines(), voices_by_engine)
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -753,14 +762,17 @@ def _tts_fill_word(
         i, (engine, voice, rate) = args
         wav = tmp_dir / f"{word}_{i}.wav"
         audio = tts.synthesize(word, engine, voice, rate, wav)
-        wav.unlink(missing_ok=True)
-        return None if audio is None else (audio, f"tts:{engine}:{voice}")
+        return None if audio is None else (audio, f"tts:{engine}:{voice}", wav)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         results = [r for r in ex.map(_job, enumerate(combos)) if r is not None]
     kept, dropped = [], {}
-    for audio, speaker in results:
-        ok, reason = tts_cheap_gate(audio, config.SAMPLE_RATE)
+    for audio, speaker, wav in results:
+        if transcriber is not None:  # one model, one thread: gate after the pool
+            ok, reason = tts_gate(wav, word, transcriber)
+        else:
+            ok, reason = tts_cheap_gate(audio, config.SAMPLE_RATE)
+        wav.unlink(missing_ok=True)
         if ok:
             kept.append((audio, speaker))
         else:
@@ -805,7 +817,11 @@ def _fill_with_tts(clips: dict, target: int = 300, words=None) -> dict:  # pragm
         need = target - have
         print(f"[tts] {cmd}: {have} real clips, synthesizing {need} more")
         new = _tts_fill_word(
-            tts_text_for(cmd).lower(), need, tmp_dir, voices_by_engine=voices_by_engine
+            tts_text_for(cmd).lower(),
+            need,
+            tmp_dir,
+            voices_by_engine=voices_by_engine,
+            transcriber=transcriber,
         )
         clips.setdefault(cmd, []).extend(new)
         added[cmd] = len(new)

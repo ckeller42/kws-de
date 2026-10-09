@@ -5140,6 +5140,123 @@ byte-identical to E64's control build; the E62 files are kept as `*.e62-say-only
 runs: `models/e64/sep06_s{0,1}/`, logs and `sep06-scores.json` in `archive/e64-logs/`.
 `86b7105e` unchanged, `firmware/main/gen/` untouched.
 
+### E66 — data quality review: a misfiled scoreboard, a TTS pool that does not say its words, and the gates that let both through (2026-10-07, fix/data-quality)
+
+A review of what is actually in the training and test data, prompted by E65 (every retrain
+below the deployed model, every miss on spk22). The tree-level audit (`scripts/audit-approved.py
+--no-transcribe`) reports 0 problems; the problems are inside the clips. Three findings, two
+QC defects behind them, fixes for all, and a retrain to measure them.
+
+**Finding 1 — the "guided-only" scoreboard was 51 guided takes plus 23 field cuts.** spk22's
+23 clips under `approved/words/` came from QC stamp `2026-09-08-2120`: 21 field takes, cut
+by the word cutter 30 minutes after E48 landed, with a checkout that predated it, so the cuts
+went to `words/` instead of `context/` (`qc/2026-09-08-2120/words.csv` lists the source take
+and span of each). 21 of the 23 have a second vocabulary word inside their 1 s window
+(`Licht` 2880–3360 ms and `an` 3470–3740 ms of the same take, each clip's window holding
+the other); Whisper reads two words in 21/23 of them and one word in 48/51 of spk01/spk02's
+guided takes. The audit's E47/E48 content check would have flagged them — see defect A.
+These 23 clips are the whole miss core of E64/E65: on the 51 real guided takes the deployed
+model scores 51/51 and every retrain 46–48.
+
+Fix: `kws-qc incoming/2026-09-08-2120` with current code. `written.txt` cleared exactly that
+stamp's 60 files and refiled: same 26 takes, same single reject (`spk23/hey-bus/005`), the
+23 words now under `context/` (spk22 context 255 → 278), wake/phrases/negatives unchanged
+(76/247/85). `approved/words/` is now spk01 13 + spk02 38 = 51. The scoreboard before and after,
+all models scored so far (false accepts unchanged, n=85):
+
+| | deployed `86b7105e` | control s0 / s1 (E64) | sep06 s0 / s1 (E65) | clone s0 / s1 (E64) | E62 model |
+|---|---|---|---|---|---|
+| old scoreboard (n=74) | 67 | 65 / 62 | 62 / 63 | 63 / 64 | 63 |
+| guided-only (n=51) | **51** | 47 / 46 | 48 / 47 | 48 / 48 | 47 |
+| false accepts | 0 | 2 / 1 | 2 / 0 | 0 / 1 | 0 |
+
+E65's reading stands on clean data: the deployed model is a best-of-several draw; the recipe's
+expectation is ~47/51 (0.92), and one clip is now 1.96 points.
+
+**Finding 2 — half of the TTS pool did not say its word.** Whisper spot-check of
+`raw_clips_v3.pkl`, 25 clips per word per source, exact transcript match, the instrument
+calibrated on the human-verified guided takes (spk01/spk02: 48/51 exact, 51/51 contain the
+label):
+
+| source | exact | share of cached TTS |
+|---|---|---|
+| macOS `say` | 214/214 | 48 % |
+| Piper `mls-medium#N` | **0/202** | 49 % (2,342 clips) |
+| other Piper | 5/9 | 3 % |
+| MSWC (real) | 112/150 | — |
+
+`Dach` → "Heizung" (11×), `Küche` → "hübsch", "a", "Heizung", `Aufstelldach` →
+"Wetterwetterwetter", `Heizung` → "fünfzig fünfundsiebzig hundert". With their perturbed
+copies the mls clips were ~42 % of all training rows, and 14 of the 21 words have no MSWC
+clips at all, so for those words the only real speech is the device recordings. MSWC's 25 %
+is the usual crowd-sourced noise ("Richtig" for `Licht`, "tausend" for `Außen`) plus some
+Whisper hallucination; it is real speech and is left alone.
+
+Why the gate let them through (defect B): `tts_voice_gate.json` passes a VOICE on one full
+sentence (252 of 259 passed), and a Piper fill then only runs `tts_cheap_gate` (duration,
+silence) per clip. A voice that reads the gate sentence fine still turns a single word into
+babble; the failure mode is per clip, not per voice.
+
+Fix: per-clip `tts_gate` in `_tts_fill_word` whenever a transcriber is available, and
+`scripts/regate-tts-cache.py` to apply the same gate to an existing cache. First attempt
+used the gate as designed (language detection on): 3,974 of 5,722 clips dropped, 3,368 of
+them on `language:` alone — `an`, `Küche`, `zu` down to one clip, `heller` to none. On a
+sub-second single word Whisper's language id is noise: 120 `say` clips, 82 detected "de",
+95 pass content under detection, 112 under forced German; the English voice the detection
+exists for (`say` Samantha, `tts_check_sample`) still fails content under forced German
+("Licht" → "lichten"). So `tts_gate_transcriber()` is forced to German and content decides
+(`kws-tts-check` for played sentence clips keeps detection). Re-gate: 2,852 kept / 2,870
+dropped, all on content: `say` 2,666/2,783, mls 97/2,774, other Piper 89/165; every word
+keeps 118–231 clips (`raw_clips_v3.regate.csv`, backup `raw_clips_v3.pre-regate.pkl`).
+
+The rebuild's own top-up then ran through the new gate: 2,711 Piper clips synthesised on
+thinky, **61 kept** — thinky's Piper voices (`kerstin-low`, `eva_k-x_low`, `karlsson-low`
+too, not only mls) babble on single words. Build: train 31,879 (real 17,807, TTS 14,072)
+/ val 3,919 / test 6,690; the speaker draw moved with the smaller TTS pool, so the splits are
+not E64's.
+
+**Finding 3 — level is a shortcut.** TTS clips sit at −18 dBFS RMS (peak 0.97), device
+clips at −31 dBFS (peak 0.19; spk22 0.07); the MFCC front-end has no level normalisation
+and the device no AGC. Not changed here; a random-gain augmentation is the obvious next
+single-variable experiment.
+
+**Defect A — the audit's content check never ran on Linux.** `transcriber_or_none` called
+the macOS `whisper_transcriber()` directly (the class of bug #116 fixed in the CLIs); on
+thinky it raised and the check was skipped. Routed through `default_transcriber`. Running, it
+flagged 47 of 51 guided clips: faster-whisper anchors a clip's first word at the segment
+start, which the transcriber's 500 ms pad offset clamps to 0, so every single-word clip's
+midpoint read ~200 ms early. A clamped start is unknown, not early, and is no longer judged
+against the centre. Result: guided 2/51 flagged (both Whisper repetition hallucinations),
+context 573/628 (what a context cut is). Before the refile it would have flagged the 23 clips.
+
+**Retrain on the cleaned data** (deployed recipe, seeds 0/1, scored as E64/E65, scoreboard
+n=51):
+
+| | deployed `86b7105e` | regated s0 `9067d8d0` | regated s1 `a32375b5` | control s0 / s1 (E64, old data) |
+|---|---|---|---|---|
+| spk01 / spk02 | 13 / 38 | 12 / 36 | 13 / 38 | 12 / 35 — 12 / 34 |
+| **guided-only (n=51)** | **51** | **48 = 0.941** | **51 = 1.000** | 47 / 46 |
+| false accepts (n=85) | 0 | 0 | 1 | 2 / 1 |
+| phrases, exact intent (n=247) | 19 | 26 | 34 | 43 / 39 |
+| val (float, best epoch) | — | 0.796 | 0.787 | 0.684 / 0.678 |
+| INT8 test, this build's split (n=6,690) | 0.819 | 0.835 | 0.832 | — |
+| `passes()` | PASS | PASS | FAIL (1 FA) | FAIL / FAIL |
+
+Seed 1 is the first retrain since E37 to reach the deployed model's scoreboard figure, and
+both seeds beat it on the held-out INT8 test split of the cleaned build (0.835/0.832 vs
+0.819, the same 6,690 rows) and on sentence-level intent. On the 51-clip scoreboard the gain
+over E64's control (+1 and +5 clips) is inside the seed spread E65 measured, so no claim is
+made there; val 0.79 vs 0.68 is mostly the cleaner val split and not comparable. Not deployed:
+seed 1 has one false accept, seed 0 does not beat 51/51 — E65's rule problem, unchanged.
+Training rows fell from 44,078 to 31,879 (TTS 26,528 → 14,072) and the model did not get
+worse anywhere, which is the point: those rows were not teaching the words they were
+labelled with.
+
+**State on thinky.** `approved/` refiled (backup `archive/approved-pre-refile-2026-10-07.tgz`);
+`raw_clips_v3.pkl` re-gated and topped up (the detection-mode CSV is
+`archive/e64-logs/regate-detect-mode.csv`); `features_v3_*.npz` + `manifest_v3.json` are the
+cleaned build; E64's builds stay under `features_v3_{control,clone}_*`. `86b7105e` unchanged.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
