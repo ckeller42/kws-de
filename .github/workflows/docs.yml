@@ -18,9 +18,14 @@ permissions:
   pages: write
   id-token: write
 
+# One run per ref, and a newer push to the same ref supersedes the older run. The
+# previous workflow-wide `pages` group was shared by every branch: pushes to two PRs a
+# few minutes apart queued in one slot and GitHub cancelled the superseded run -- which
+# was the other PR's required docs-build/firmware-docs checks (E69). Pages deploys are
+# still serialised, by the deploy job's own group below.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   docs-build:
@@ -51,6 +56,9 @@ jobs:
   deploy:
     needs: docs-build
     if: github.event_name != 'pull_request'
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     environment:
       name: github-pages
