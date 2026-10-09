@@ -23,10 +23,12 @@ permissions:
 # few minutes apart queued in one slot and GitHub cancelled the superseded run -- which
 # was the other PR's required docs-build/firmware-docs checks (PRs #118/#119, 2026-10-07).
 # Pages deploys are
-# still serialised, by the deploy job's own group below.
+# still serialised, by the deploy job's own group below. A run on main is never
+# cancelled: that would interrupt an in-flight deploy, which the job-level group does
+# not protect against.
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   docs-build:
