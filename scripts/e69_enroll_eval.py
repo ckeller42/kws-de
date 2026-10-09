@@ -11,12 +11,18 @@ label) (lowest takes, guided words before context), pooled over all speakers (th
 device does not know who speaks) or same-speaker only.
 
 Open set: approved/negatives, W = trailing 1 s window every 100 ms (the device
-stream), false accept = best distance < threshold on 2 consecutive steps; P = whole
-clip + 2.5 s windows every 100 ms, false accept on any. The threshold is the largest
-with 0 false accepts ON THE TEST NEGATIVES -- optimistic, no separate calibration set.
+stream), false accept = score < threshold on 2 consecutive steps; P = whole clip +
+2.5 s windows every 100 ms, false accept on any. Score (--norm): none = best
+distance d1, margin = d1/d2 (best over second-best label; lower = more confident).
+Accept-and-correct = held-out clip's top label right AND its score < threshold.
+Threshold calibration is speaker-disjoint: negatives split by speaker into 2 folds
+(greedy by clip count), threshold = largest with 0 FA on one fold, FA counted on the
+other, then swapped. The old number (calibrated and counted on all negatives) is kept
+as a labelled optimistic row. Plus a 30-quantile threshold sweep (FA vs
+accept-and-correct) and the operating points at <=1 and <=2 FA on all negatives.
 
 Usage:
-  uv run --no-sync python scripts/e69_enroll_eval.py --arm dtw --pool both
+  uv run --no-sync python scripts/e69_enroll_eval.py --arm dtw --pool both --norm margin
 """
 
 import argparse
@@ -27,7 +33,7 @@ import math
 import os
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -40,14 +46,33 @@ from kws_de.eval import _stream_posteriors, intent_text, prompt_intent
 SCRIPTS = Path(__file__).resolve().parent
 STEP = config.SAMPLE_RATE // 10  # 100 ms
 P_WIN = config.SAMPLE_RATE * 5 // 2  # 2.5 s
-SCALES = (0.5, 1.0, 2.0)
+N_QUANTILES = 30
+OP_FA = (1, 2)
 
 # Worker state, set before the fork (read-only in workers).
 ARM = None
 CLIPS: dict[str, list[dict]] = {}
 NEG: list[np.ndarray] = []
+NEG_SPK: list[str] = []
 MAX_TAKES = 5
+NORM = "none"
 _FULL: dict = {}
+
+
+def score(ranked: list[tuple[str, float]]) -> float:
+    """Rejection score of a match result, lower = more confident."""
+    if NORM == "margin":
+        return ranked[0][1] / max(ranked[1][1], 1e-12) if len(ranked) > 1 else 1.0
+    return ranked[0][1]
+
+
+def speaker_folds(spks: list[str]) -> np.ndarray:
+    """Fold (0/1) per clip: speakers, largest first, go to the lighter fold."""
+    load, fold = [0, 0], {}
+    for s, n in sorted(Counter(spks).items(), key=lambda x: (-x[1], x[0])):
+        fold[s] = load.index(min(load))
+        load[fold[s]] += n
+    return np.array([fold[s] for s in spks])
 
 
 def load_arm(name: str):
@@ -99,8 +124,8 @@ def _loto(task):
     pool, h, same_spk = task
     match = ARM.make_matcher(templates(CLIPS[pool], h, same_spk))
     t = time.perf_counter()
-    lab, d = match(CLIPS[pool][h]["sig"])[0]
-    return lab, d, (time.perf_counter() - t) * 1e3
+    ranked = match(CLIPS[pool][h]["sig"])
+    return ranked[0][0], score(ranked), (time.perf_counter() - t) * 1e3
 
 
 def _full_matcher(pool):
@@ -114,7 +139,7 @@ def _neg_fire_level(task) -> float:
     """Smallest threshold above which this negative clip fires (inf: never)."""
     pool, j = task
     match, sig = _full_matcher(pool), NEG[j]
-    best = lambda w: match(w)[0][1]  # noqa: E731
+    best = lambda w: score(match(w))  # noqa: E731
     if pool == "W":
         d = [float(x) for x in _stream_posteriors(best, sig, STEP)]
         return min((max(a, b) for a, b in zip(d, d[1:], strict=False)), default=math.inf)
@@ -178,25 +203,44 @@ def run_pool(pool: str, args, pmap) -> dict:
         ts.append((time.perf_counter() - t) * 1e3)
     res["ms_per_match"] = float(np.mean(ts))
     levels = pmap(_neg_fire_level, [(pool, j) for j in negs])
-    thr = min(levels)
-    res["open_set"] = {
-        "note": "threshold calibrated on the test negatives (largest with 0 FA): optimistic",
-        "n_negatives": len(negs),
-        "curve": [
-            {
-                "scale": s,
-                "threshold": thr * s,
-                "false_accepts": sum(lv < thr * s for lv in levels),
-                "accept_correct": sum(
-                    lab == clips[h]["label"] and d < thr * s
-                    for h, (lab, d, _) in zip(held, pooled, strict=True)
-                ) / len(held),
-            }
-            for s in SCALES
-        ],
-    }  # fmt: skip
+    correct = [lab == clips[h]["label"] for h, (lab, _, _) in zip(held, pooled, strict=True)]
+    res["open_set"] = open_set(
+        levels, [NEG_SPK[j] for j in negs], [s for _, s, _ in pooled], correct
+    )
     res["deployed"] = acc_rows(clips, held, baseline(pool, clips, held))
     return res
+
+
+def open_set(levels, neg_spk, scores, correct) -> dict:
+    """levels: per negative, the threshold above which it fires; scores/correct: held-out."""
+    lv, s, ok = np.array(levels), np.array(scores), np.array(correct, dtype=bool)
+
+    def point(thr, test=lv) -> dict:
+        return {
+            "threshold": float(thr),
+            "false_accepts": int((test < thr).sum()),
+            "n_test": len(test),
+            "accept_correct": float(np.mean(ok & (s < thr))),
+        }
+
+    fold = speaker_folds(neg_spk)
+    spk = [sorted({x for x, f in zip(neg_spk, fold, strict=True) if f == k}) for k in (0, 1)]
+    disjoint = [
+        {"calibrate": spk[a], "test": spk[1 - a], **point(lv[fold == a].min(), lv[fold != a])}
+        for a in (0, 1)
+    ]
+    pooled = np.concatenate([s, lv[np.isfinite(lv)]])
+    grid = np.unique(np.quantile(pooled, np.linspace(0, 1, N_QUANTILES)))
+    srt = np.sort(lv)
+    return {
+        "n_negatives": len(lv),
+        "norm": NORM,
+        "speaker_disjoint": disjoint,
+        "disjoint_fa_sum": sum(d["false_accepts"] for d in disjoint),
+        "optimistic": point(lv.min()),  # calibrated and counted on the same negatives
+        "operating_points": {k: point(srt[k] if k < len(srt) else math.inf) for k in OP_FA},
+        "curve": [point(t) for t in grid],
+    }
 
 
 def render(arm: str, results: dict) -> str:
@@ -219,25 +263,52 @@ def render(arm: str, results: dict) -> str:
             cells = [f"{row['per_spk'][s]['acc']:.3f} ({row['per_spk'][s]['n']})" for s in spks]
             out.append(f"| {name} | {row['acc']:.3f} ({row['n']}) | " + " | ".join(cells) + " |")
         o = r["open_set"]
+        n = o["n_negatives"]
         out += [
             "",
-            f"Open set ({o['n_negatives']} negatives; {o['note']}):",
+            f"Open set, score `{o['norm']}` ({n} negatives), speaker-disjoint calibration "
+            "(threshold = largest with 0 FA on the calibration fold):",
             "",
-            "| threshold | false accepts | held-out accept-and-correct |",
+            "| calibrate on | test on | threshold | FA on test fold | accept-and-correct |",
+            "|---|---|---|---|---|",
+        ]
+        rows = [(",".join(d["calibrate"]), ",".join(d["test"]), d) for d in o["speaker_disjoint"]]
+        rows.append(("all (optimistic)", "same negatives", o["optimistic"]))
+        for cal, test, d in rows:
+            out.append(
+                f"| {cal} | {test} ({d['n_test']}) | {d['threshold']:.4f} | "
+                f"{d['false_accepts']} | {d['accept_correct']:.3f} |"
+            )
+        acs = [d["accept_correct"] for d in o["speaker_disjoint"]]
+        out.append(f"| sum / mean | | | {o['disjoint_fa_sum']} | {np.mean(acs):.3f} |")
+        out += ["", f"Operating points on all {n} negatives:", ""]
+        for k, d in o["operating_points"].items():
+            out.append(
+                f"- <={k} FA: threshold {d['threshold']:.4f}, {d['false_accepts']} FA, "
+                f"accept-and-correct {d['accept_correct']:.3f}"
+            )
+        curve = o["curve"]
+        k = next((i for i, c in enumerate(curve) if c["false_accepts"]), len(curve))
+        out += [
+            "",
+            f"Threshold sweep ({len(curve)} quantiles of held-out scores + negative levels; "
+            "rows around the first FA):",
+            "",
+            "| threshold | FA | accept-and-correct |",
             "|---|---|---|",
         ]
-        for c in o["curve"]:
+        for c in curve[max(0, k - 6) : k + 6]:
             out.append(
-                f"| {c['scale']}x = {c['threshold']:.3f} | {c['false_accepts']} | "
-                f"{c['accept_correct']:.3f} |"
+                f"| {c['threshold']:.4f} | {c['false_accepts']} | {c['accept_correct']:.3f} |"
             )
         out.append("")
     return "\n".join(out)
 
 
 def main() -> None:
-    global ARM, MAX_TAKES
+    global ARM, MAX_TAKES, NORM
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--norm", default="none", choices=["none", "margin"])
     ap.add_argument("--arm", required=True, help="dtw | embed -> scripts/e69_<arm>.py")
     ap.add_argument("--pool", default="both", choices=["W", "P", "both"])
     ap.add_argument("--max-takes", type=int, default=5)
@@ -246,12 +317,14 @@ def main() -> None:
     ap.add_argument("--approved", type=Path, default=config.DATA_DIR / "recordings" / "approved")
     args = ap.parse_args()
 
-    ARM, MAX_TAKES = load_arm(args.arm), args.max_takes
+    ARM, MAX_TAKES, NORM = load_arm(args.arm), args.max_takes, args.norm
     pools = ["W", "P"] if args.pool == "both" else [args.pool]
     for p in pools:
         CLIPS[p] = load_pool(args.approved, p)
     with (args.approved / "negatives" / "index.csv").open() as fh:
-        NEG.extend(_read(args.approved / r["file"]) for r in csv.DictReader(fh))
+        for r in csv.DictReader(fh):
+            NEG.append(_read(args.approved / r["file"]))
+            NEG_SPK.append(r["speaker"])
 
     results = {}
     for p in pools:
@@ -261,11 +334,25 @@ def main() -> None:
         else:
             results[p] = run_pool(p, args, lambda f, xs: [f(x) for x in xs])
 
-    print(render(args.arm, results))
-    out = SCRIPTS.parent / ".e67" / f"results-{args.arm}.json"
+    mode = getattr(ARM, "MODE", None)  # e.g. E69_EMBED_MODE
+    name = "-".join(x for x in (args.arm, mode, args.pool, NORM) if x and x != "auto")
+    if args.limit:
+        name += f"-limit{args.limit}"
+    report = render(name, results)
+    print(report)
+    out = SCRIPTS.parent / ".e67" / f"results-{name}"
     out.parent.mkdir(exist_ok=True)
-    meta = {"arm": args.arm, "max_takes": MAX_TAKES, "limit": args.limit}
-    out.write_text(json.dumps({**meta, "pools": results}, indent=2, ensure_ascii=False) + "\n")
+    out.with_suffix(".md").write_text(report)
+    meta = {
+        "arm": args.arm,
+        "mode": mode,
+        "norm": NORM,
+        "max_takes": MAX_TAKES,
+        "limit": args.limit,
+    }
+    out.with_suffix(".json").write_text(
+        json.dumps({**meta, "pools": results}, indent=2, ensure_ascii=False) + "\n"
+    )
 
 
 if __name__ == "__main__":
