@@ -5257,6 +5257,104 @@ labelled with.
 `archive/e64-logs/regate-detect-mode.csv`); `features_v3_*.npz` + `manifest_v3.json` are the
 cleaned build; E64's builds stay under `features_v3_{control,clone}_*`. `86b7105e` unchanged.
 
+### E67 — deploy rule over seeds, and a single-variable test of level-matching synthetic clips (2026-10-07, exp/level-gain)
+
+Two follow-ups to E65/E66, on the cleaned data.
+
+**Deploy rule: `beats_deployed()` over seeds.** E52's "beats the deployed model" compared one
+run's scoreboard count with the deployed model's — a figure that E65 and E66 showed to be the
+best of several draws (same data, same recipe: 62–63 of 74 against its 67; 46–48 of 51 against
+its 51). On the 51-clip scoreboard one clip is 1.96 points and the deployed model is at the
+ceiling, so a single run could only tie or lose. Redefined (`scripts/recipe-grid.py
+beats_deployed`, tested): a candidate is its ≥ 2 seeds of one recipe and build; it beats the
+deployed model when (a) its mean guided-only count is within one clip of the deployed count
+and (b) its mean INT8 accuracy on the REAL rows of the candidate build's held-out test split
+(MSWC strangers; the split's TTS rows measure TTS voices and carry E66's level shortcut) is
+at least the deployed model's measured on that same split. `passes()` (≥ 0.785, 0 false accepts) still
+applies to every run. Applied to E66's retrains (48 and 51 of 51; real-row INT8 0.732/0.705 vs the deployed 0.724
+on that split): mean 49.5 is below 50 and mean 0.718 below 0.724 — not a win; one false accept
+in seed 1 fails `passes()` regardless. The rule is deliberately not easier than that:
+with a scoreboard this small the clause (b) is what carries the information.
+
+**Level matching (`kws-dataset build --synthetic-level LO HI`).** E66 measured TTS clips at
+−18 dBFS RMS (peak 0.97) against device recordings at −31 dBFS (spk22 −38), with no level
+normalisation in the MFCC front-end and no AGC on the device: absolute level is a feature
+that separates synthetic from real, and quiet speech is out of the training distribution.
+`--synthetic-level -36 -24` scales every synthetic (TTS, clone) TRAIN clip to a random RMS
+level in that band — the device clips' p10–p90 — before shift/noise augmentation; real clips
+and the val/test splits are untouched, so this build shares val and test byte for byte with
+E66's (`features_v3_gain_*` vs `features_v3_*`: same 31,879 train rows, same clips, same
+split; only the synthetic rows' level and the augmentation draws differ). The top-up was
+disabled for the build (`KWS_TTS_ENGINES=" "`) so the cache stayed identical. Deployed recipe,
+seeds 0/1, scored as E64–E66:
+
+| | deployed `86b7105e` | regated s0 / s1 (E66, no level match) | gain s0 `e388c84f` / s1 `f81acb03` |
+|---|---|---|---|
+| **guided-only (n=51)** | **51** | 48 / 51 (mean 49.5) | **50 / 51 (mean 50.5)** |
+| false accepts (n=85) | 0 | 0 / 1 | 1 / 1 |
+| phrases, exact intent (n=247) | 19 | 26 / 34 | 28 / 31 |
+| INT8 test, all rows (n=6,690) | 0.819 | 0.835 / 0.832 | 0.805 / 0.792 |
+| INT8 test, real rows (n=2,314) | 0.724 | 0.732 / 0.705 (mean 0.718) | **0.752 / 0.714 (mean 0.733)** |
+| INT8 test, TTS rows (n=4,376) | 0.869 | 0.889 / 0.899 | 0.834 / 0.833 |
+| val (float, best epoch) | — | 0.796 / 0.787 | 0.758 / 0.758 |
+| `passes()` | PASS | PASS / FAIL | FAIL / FAIL (1 FA each) |
+| `beats_deployed()` | — | no (49.5 < 50; 0.718 < 0.724) | **yes** (50.5 ≥ 50; 0.733 ≥ 0.724) |
+
+Every number moved the way a removed shortcut should: real held-out speech up (+1.5 points
+mean, both seeds above E66's), the device-level scoreboard up one clip in both seeds, and the
+loud TTS test rows down 6 points — those rows are the shortcut, and val (65 % TTS at −18
+dBFS) drops with them for the same reason, so neither is evidence against the change. Two
+seeds and 51 clips do not make the scoreboard gain significant (E65's seed spread is 2–3
+clips); the real-row test (n=2,314) is the figure to trust, and it is up in both seeds. The
+gain arm is the first candidate to satisfy `beats_deployed()`; it is not deployed because
+both seeds carry one false accept (`passes()`), the same single clip in each (to be read
+per clip before the next round). Not made the default here: one experiment, two seeds.
+Recommended next: level-match val/test as well (so `val_accuracy` stops rewarding the
+shortcut and the all-rows INT8 figure becomes comparable), then a 3-seed run against the
+rule.
+
+### E68 — level matching on every split, three seeds: the deployed model was using the level shortcut (2026-10-07, exp/level-gain)
+
+E67 level-matched synthetic TRAIN clips only and could not read its own held-out figure: the
+test split's TTS rows stayed at −18 dBFS, so "all rows" went down while real rows went up.
+Now `--synthetic-level -36 -24` applies to every split (`features_v3_gain2_*`, same clips,
+same split draw as E66/E67's builds, 31,879 / 3,919 / 6,690 rows), and the deployed model is
+re-scored on this split like any candidate. Deployed recipe, seeds 0/1/2, scored as before:
+
+| | deployed `86b7105e` | gain2 s0 `3d80dec5` | gain2 s1 `e6063c81` | gain2 s2 `05ff578c` | mean |
+|---|---|---|---|---|---|
+| **guided-only (n=51)** | **51** | 49 | 50 | 51 | 50.0 |
+| false accepts (n=85) | 0 | 0 | 0 | 1 | |
+| phrases, exact intent (n=247) | 19 | 28 | 28 | 33 | 29.7 |
+| INT8 test, real rows (n=2,314) | 0.725 | 0.755 | 0.743 | 0.729 | **0.742** |
+| INT8 test, TTS rows, level-matched (n=4,376) | **0.741** | 0.898 | 0.901 | 0.896 | 0.898 |
+| INT8 test, all rows | 0.736 | 0.848 | 0.846 | 0.838 | |
+| val (float, best epoch) | — | 0.789 | 0.801 | 0.777 | |
+| `passes()` | PASS | PASS | PASS | FAIL (1 FA) | |
+
+**The deployed model needs the level.** On the same TTS test rows it scores 0.869 at TTS level
+(E67) and 0.741 at device level: 13 points of its held-out accuracy were the loudness of the
+synthetic rows, and the first-choice error on the field clips (E43: `Licht` read as `Außen`,
+`Lesen`) now has a candidate mechanism. The level-matched models hold 0.90 on the same rows.
+
+**Rule.** `beats_deployed()` over the three seeds: mean 50.0 is exactly the deployed 51 minus one
+clip, and the mean real-row accuracy 0.742 is above the deployed 0.725 with every seed above it
+— yes, by the letter, at the edge of clause (a) (the two passing seeds alone average 49.5 and
+would not). `passes()`: seeds 0 and 1, 0 false accepts; seed 2 fires on `spk10`'s "wie spät ist
+es" (`Licht aus`). E67's two false accepts were also spk10 negatives ("ich gehe kurz **raus**" →
+`Heizung aus`, twice; "die Kinder schlafen schon" → `Kühlschrank an`): spk10 is in training only
+as context cuts, and "raus" contains "aus". The false-accept set is 85 clips from six speakers,
+41 of them spk22; the clause is sound, the sample is thin.
+
+**Deploy decision: candidate meets the rule; left to the owner.** Standing policy is to deploy a
+candidate that clears the rule and beats the deployed model without asking. The rule it clears
+was redefined one entry ago (E67) and is unmerged, the margin on clause (a) is zero, and a deploy
+replaces the canonical model and the firmware header — so this entry stops at the recommendation:
+deploy `gain2_s1` (50/51, 0 FA, 0.743 real rows, 28/247 phrases) if the rule is accepted, after
+listening to its 50 scoreboard clips and the single spk22 miss. `--synthetic-level -36 -24` is
+left opt-in in the CLI until that decision; the build that produced these numbers is
+`features_v3_gain2_*` on thinky, models under `models/e64/gain2_s{0,1,2}/`.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
