@@ -44,6 +44,46 @@ typedef struct {
  */
 intent_t intent_parse(const char *words);
 
+/* Grammar-constrained decoding at window close (architecture review S1,
+   docs/paper-notes.md E70): instead of parsing the words the stream decoder
+   fired, every valid intent is aligned against the window's smoothed
+   posteriors and the best one is taken when its confidence clears
+   INTENT_ALIGN_TAU. The constants were chosen by scripts/sweep-align.py on
+   the E68 gain2 models and belong with the model export (E70: the older
+   86b7105e needs its own tau), not here forever. kws_de.window_intent pins
+   its copies to these defines. */
+/** @brief A token cannot sit on a step whose smoothed posterior is below this. */
+#define INTENT_ALIGN_FLOOR 0.10f
+/** @brief Minimum geometric-mean token posterior along the best path to accept it. */
+#define INTENT_ALIGN_TAU 0.70f
+/** @brief Steps of one window intent_align() reads; later steps are dropped
+ *  (ASSIST_WINDOW_MS / 100 ms = 25, extended windows beyond 3.2 s lose their tail). */
+#define INTENT_ALIGN_MAX_STEPS 32
+
+/**
+ * @brief Grammar-constrained decode of one assist window (kws_de.window_intent.align).
+ *
+ * For each of the grammar's valid intents (device, optional zone for zoned
+ * devices, action) runs a Viterbi over the chain bg w1 bg ... wL bg against
+ * @p post: every step is explained either by the token it sits on or as
+ * background (`_silence_` + `_unknown_` mass), each token takes >= 1 step,
+ * two tokens may abut. The intent with the best path score wins; it is valid
+ * when the geometric mean of its token-step posteriors is >= @p tau. `aus`
+ * is masked on steps inside ASSIST_WAKE_TAIL_MS, as the fire path drops it.
+ *
+ * @param post     n_steps x KWS_NUM_LABELS smoothed posteriors, row-major
+ *                 (stream_t.last_smoothed of each step, in order).
+ * @param n_steps  Rows in @p post (<= INTENT_ALIGN_MAX_STEPS; more are ignored).
+ * @param first_ms Milliseconds between the window opening and step 0.
+ * @param step_ms  Recogniser cadence (100).
+ * @param floor    INTENT_ALIGN_FLOOR.
+ * @param tau      INTENT_ALIGN_TAU.
+ * @param conf     Out (may be NULL): the best candidate's confidence, 0 if none.
+ * @return The accepted intent, or .valid false.
+ */
+intent_t intent_align(const float *post, int n_steps, int first_ms, int step_ms, float floor,
+                      float tau, float *conf);
+
 /** @brief Minimum second-best probability intent_rescore() will act on (see below). */
 #define INTENT_RESCORE_FLOOR 0.25f
 

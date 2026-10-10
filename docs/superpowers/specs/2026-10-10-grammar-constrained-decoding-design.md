@@ -124,6 +124,11 @@ fixes the E58 case). Details in `docs/paper-notes.md` E70.
   pins `tau`/`delta`/`g`/`floor` to the C header.
 - Flashing and the field session are the owner's; the PR ships host-tested only.
 
+**Done (E71, 2026-10-10)** as described, with two deviations: log-posteriors are computed on the
+fly inside the Viterbi instead of tabulated (stack budget on the wake task), and `delta` is not
+ported. The ring is `float[32][23]` in `.bss`. `tau`/`floor` are `#define`s in `intent.h` for
+now; moving them into the model export is the owner's call when the next model is deployed.
+
 ## 5. Alternatives considered
 
 - **Widen `intent_rescore` to every slot** (n-best over fires' runner-ups, spec §10 rung 1 as

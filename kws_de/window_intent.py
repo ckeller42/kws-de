@@ -115,6 +115,10 @@ def rescore(words: list, seconds: list, floor: float = RESCORE_FLOOR):
 # yet: the firmware port pins them once the sweep has chosen.
 ALIGN_SMOOTH_WIN = 3  # stream.c's KWS_SMOOTH_WIN: align over the same smoothed vector
 BACKGROUND_LABELS = ("_silence_", "_unknown_")  # what a step not on a token must explain itself as
+# Pinned to intent.h by tests/test_window_intent.py (chosen by E70's sweep).
+ALIGN_FLOOR = 0.10  # intent.h INTENT_ALIGN_FLOOR
+ALIGN_TAU = 0.70  # intent.h INTENT_ALIGN_TAU
+ALIGN_MAX_STEPS = 32  # intent.h INTENT_ALIGN_MAX_STEPS: the device keeps a window's first 32 steps
 
 
 def candidates() -> list[tuple[list[str], Intent]]:
@@ -130,7 +134,9 @@ def candidates() -> list[tuple[list[str], Intent]]:
     return out
 
 
-def _smoothed(steps, win: int) -> np.ndarray:
+def smoothed(steps, win: int) -> np.ndarray:
+    """stream.c's trailing mean over the last `win` pushes (fewer at the start):
+    what stream_t.last_smoothed holds at each step."""
     raw = np.asarray(steps, dtype=np.float64)
     out = np.empty_like(raw)
     for t in range(len(raw)):
@@ -192,7 +198,7 @@ def align_scores(
     cannot sit there; `aus` is masked inside the wake tail like the fire path.
     Independent of tau/delta so a sweep scores once and decides many times."""
     labels = list(labels)
-    sm = _smoothed(steps, smooth_win)
+    sm = smoothed(steps, smooth_win)
     if sm.ndim != 2 or sm.shape[0] == 0:
         return []
     first_ms = step_ms if first_ms is None else first_ms
@@ -237,14 +243,38 @@ def align(steps, labels, *, tau: float, delta: float, **kw):
     return decide(align_scores(steps, labels, **kw), tau, delta)
 
 
-def decode_window(steps, labels, step_ms: float, first_ms: float | None = None, stream_kwargs=None):
+def decode_window(
+    steps,
+    labels,
+    step_ms: float,
+    first_ms: float | None = None,
+    stream_kwargs=None,
+    align: bool = True,
+):
     """Run the device's per-window path over `steps` (one posterior per
     recogniser step; the first `first_ms` after the window opened, default
-    `step_ms`) and return the intent (Intent or Rejection) wake.cc would report."""
+    `step_ms`) and return the intent (Intent or Rejection) wake.cc would report:
+    the grammar-constrained alignment first (E70; `align=False` is the pre-E70
+    device), then the fired-word parse + rescore as the fallback."""
     from kws_de.stream import KeywordStream
 
-    ks = KeywordStream(None, labels, **(stream_kwargs or {}))
     first_ms = step_ms if first_ms is None else first_ms
+    if align:
+        got, _, _ = decide(
+            align_scores(
+                steps[:ALIGN_MAX_STEPS],
+                labels,
+                floor=ALIGN_FLOOR,
+                step_ms=step_ms,
+                first_ms=first_ms,
+                smooth_win=ALIGN_SMOOTH_WIN,
+            ),
+            ALIGN_TAU,
+            0.0,
+        )
+        if isinstance(got, Intent):
+            return got
+    ks = KeywordStream(None, labels, **(stream_kwargs or {}))
     buf = WindowBuffers()
     for k, post in enumerate(steps):
         for fired in ks.push(post):

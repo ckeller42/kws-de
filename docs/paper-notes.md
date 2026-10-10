@@ -5508,6 +5508,52 @@ Nothing deployed, nothing flashed; `86b7105e` and `firmware/main/gen/` untouched
 the per-speaker breakdown in the session scratch; posterior caches under
 `<data root>/cache/e70/` (regenerable).
 
+### E71 — firmware: grammar-constrained decoding at window close, ported (2026-10-10, host-only, feat/grammar-align)
+
+E70's decoder on the device, spec §4. Host-tested only — no flashing, no field session, nothing
+deployed; `86b7105e` and `firmware/main/gen/` untouched.
+
+**Firmware.** `intent.c` gains `intent_align(post, n_steps, first_ms, step_ms, floor, tau, &conf)`:
+the 49 candidates enumerated from the generated grammar tables (`KWS_DEVICE_ACTIONS` ×
+`KWS_ZONED_DEVICE_MASK`, no new table), Viterbi over `bg w1 bg … wL bg` per candidate with
+log-posteriors taken on the fly (a 32 × 23 float table would be 2.9 kB of stack on the wake
+task, which `intent_rescore` already overflowed once, E56); `aus` masked on steps inside
+`ASSIST_WAKE_TAIL_MS` through the same `assist_gate_in_wake_tail()` the fire path uses. Constants
+`INTENT_ALIGN_FLOOR` 0.10, `INTENT_ALIGN_TAU` 0.70, `INTENT_ALIGN_MAX_STEPS` 32 in `intent.h`;
+`delta` not ported (E70: it only costs). `recognise.cc` keeps each step's `stream.last_smoothed`
+in a 32 × 23 float ring while an assist window is open (2.9 kB of `.bss`; a window extended past
+3.2 s by later fires loses its tail), cleared by `recognise_listen_for()`; `recognise_align_window()`
+runs the alignment over it under the status lock, so the window close never copies it. `wake.cc`'s
+close edge tries the alignment first and falls back to `intent_parse` → `intent_rescore`
+unchanged; the log line reads `intent: <text> (aligned <conf>; fires: <window_intent>)` so a
+field take records which path answered. `window_words`/`window_intent` and field capture are
+untouched.
+
+**Reference and parity.** `kws_de.window_intent.decode_window()` now aligns first too
+(`align=False` is the pre-E70 device), with `ALIGN_FLOOR`/`ALIGN_TAU`/`ALIGN_MAX_STEPS`/
+`ALIGN_SMOOTH_WIN` pinned to `intent.h`/`features_config.h` by `tests/test_window_intent.py`;
+`eval_recordings` therefore scores phrases and negatives through the aligned path from now on.
+`scripts/gen-intent-cases.py` emits 15 align cases — the window's smoothed posteriors as the
+device holds them (built from raw vectors and smoothed like `stream.c`), expected verdict from the
+reference: 2- and 3-word accepts, a brightness level, a one-step zone, a zone the evidence does not
+support, below tau, nothing above the floor, wrong order, a single step, `aus` in the tail vs the
+same window opened late, an exact tie (grammar order wins), an action the device does not take,
+and a window longer than the ring. `test_intent.c` checks them against `intent_align` plus NULL /
+zero-step inputs: 0/15 mismatch, clean under ASan + UBSan; `make -C firmware/test`: host tests OK.
+Replaying E70's cached posteriors through `decode_window()` at the firmware constants reproduces
+E70 to the clip: 37 / 72 / 80 / 77 of 247, false accepts 2 / 0 / 0 / 1.
+
+**Cost.** Per window close: 49 candidates × up to 7 states × ≤ 32 steps ≈ 11 k state updates with
+one `logf` each, once per 2.5 s window — negligible against the 46 ms per 100 ms the recogniser
+already spends. RAM +2.9 kB `.bss` (free internal was 37.8 kB at E44); the compile and the
+boot-time free figure are the firmware CI job's and the owner's to confirm.
+
+**What the host cannot tell.** The device's first window reaches back over "…Bus"; the tail mask
+handles that on paper and in the parity cases, not yet on a real window. The constants are the
+gain2 models' (E70); the deployed `86b7105e` needs floor 0.25 to stay at 0 false accepts, so
+flashing this firmware with the old model is not the measured configuration — deploy gain2 s1 with
+it, or export the model's own `tau`.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
@@ -5516,6 +5562,6 @@ the per-speaker breakdown in the session scratch; posterior caches under
   command.
 - Probabilistic slot decoding (spec §10): measured as E70 — grammar-constrained alignment over the
   window's posteriors lifts phrases 28 → 72–80 of 247 at unchanged false accepts on the E68 models.
-  Open: the firmware port (spec §4) and the field session that tests the wake-tail mask on real
+  Ported as E71 (host-tested). Open: the field session that tests the wake-tail mask on real
   windows; temperature calibration and a per-class background only if the port's field numbers
   call for them.

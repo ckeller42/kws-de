@@ -19,6 +19,10 @@ def test_constants_match_the_firmware():
     assert window_intent.RESCORE_FLOOR == float(
         _define("intent.h", "INTENT_RESCORE_FLOOR").rstrip("f")
     )
+    assert window_intent.ALIGN_FLOOR == float(_define("intent.h", "INTENT_ALIGN_FLOOR").rstrip("f"))
+    assert window_intent.ALIGN_TAU == float(_define("intent.h", "INTENT_ALIGN_TAU").rstrip("f"))
+    assert window_intent.ALIGN_MAX_STEPS == int(_define("intent.h", "INTENT_ALIGN_MAX_STEPS"))
+    assert window_intent.ALIGN_SMOOTH_WIN == int(_define("gen/features_config.h", "KWS_SMOOTH_WIN"))
     rh = (FW / "recognise.h").read_text()
     for field, size in (
         ("window_intent", window_intent.INTENT_BYTES),
@@ -62,7 +66,7 @@ def test_decode_window_rescores_an_unknown_slot():
     steps = (
         [_post("_silence_")] * 6 + [_post("Licht")] * 4 + [_post("_unknown_", 0.6, "an", 0.35)] * 4
     )
-    got = window_intent.decode_window(steps, labels, step_ms=100)
+    got = window_intent.decode_window(steps, labels, step_ms=100, align=False)
     assert got == Intent("Licht", None, "an")
 
 
@@ -71,7 +75,10 @@ def test_decode_window_drops_a_tail_aus():
     # window is left with Licht + an, not the duplicate-action "aus ... an".
     labels = config.COMMAND_LABELS
     steps = [_post("aus")] * 3 + [_post("Licht")] * 4 + [_post("an")] * 4
-    assert window_intent.decode_window(steps, labels, step_ms=100) == Intent("Licht", None, "an")
+    for align in (False, True):  # the fire path and the aligner mask the same tail
+        assert window_intent.decode_window(steps, labels, step_ms=100, align=align) == Intent(
+            "Licht", None, "an"
+        )
 
 
 def test_candidates_are_the_49_valid_intents_and_all_parse():
@@ -96,12 +103,17 @@ def test_align_recovers_a_zone_whose_run_is_too_short_to_fire():
         + [_post("_unknown_", 0.6, "Küche", 0.39)]
         + [_post("an")] * 3
     )
-    assert window_intent.decode_window(steps, labels, step_ms=100) == Intent("Licht", None, "an")
-    # smooth_win=1: the 3-step trailing mean would flatten a one-step peak to 0.2,
-    # under the 0.25 floor -- whether to align raw or smoothed is an E70 sweep axis.
+    assert window_intent.decode_window(steps, labels, step_ms=100, align=False) == Intent(
+        "Licht", None, "an"
+    )
     got, conf, margin = window_intent.align(steps, labels, tau=0.3, delta=0.0, smooth_win=1)
     assert got == Intent("Licht", "Küche", "an")
     assert 0.3 < conf <= 1.0 and margin > 0
+    # Through the device path (3-step smoothing, floor 0.10, tau 0.70) a ONE-step
+    # zone is flattened to 0.2 and the path's confidence falls under tau, so the
+    # fire path answers: lost, as on the device. E70 measured where the gate
+    # lands on real phrases; this pins only that the fallback engages.
+    assert window_intent.decode_window(steps, labels, step_ms=100) == Intent("Licht", None, "an")
 
 
 def test_align_prefers_no_zone_when_the_evidence_says_background():
@@ -148,3 +160,13 @@ def test_align_enforces_order_occupancy_and_tail_mask():
     steps = [_post("aus")] * 2 + [_post("Licht")] * 3 + [_post("an")] * 3
     got, *_ = window_intent.align(steps, labels, tau=0.3, delta=0)
     assert got == Intent("Licht", None, "an")
+
+
+def test_decode_window_falls_back_to_the_fire_path_when_unsure():
+    # Weak evidence: the aligner's best candidate is under tau, the fire path
+    # (which fires on a 0.5 threshold) still answers, as the device does.
+    labels = config.COMMAND_LABELS
+    steps = [_post("Licht", 0.55, "_unknown_", 0.4)] * 4 + [_post("an", 0.55, "_unknown_", 0.4)] * 4
+    got, conf, _ = window_intent.align(steps, labels, tau=window_intent.ALIGN_TAU, delta=0.0)
+    assert not isinstance(got, Intent) and conf < window_intent.ALIGN_TAU
+    assert window_intent.decode_window(steps, labels, step_ms=100) == Intent("Licht", None, "an")

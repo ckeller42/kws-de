@@ -123,7 +123,8 @@ def evaluate(rows, decoded, labels) -> dict:
 
 def sweep_model(name: str, posts: dict, rows: list[dict], labels) -> list[dict]:
     today = {
-        f: decode_window(p, labels, STEP_MS, first_ms=config.CLIP_MS) for f, p in posts.items()
+        f: decode_window(p, labels, STEP_MS, first_ms=config.CLIP_MS, align=False)
+        for f, p in posts.items()
     }
     base = evaluate(rows, today, labels)
     results = [{"model": name, "order": "today", **base}]
