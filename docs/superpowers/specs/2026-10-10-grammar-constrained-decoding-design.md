@@ -30,24 +30,31 @@ posteriors, take the best, accept on a margin". The grammar is the search space,
 
 ### 2.1 Scoring
 
-For the assist window keep the smoothed posterior of every step: `T ≤ 25` steps (2.5 s at the
-100 ms cadence) × 23 labels. For a candidate token sequence `w1..wL` (L = 2 or 3) find step
-indices `t1 < t2 < … < tL` with `t(i+1) − t(i) ≥ g` (g = 2 steps = 200 ms, one word cannot
-occupy the same step twice) maximising `Σ log p_t(i)(w_i)`. That is a monotone alignment DP,
-`O(L·T)` per candidate, 49 candidates: ≈ 3,700 multiply-adds per window close.
+For the assist window keep the posterior of every step: `T ≤ 25` steps (2.5 s at the 100 ms
+cadence) × 23 labels. A candidate token sequence `w1..wL` (L = 2 or 3) is the left-to-right
+chain `bg w1 bg w2 … wL bg`: every step is explained either by the token it sits on or as
+background (`_silence_` + `_unknown_` mass). Viterbi over that chain gives the best path and
+its total log-probability; each token must take at least one step, two tokens may abut.
+`O((2L+1)·T)` per candidate, 49 candidates: ≈ 8,600 multiply-adds per window close.
 
-Score = geometric mean of the L aligned posteriors, so a 3-token intent competes with its
-2-token parent on per-token evidence: `Licht Küche an` beats `Licht an` exactly when the
-`Küche` peak is as strong as the other two. Each aligned token must clear a per-token floor
-(reuse `INTENT_RESCORE_FLOOR` 0.25 as the starting value) so no intent is assembled from noise.
+Because every hypothesis explains the whole window, a 3-token intent competes with its 2-token
+parent on evidence rather than on length: `Licht Küche an` beats `Licht an` exactly when the
+`Küche` steps are explained better as `Küche` than as background. (A first draft scored only
+the aligned tokens by geometric mean; the unit test showed that always prefers the shorter
+intent, so it was replaced before any data was looked at.) Each token step must clear a floor
+(`INTENT_RESCORE_FLOOR` 0.25 to start) so no intent is assembled from noise. Whether to align
+the raw or the 3-step-smoothed posteriors is a sweep axis: smoothing flattens the one-step
+peaks E41 found to a third of their height.
 
-`# ponytail: geometric mean, no penalty for unexplained peaks. If the sweep shows zones being
-dropped or invented, add a gap term; not before.`
+`# ponytail: background is silence+unknown mass only; a step dominated by a command word
+outside the hypothesis costs every hypothesis the same. Add a per-class background only if the
+sweep shows invented words.`
 
 ### 2.2 Accept rule
 
-Accept the best candidate when `score ≥ tau` and `score − second_best ≥ delta` where second
-best is the best candidate with a different intent. Otherwise reject. Both constants live in
+Rank candidates by path score (per-step geometric mean of the path probability). Accept the
+best when its confidence (geometric mean of the token-step posteriors along its path) is
+`≥ tau` and its path-score margin over the best candidate with a different intent is `≥ delta`. Otherwise reject. Both constants live in
 `config` and are swept in §3; the spec-§10 temperature calibration is skipped for rung 1 (the
 ordering of candidates does not depend on it; add it only if `tau` fails to separate phrases
 from negatives).

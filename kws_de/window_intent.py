@@ -107,6 +107,136 @@ def rescore(words: list, seconds: list, floor: float = RESCORE_FLOOR):
     return (got, ("_unknown_", sub_label)) if isinstance(got, Intent) else (base, None)
 
 
+# Grammar-constrained decoding (architecture review S1, spec
+# docs/superpowers/specs/2026-10-10-grammar-constrained-decoding-design.md).
+# Instead of firing words and parsing them, every valid intent is aligned
+# against the window's smoothed posteriors and the best one is taken on a
+# margin. Defaults here are the E70 sweep's starting grid, not device constants
+# yet: the firmware port pins them once the sweep has chosen.
+ALIGN_SMOOTH_WIN = 3  # stream.c's KWS_SMOOTH_WIN: align over the same smoothed vector
+BACKGROUND_LABELS = ("_silence_", "_unknown_")  # what a step not on a token must explain itself as
+
+
+def candidates() -> list[tuple[list[str], Intent]]:
+    """Every valid intent as the token sequence a speaker says it in
+    (device, zone for zoned devices only, action). 49 for the current grammar."""
+    out = []
+    for device in config.DEVICES:
+        zones = [None, *config.ZONES] if device in config.ZONED_DEVICES else [None]
+        for zone in zones:
+            for action in config.DEVICE_ACTIONS[device]:
+                toks = [device] + ([zone] if zone else []) + [action]
+                out.append((toks, Intent(device, zone, action)))
+    return out
+
+
+def _smoothed(steps, win: int) -> np.ndarray:
+    raw = np.asarray(steps, dtype=np.float64)
+    out = np.empty_like(raw)
+    for t in range(len(raw)):
+        out[t] = raw[max(0, t - win + 1) : t + 1].mean(axis=0)
+    return out
+
+
+def _path_score(lp: np.ndarray, bg: np.ndarray, idx: list[int]) -> tuple[float, float]:
+    """Viterbi over the left-to-right chain bg0 w1 bg1 w2 ... wL bgL: every step
+    is explained either by the token it sits on or as background, so hypotheses
+    of different length compete on the whole window. Each token must take >= 1
+    step; two tokens may abut (the background between them is optional).
+    Returns (total log-prob of the best path, geometric mean of the token-step
+    posteriors along it) or (-inf, 0.0) if no path exists."""
+    T, L = lp.shape[0], len(idx)
+    S = 2 * L + 1
+    emit = np.empty((T, S))
+    emit[:, 0::2] = bg[:, None]
+    for i, k in enumerate(idx):
+        emit[:, 2 * i + 1] = lp[:, k]
+    NEG = -np.inf
+    score = np.full(S, NEG)
+    ntok = np.zeros(S)  # token steps on the best path into each state
+    tsum = np.zeros(S)  # their summed log-posteriors
+    score[0], score[1] = emit[0, 0], emit[0, 1]
+    ntok[1], tsum[1] = 1, emit[0, 1]
+    for t in range(1, T):
+        new = np.full(S, NEG)
+        nn, ns = np.zeros(S), np.zeros(S)
+        for s in range(S):
+            # stay, advance from s-1, or (token state) skip the background from s-2
+            srcs = [s, s - 1] + ([s - 2] if s % 2 == 1 and s >= 2 else [])
+            srcs = [u for u in srcs if u >= 0]
+            u = max(srcs, key=lambda u: score[u])
+            if score[u] == NEG:
+                continue
+            new[s] = score[u] + emit[t, s]
+            tok = s % 2 == 1
+            nn[s], ns[s] = ntok[u] + tok, tsum[u] + (emit[t, s] if tok else 0.0)
+        score, ntok, tsum = new, nn, ns
+    end = max((S - 1, S - 2), key=lambda s: score[s])
+    if score[end] == NEG:
+        return NEG, 0.0
+    return float(score[end]), float(np.exp(tsum[end] / ntok[end]))
+
+
+def align_scores(
+    steps,
+    labels,
+    *,
+    floor: float = RESCORE_FLOOR,
+    step_ms: float = 100.0,
+    first_ms: float | None = None,
+    smooth_win: int = ALIGN_SMOOTH_WIN,
+) -> list[tuple[float, float, Intent]]:
+    """Every valid intent aligned against the window's smoothed posteriors,
+    best first: (path score = exp(mean per-step log-prob), confidence = geometric
+    mean of the token-step posteriors, intent). Tokens below `floor` at a step
+    cannot sit there; `aus` is masked inside the wake tail like the fire path.
+    Independent of tau/delta so a sweep scores once and decides many times."""
+    labels = list(labels)
+    sm = _smoothed(steps, smooth_win)
+    if sm.ndim != 2 or sm.shape[0] == 0:
+        return []
+    first_ms = step_ms if first_ms is None else first_ms
+    with np.errstate(divide="ignore"):
+        lp = np.log(np.where(sm >= floor, sm, 0.0))
+        bg = np.log(sum(sm[:, labels.index(b)] for b in BACKGROUND_LABELS))
+    for lab in WAKE_TAIL_LABELS:
+        if lab in labels:
+            k = labels.index(lab)
+            tail = np.array([in_wake_tail(first_ms + t * step_ms, lab) for t in range(len(sm))])
+            lp[tail, k] = -np.inf
+    T = len(sm)
+    scored = []
+    for toks, intent in candidates():
+        s, conf = _path_score(lp, bg, [labels.index(t) for t in toks])
+        if np.isfinite(s):
+            scored.append((float(np.exp(s / T)), conf, intent))
+    scored.sort(key=lambda x: -x[0])
+    return scored
+
+
+def decide(scored, tau: float, delta: float):
+    """The accept rule over `align_scores()` output: best intent if its
+    confidence >= tau and its path-score margin over the best *different*
+    intent >= delta. Returns (Intent | Rejection, confidence, margin)."""
+    from kws_de.grammar import Rejection
+
+    if not scored:
+        return Rejection("no candidate"), 0.0, 0.0
+    best_score, conf, best = scored[0]
+    second = next((s for s, _, i in scored[1:] if i != best), 0.0)
+    margin = best_score - second
+    if conf < tau:
+        return Rejection("below tau"), conf, margin
+    if margin < delta:
+        return Rejection("ambiguous"), conf, margin
+    return best, conf, margin
+
+
+def align(steps, labels, *, tau: float, delta: float, **kw):
+    """Grammar-constrained decode of one window; see align_scores() + decide()."""
+    return decide(align_scores(steps, labels, **kw), tau, delta)
+
+
 def decode_window(steps, labels, step_ms: float, first_ms: float | None = None, stream_kwargs=None):
     """Run the device's per-window path over `steps` (one posterior per
     recogniser step; the first `first_ms` after the window opened, default
