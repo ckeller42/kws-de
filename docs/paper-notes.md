@@ -5491,6 +5491,7 @@ favours DTW somewhat. Times are one desktop core after warm-up; device cost unme
 **Decision.** Paper §6.16 written on this; nothing deployed. Next if pursued: DTW match cost on
 the ESP32-S3 for 49 intents × a few takes, more owner negatives, a second voice. Raw results stay
 on the data host (`.e67/results-*-gated.*`, untracked).
+
 ### E72 — grammar-constrained decoding at window close: 28 → 72–80 of 247 phrases at zero added false accepts (2026-10-10, host-only, feat/grammar-align)
 
 **Question.** The architecture review's S1 and spec §10, finally measured. The device decides
