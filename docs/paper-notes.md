@@ -5514,10 +5514,10 @@ geometric mean; its unit test showed that always prefers the shorter intent (`Li
 was looked at. `scripts/sweep-align.py` runs each model once over the 247 approved phrases and
 85 negatives, caches the posteriors, and replays the grid (smooth 1/3 × floor 0.10/0.25 × tau
 0–0.9 × delta 0–0.2) in both window-close orders (align first with the device path as fallback,
-or fires first with align as fallback) against today's `decode_window()`. Four unit tests
+or fires first with align as fallback) against today's `decode_window()`. Five unit tests
 (`tests/test_window_intent.py`): the 49 candidates all parse; a one-step zone the fire path
-cannot emit is kept; a zone the evidence does not support is not invented; order, step occupancy
-and the tail mask. `eval_recordings` and the firmware are untouched.
+cannot emit is kept; a zone the evidence does not support is not invented; noise under the floor
+and an exact tie are rejected; order, step occupancy and the tail mask. `eval_recordings` and the firmware are untouched.
 
 **Protocol.** Models: deployed `86b7105e` (the bytes in `gen/model_data.h`) and E68's three
 `gain2` seeds (`3d80dec5`, `e6063c81`, `05ff578c`). Tuning set spk10's 97 phrases, report set the
@@ -5565,9 +5565,11 @@ narrow (no negative above 0.67, correct phrases median 0.72, 10th percentile 0.5
 model-specific: the deployed model's confidences run lower (correct median 0.68), so at the gain2
 setting it accepts 2 negatives and needs floor 0.25 / tau 0.70 of its own for 36 at 0 FA — `tau`
 belongs with the model export, like `KWS_THRESHOLD`, not in the firmware as a constant for all
-time. Spec §3's gate (+10 clips on every model at one shared setting, false accepts not above
-today's) holds on all three gain2 seeds (+44 / +52 / +44) and on the deployed model at its own
-`tau` (+17); the deploy candidate is gain2 (E68), so the shared gain2 setting is the one to port.
+time. Spec §3's gate as written (+10 clips on every model at ONE shared setting, false accepts
+not above today's) is therefore not met: no setting serves all four models. Its gain2 clause
+holds (+44 / +52 / +44 at one shared setting) and the deployed model clears +10 at its own floor
+(+17); the deploy candidate is gain2 (E68). What is ported is the structure plus a per-model
+floor.
 
 **Decision.** Port it (spec §4), second PR: posterior ring over the window in `recognise.cc`,
 `intent_align()` in `intent.c` over the generated grammar tables, align first at window close
@@ -5590,8 +5592,11 @@ the 49 candidates enumerated from the generated grammar tables (`KWS_DEVICE_ACTI
 log-posteriors taken on the fly (a 32 × 23 float table would be 2.9 kB of stack on the wake
 task, which `intent_rescore` already overflowed once, E56); `aus` masked on steps inside
 `ASSIST_WAKE_TAIL_MS` through the same `assist_gate_in_wake_tail()` the fire path uses. Constants
-`INTENT_ALIGN_FLOOR` 0.10, `INTENT_ALIGN_TAU` 0.70, `INTENT_ALIGN_MAX_STEPS` 32 in `intent.h`;
-`delta` not ported (E72: it only costs). `recognise.cc` keeps each step's `stream.last_smoothed`
+in `intent.h`: `INTENT_ALIGN_TAU` 0.70 (E72, holds for all four models), `INTENT_ALIGN_MAX_STEPS`
+32, and `INTENT_ALIGN_FLOOR` **0.25 — the embedded model's**: this firmware still carries
+`86b7105e` (`gen/model_config.h`), which accepts 2 of 85 negatives at E72's gain2 floor 0.10 and
+0 at 0.25, so the floor follows the model and moves to 0.10 in the change that exports gain2 into
+`gen/`. `delta` not ported (E72: it only costs). `recognise.cc` keeps each step's `stream.last_smoothed`
 in a 32 × 23 float ring while an assist window is open (2.9 kB of `.bss`; a window extended past
 3.2 s by later fires loses its tail), cleared by `recognise_listen_for()`; `recognise_align_window()`
 runs the alignment over it under the status lock, so the window close never copies it. `wake.cc`'s
@@ -5611,8 +5616,11 @@ support, below tau, nothing above the floor, wrong order, a single step, `aus` i
 same window opened late, an exact tie (grammar order wins), an action the device does not take,
 and a window longer than the ring. `test_intent.c` checks them against `intent_align` plus NULL /
 zero-step inputs: 0/15 mismatch, clean under ASan + UBSan; `make -C firmware/test`: host tests OK.
-Replaying E72's cached posteriors through `decode_window()` at the firmware constants reproduces
-E72 to the clip: 37 / 72 / 80 / 77 of 247, false accepts 2 / 0 / 0 / 1.
+Replaying E72's cached posteriors through `decode_window()` at the firmware constants (floor 0.25,
+tau 0.70): deployed `86b7105e` 19 → 36 of 247 at 0 false accepts; gain2 s0 / s1 / s2 61 / 70 / 66
+with false accepts 0 / 1 / 1 — the gain2 models want their own floor 0.10 (72 / 80 / 77, FA 0 / 0 /
+1), which the replay at 0.10 reproduces to the clip, so the two constants are one `#define` apart
+from the measured configuration either way.
 
 **Cost.** Per window close: 49 candidates × up to 7 states × ≤ 32 steps ≈ 11 k state updates with
 one `logf` each, once per 2.5 s window — negligible against the 46 ms per 100 ms the recogniser
@@ -5620,10 +5628,9 @@ already spends. RAM +2.9 kB `.bss` (free internal was 37.8 kB at E44); the compi
 boot-time free figure are the firmware CI job's and the owner's to confirm.
 
 **What the host cannot tell.** The device's first window reaches back over "…Bus"; the tail mask
-handles that on paper and in the parity cases, not yet on a real window. The constants are the
-gain2 models' (E72); the deployed `86b7105e` needs floor 0.25 to stay at 0 false accepts, so
-flashing this firmware with the old model is not the measured configuration — deploy gain2 s1 with
-it, or export the model's own `tau`.
+handles that on paper and in the parity cases, not yet on a real window. Flashing this firmware as
+is (`86b7105e`, floor 0.25) is the measured 36/247-at-0-FA configuration; deploying gain2 s1 means
+exporting it into `gen/` and setting the floor to 0.10 in the same change.
 
 ## Open questions
 

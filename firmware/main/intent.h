@@ -49,11 +49,15 @@ intent_t intent_parse(const char *words);
    fired, every valid intent is aligned against the window's smoothed
    posteriors and the best one is taken when its confidence clears
    INTENT_ALIGN_TAU. The constants were chosen by scripts/sweep-align.py on
-   the E68 gain2 models and belong with the model export (E72: the older
-   86b7105e needs its own tau), not here forever. kws_de.window_intent pins
-   its copies to these defines. */
+   the model this firmware embeds and belong with the model export, not here
+   forever: E72 chose floor 0.10 / tau 0.70 on the E68 gain2 models, but the
+   embedded 86b7105e (gen/model_config.h) accepts 2 of 85 negatives at floor
+   0.10 and 0 at floor 0.25, so the floor here is the embedded model's. When
+   gain2 is exported into gen/, move INTENT_ALIGN_FLOOR to 0.10f in the same
+   change (gain2 s1: 80/247 phrases at 0.10 vs 70 and one false accept at
+   0.25). kws_de.window_intent pins its copies to these defines. */
 /** @brief A token cannot sit on a step whose smoothed posterior is below this. */
-#define INTENT_ALIGN_FLOOR 0.10f
+#define INTENT_ALIGN_FLOOR 0.25f
 /** @brief Minimum geometric-mean token posterior along the best path to accept it. */
 #define INTENT_ALIGN_TAU 0.70f
 /** @brief Steps of one window intent_align() reads; later steps are dropped

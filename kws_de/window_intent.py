@@ -115,8 +115,9 @@ def rescore(words: list, seconds: list, floor: float = RESCORE_FLOOR):
 # yet: the firmware port pins them once the sweep has chosen.
 ALIGN_SMOOTH_WIN = 3  # stream.c's KWS_SMOOTH_WIN: align over the same smoothed vector
 BACKGROUND_LABELS = ("_silence_", "_unknown_")  # what a step not on a token must explain itself as
-# Pinned to intent.h by tests/test_window_intent.py (chosen by E72's sweep).
-ALIGN_FLOOR = 0.10  # intent.h INTENT_ALIGN_FLOOR
+# Pinned to intent.h by tests/test_window_intent.py. tau is E72's sweep value;
+# the floor is the embedded model's (0.25 for 86b7105e, 0.10 once gain2 ships).
+ALIGN_FLOOR = 0.25  # intent.h INTENT_ALIGN_FLOOR
 ALIGN_TAU = 0.70  # intent.h INTENT_ALIGN_TAU
 ALIGN_MAX_STEPS = 32  # intent.h INTENT_ALIGN_MAX_STEPS: the device keeps a window's first 32 steps
 

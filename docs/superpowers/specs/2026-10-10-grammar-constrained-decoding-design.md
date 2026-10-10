@@ -91,21 +91,23 @@ Reported per model:
 | alignment oracle (expected intent is the best candidate, no tau) | — | reported; the new ceiling |
 | by phrase length (2 vs 3 words), zone dropped / zone invented | — | no regression on 2-word phrases |
 
-`tau`/`delta` are chosen on spk10's 97 phrases and reported on the other speakers' 150, so the
-headline number is not the tuning set. Negatives are never tuned on; the false-accept column
+Every swept constant (`smooth`, `floor`, `tau`, `delta`) is chosen on spk10's 97 phrases and
+reported on the other speakers' 150, so the headline number is not the tuning set. Negatives are never tuned on; the false-accept column
 is the gate. Isolated-word figures are untouched by construction (a different path).
 
 Pass: every model clears the target rows at one shared `(tau, delta, g, floor)`. Then §4.
 Fail: write the entry, keep the Python reference as the measurement tool, and the next lever
 is the wider-context model (E8 transducer or two-window input), not another decoder.
 
-**Result (E72, 2026-10-10): pass.** One setting shared by the three gain2 seeds (smooth 3,
-floor 0.10, tau 0.70, delta 0): phrases 28 / 28 / 33 → 72 / 80 / 77 of 247, false accepts
-0 / 0 / 1 → 0 / 0 / 1 (unchanged), report set 20 / 20 / 22 → 46 / 48 / 51 of 150. The deployed
-model needs its own tau (floor 0.25, tau 0.70: 19 → 36, 0 FA); at the gain2 setting it accepts 2
-negatives, so `tau` is exported with the model, not fixed in the firmware. `delta` only costs
-and is not ported. Order: align first (fires first lands within 1–2 clips, and only align first
-fixes the E58 case). Details in `docs/paper-notes.md` E72.
+**Result (E72, 2026-10-10): the gate as written is not met; its gain2 clause is.** No single
+setting satisfies all four models: at the setting shared by the three gain2 seeds (smooth 3,
+floor 0.10, tau 0.70, delta 0) phrases go 28 / 28 / 33 → 72 / 80 / 77 of 247 with false accepts
+0 / 0 / 1 → 0 / 0 / 1 (unchanged) and report set 20 / 20 / 22 → 46 / 48 / 51 of 150, but the
+deployed model accepts 2 negatives there and needs floor 0.25 for 0 (19 → 36). `floor` is
+therefore a per-model constant that ships with the model; `tau` 0.70 holds for all four.
+`delta` only costs and is not ported. Order: align first (fires first lands within 1–2 clips,
+and only align first fixes the E58 case). Decision: port, with the floor of whichever model the
+firmware embeds. Details in `docs/paper-notes.md` E72.
 
 ## 4. Firmware port (second PR, only after §3 passes)
 
@@ -126,8 +128,9 @@ fixes the E58 case). Details in `docs/paper-notes.md` E72.
 
 **Done (E73, 2026-10-10)** as described, with two deviations: log-posteriors are computed on the
 fly inside the Viterbi instead of tabulated (stack budget on the wake task), and `delta` is not
-ported. The ring is `float[32][23]` in `.bss`. `tau`/`floor` are `#define`s in `intent.h` for
-now; moving them into the model export is the owner's call when the next model is deployed.
+ported. The ring is `float[32][23]` in `.bss`. `tau`/`floor` are `#define`s in `intent.h`; the
+floor is the embedded `86b7105e`'s (0.25) and moves to 0.10 in the change that exports gain2
+into `gen/`. Generating them with the model is the owner's call.
 
 ## 5. Alternatives considered
 

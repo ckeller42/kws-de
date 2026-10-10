@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import csv
+import hashlib
 import itertools
 import sys
 from collections import defaultdict
@@ -65,14 +66,17 @@ def clips(approved: Path) -> list[dict]:
 
 
 def cached_posteriors(name: str, path: Path, rows: list[dict], approved: Path, cache: Path):
-    """{file: posteriors (T x labels)} for `name`, computed once and cached as npz."""
-    npz = cache / f"{name}.npz"
+    """{file: posteriors (T x labels)} for `name`, computed once and cached as npz
+    keyed by the model's bytes, so a re-exported or re-pointed model never
+    replays a stale cache."""
+    blob = model_bytes(path)
+    npz = cache / f"{name}-{hashlib.sha1(blob).hexdigest()[:8]}.npz"
     if npz.exists():
         with np.load(npz) as z:
             got = {k: z[k] for k in z.files}
         if all(r["file"] in got for r in rows):
             return got
-    predict_fn = make_command_predict_fn(model_bytes(path))
+    predict_fn = make_command_predict_fn(blob)
     step = int(config.SAMPLE_RATE * STEP_MS / 1000)
     out = {}
     for r in rows:
