@@ -12,7 +12,9 @@ device does not know who speaks) or same-speaker only.
 
 Open set: approved/negatives, W = trailing 1 s window every 100 ms (the device
 stream), false accept = score < threshold on 2 consecutive steps; P = whole clip +
-2.5 s windows every 100 ms, false accept on any. Score (--norm): none = best
+2.5 s windows every 100 ms, false accept on any. --gated (E71): every negative gets ONE
+match on the whole clip, like the positives (one match right after the wake word).
+Score (--norm): none = best
 distance d1, margin = d1/d2 (best over second-best label; lower = more confident).
 Accept-and-correct = held-out clip's top label right AND its score < threshold.
 Threshold calibration is speaker-disjoint: negatives split by speaker into 2 folds
@@ -56,6 +58,7 @@ NEG: list[np.ndarray] = []
 NEG_SPK: list[str] = []
 MAX_TAKES = 5
 NORM = "none"
+GATED = False
 _FULL: dict = {}
 
 
@@ -140,6 +143,8 @@ def _neg_fire_level(task) -> float:
     pool, j = task
     match, sig = _full_matcher(pool), NEG[j]
     best = lambda w: score(match(w))  # noqa: E731
+    if GATED:
+        return best(sig)
     if pool == "W":
         d = [float(x) for x in _stream_posteriors(best, sig, STEP)]
         return min((max(a, b) for a, b in zip(d, d[1:], strict=False)), default=math.inf)
@@ -196,7 +201,8 @@ def run_pool(pool: str, args, pmap) -> dict:
         )
     res["ms_per_match_loaded"] = float(np.mean([ms for *_, ms in pooled]))
     match = ARM.make_matcher(templates(clips, held[0], False))  # unloaded CPU timing
-    ts = []
+    match(np.random.default_rng(0).standard_normal(config.CLIP_SAMPLES).astype(np.float32))
+    ts = []  # after a warm-up: lazy model loads (cnn/embed) are not per-match cost
     for h in held[:20]:
         t = time.perf_counter()
         match(clips[h]["sig"])
@@ -208,6 +214,13 @@ def run_pool(pool: str, args, pmap) -> dict:
         levels, [NEG_SPK[j] for j in negs], [s for _, s, _ in pooled], correct
     )
     res["deployed"] = acc_rows(clips, held, baseline(pool, clips, held))
+    res["per_clip"] = {  # for post-hoc subsets (scripts/e71_table.py)
+        "spk": [clips[h]["spk"] for h in held],
+        "score": [s for _, s, _ in pooled],
+        "correct": correct,
+        "neg_spk": [NEG_SPK[j] for j in negs],
+        "neg_level": [float(x) for x in levels],
+    }
     return res
 
 
@@ -229,7 +242,7 @@ def open_set(levels, neg_spk, scores, correct) -> dict:
         {"calibrate": spk[a], "test": spk[1 - a], **point(lv[fold == a].min(), lv[fold != a])}
         for a in (0, 1)
     ]
-    pooled = np.concatenate([s, lv[np.isfinite(lv)]])
+    pooled = np.concatenate([s[np.isfinite(s)], lv[np.isfinite(lv)]])
     grid = np.unique(np.quantile(pooled, np.linspace(0, 1, N_QUANTILES)))
     srt = np.sort(lv)
     return {
@@ -306,10 +319,13 @@ def render(arm: str, results: dict) -> str:
 
 
 def main() -> None:
-    global ARM, MAX_TAKES, NORM
+    global ARM, MAX_TAKES, NORM, GATED
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--norm", default="none", choices=["none", "margin"])
-    ap.add_argument("--arm", required=True, help="dtw | embed -> scripts/e69_<arm>.py")
+    ap.add_argument(
+        "--arm", required=True, help="dtw | embed | cnn | agree -> scripts/e69_<arm>.py"
+    )
+    ap.add_argument("--gated", action="store_true", help="one whole-clip match per negative")
     ap.add_argument("--pool", default="both", choices=["W", "P", "both"])
     ap.add_argument("--max-takes", type=int, default=5)
     ap.add_argument("--limit", type=int, default=0, help="held-out clips / negatives per pool")
@@ -317,7 +333,7 @@ def main() -> None:
     ap.add_argument("--approved", type=Path, default=config.DATA_DIR / "recordings" / "approved")
     args = ap.parse_args()
 
-    ARM, MAX_TAKES, NORM = load_arm(args.arm), args.max_takes, args.norm
+    ARM, MAX_TAKES, NORM, GATED = load_arm(args.arm), args.max_takes, args.norm, args.gated
     pools = ["W", "P"] if args.pool == "both" else [args.pool]
     for p in pools:
         CLIPS[p] = load_pool(args.approved, p)
@@ -336,6 +352,8 @@ def main() -> None:
 
     mode = getattr(ARM, "MODE", None)  # e.g. E69_EMBED_MODE
     name = "-".join(x for x in (args.arm, mode, args.pool, NORM) if x and x != "auto")
+    if GATED:
+        name += "-gated"
     if args.limit:
         name += f"-limit{args.limit}"
     report = render(name, results)
@@ -349,6 +367,7 @@ def main() -> None:
         "norm": NORM,
         "max_takes": MAX_TAKES,
         "limit": args.limit,
+        "gated": GATED,
     }
     out.with_suffix(".json").write_text(
         json.dumps({**meta, "pools": results}, indent=2, ensure_ascii=False) + "\n"
