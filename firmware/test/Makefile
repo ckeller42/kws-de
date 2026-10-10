@@ -44,7 +44,7 @@ test_assist_gate: test_assist_gate.c ../main/assist_gate.c
 test_field: test_field.c ../main/field.c
 	$(CC) $(CFLAGS) -o $@ $^
 test_intent: test_intent.c ../main/intent.c intent_cases.h
-	$(CC) $(CFLAGS) -o $@ test_intent.c ../main/intent.c
+	$(CC) $(CFLAGS) -o $@ test_intent.c ../main/intent.c -lm
 test_wakefront: test_wakefront.c ../main/wakefront.c $(MF_SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ -x c++ $^ -lm
 

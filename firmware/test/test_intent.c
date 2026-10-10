@@ -52,6 +52,34 @@ int main(void)
     printf("rescore parity: %d/%d cases mismatch\n", bad, RESCORE_CASE_COUNT);
     if (bad) return 1;
 
+    /* intent_align() against kws_de.window_intent.align_scores()+decide() (E70):
+       the grammar-constrained decode the window close now tries first. */
+    for (int i = 0; i < ALIGN_CASE_COUNT; i++) {
+        const align_case_t *c = &ALIGN_CASES[i];
+        float conf = -1.f;
+        intent_t got = intent_align(c->post, c->n_steps, c->first_ms, 100, INTENT_ALIGN_FLOOR,
+                                    INTENT_ALIGN_TAU, &conf);
+        bool ok = got.valid == c->valid && streq(got.device, c->device) && streq(got.zone, c->zone) &&
+                  streq(got.action, c->action) && conf >= 0.f && conf <= 1.f;
+        if (!ok) {
+            printf("align case %d \"%s\": got valid=%d %s %s %s (conf %.3f), want valid=%d %s %s %s\n", i,
+                   c->name, got.valid, got.device ? got.device : "-", got.zone ? got.zone : "-",
+                   got.action ? got.action : "-", (double)conf, c->valid, c->device ? c->device : "-",
+                   c->zone ? c->zone : "-", c->action ? c->action : "-");
+            bad++;
+        }
+    }
+    printf("align parity: %d/%d cases mismatch\n", bad, ALIGN_CASE_COUNT);
+    if (bad) return 1;
+    /* Degenerate inputs never read memory or divide by zero. */
+    {
+        float conf = 1.f;
+        intent_t r = intent_align(NULL, 5, 100, 100, INTENT_ALIGN_FLOOR, INTENT_ALIGN_TAU, &conf);
+        if (r.valid || conf != 0.f) { puts("align(NULL) not rejected"); return 1; }
+        r = intent_align(ALIGN_CASES[0].post, 0, 100, 100, INTENT_ALIGN_FLOOR, INTENT_ALIGN_TAU, NULL);
+        if (r.valid) { puts("align(0 steps) not rejected"); return 1; }
+    }
+
     /* intent_format(): the arrow-joined text QC round-trips through normalise()
        + grammar.parse() again (kws_de/qc.py), so its exact spelling here only
        has to match kws_de.eval.intent_text's word order/level suffix, plus the

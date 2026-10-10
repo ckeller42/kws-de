@@ -5,6 +5,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "intent.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +50,17 @@ void recognise_get_status(recognise_status_t *out);
  * window cannot make the next one beep.
  */
 bool recognise_take_command_fired(void);
+/**
+ * @brief Grammar-constrained decode of the current assist window (E70).
+ *
+ * intent_align() over the smoothed posteriors of every step since
+ * recognise_listen_for() (the first INTENT_ALIGN_MAX_STEPS of them), with
+ * INTENT_ALIGN_FLOOR / INTENT_ALIGN_TAU. The ring lives here, not in
+ * recognise_status_t, so the window close never copies it. Call after
+ * recognise_set_active(false), from the task that owns the window.
+ * @param conf Out (may be NULL): the best candidate's confidence.
+ */
+intent_t recognise_align_window(float *conf);
 
 #ifdef __cplusplus
 }
