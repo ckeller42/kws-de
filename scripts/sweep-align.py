@@ -45,8 +45,8 @@ DEFAULT_MODELS = {
 }
 SMOOTH = (1, 3)
 FLOORS = (0.10, 0.25)
-TAUS = (0.0, 0.2, 0.3, 0.4, 0.5, 0.6)
-DELTAS = (0.0, 0.02, 0.05, 0.10)
+TAUS = (0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+DELTAS = (0.0, 0.05, 0.10, 0.20)
 ORDERS = ("align-first", "fires-first")
 
 
@@ -90,7 +90,9 @@ def _zone_flags(target: Intent, got) -> tuple[int, int]:
     if not isinstance(got, Intent) or got == target:
         return 0, 0
     same = got.device == target.device and got.action == target.action
-    return int(same and target.zone and not got.zone), int(same and got.zone and not target.zone)
+    return int(bool(same and target.zone and not got.zone)), int(
+        bool(same and got.zone and not target.zone)
+    )
 
 
 def evaluate(rows, decoded, labels) -> dict:
@@ -221,6 +223,13 @@ def main() -> None:
         metavar="NAME=PATH",
         help="model to sweep (default: deployed header + E68 gain2 s0/s1/s2)",
     )
+    ap.add_argument(
+        "--shared",
+        nargs="+",
+        default=None,
+        metavar="NAME",
+        help="models the one shared setting must satisfy (default: all swept models)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -256,15 +265,16 @@ def main() -> None:
                     f"| {name} | {order} s{r['smooth']} f{r['floor']} t{r['tau']} d{r['delta']}"
                     f" (oracle {r['oracle']}) | {fmt(r)} |"
                 )
-    print("\n## One shared setting for every model\n")
+    shared = a.shared or list(models)
+    print(f"\n## One shared setting for {', '.join(shared)}\n")
     print(HEAD)
     for order in ORDERS:
-        got = pick_shared(results, list(models), order)
+        got = pick_shared(results, shared, order)
         if not got:
             print(f"| all | {order}: no setting keeps false accepts at today's on every model |")
             continue
         _, _, _, key, per = got
-        for name in models:
+        for name in shared:
             r = per[name]
             print(f"| {name} | {order} s{key[0]} f{key[1]} t{key[2]} d{key[3]} | {fmt(r)} |")
 
