@@ -28,7 +28,7 @@ idf_component_register(
        "wake.cc" "wakefront.c" "gen/wake_infer.c" "gen/command_infer.c" "infer_lock.c" "assist_gate.c" "field.c" "intent.c" "beep.c" "console.c" ${MICROFRONTEND_SRCS}
        "ui/ui_menu.c" "ui/ui_record.c" "ui/ui_usb.c" "ui/ui_recognise.c" "ui/ui_wake.c" "ui/ui_assist.c" "ui/font_prompt_28.c" "usb_drive.c"
   INCLUDE_DIRS "." "microfrontend" "microfrontend/kissfft"
-  REQUIRES fatfs wear_levelling nvs_flash esp_timer esp_partition esp_tinyusb driver sdmmc
+  REQUIRES fatfs wear_levelling nvs_flash esp_timer esp_partition esp_tinyusb driver sdmmc esp_driver_usb_serial_jtag
   PRIV_REQUIRES esp-tflite-micro esp-nn)
 
 # Both generated models work in one esp-nn scratch region, kws_infer_scratch,

@@ -111,7 +111,7 @@ def test_align_recovers_a_zone_whose_run_is_too_short_to_fire():
     assert 0.3 < conf <= 1.0 and margin > 0
     # Through the device path (3-step smoothing, floor 0.10, tau 0.70) a ONE-step
     # zone is flattened to 0.2 and the path's confidence falls under tau, so the
-    # fire path answers: lost, as on the device. E70 measured where the gate
+    # fire path answers: lost, as on the device. E72 measured where the gate
     # lands on real phrases; this pins only that the fallback engages.
     assert window_intent.decode_window(steps, labels, step_ms=100) == Intent("Licht", None, "an")
 

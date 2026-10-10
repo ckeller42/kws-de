@@ -446,7 +446,7 @@ CI build/gate jobs
    :links: REQ_FW_IDF_PIN, REQ_FW_TFLM_OPSET, REQ_FW_23_CLASSES
 
    ``.github/workflows/firmware.yml`` ``build`` job:
-   ``espressif/esp-idf-ci-action@v1`` at ``v5.5.5``, ``idf.py build`` for
+   ``espressif/esp-idf-ci-action@v1`` at ``v6.1``, ``idf.py build`` for
    ``esp32s3``, then a merged flashable binary is uploaded as an artifact.
 
 .. test:: Committed generated headers match a fresh generator run

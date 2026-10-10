@@ -543,7 +543,7 @@ Build / CI
    :id: REQ_FW_IDF_PIN
    :status: implemented
 
-   The ESP-IDF tag (``v5.5.5``) is pinned in ``firmware/README.md``,
+   The ESP-IDF tag (``v6.1``) is pinned in ``firmware/README.md``,
    ``firmware/CMakeLists.txt`` (build-time version check), and
    ``.github/workflows/firmware.yml``; the three must agree.
 

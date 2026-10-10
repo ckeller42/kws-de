@@ -18,12 +18,15 @@ grammar** (`device → zone? → action`) composes into a validated intent. Both
 **generated, bit-exact C over esp-nn** with no interpreter on the device: the deployed 23-class
 command model is a width-48 DS-CNN, **25,832 B** full-INT8 quantization-aware, one streaming step
 measures **46–47 ms** and the wake step **1.25 ms**. Our headline results are two gaps, not a peak.
-The stock model scores ≈0.9 on its own synthetic split but recognises **0.19 and 0.27** of two
-speakers' real microphone words; folding six users' recordings into training and **up-weighting real
-clips 3×** raises isolated-word accuracy to **0.936** on the four-speaker deploy scoreboard (n = 233,
+The stock model scores ≈0.9 on its own synthetic split but recognises **0.19 and 0.27** of the real microphone words in two
+recording sessions; folding six sessions' recordings into training and **up-weighting real
+clips 3×** raises isolated-word accuracy to **0.936** on the four-session deploy scoreboard (n = 233,
 0/32 false accepts) as a *user-customised, in-training* figure, never quoted as generalisation. Yet
 the same model turns only **≈0.10** of read command sentences into the exact intent (14/139): the
-word→sentence path — segmentation, decoder, grammar — is the bottleneck, not the classifier. Negative
+word→sentence path — segmentation, decoder, grammar — is the bottleneck, not the classifier. Matching
+each utterance after the wake word against the user's own enrolled sentences (MFCC-DTW) removes that
+path: **0.66** of held-out sentences become the exact intent at one false accept in 85, against
+**0.06** for the deployed path on the same clips (§6.16). Negative
 results carry the method: a wake model that learned *TTS-vs-real* rather than the phrase, invisible
 to its own held-out recall; a transition-window regression; a voice-diversity ablation that fell
 0.689 → 0.245; a width-40 model that is smaller in MACs yet asks for twice the scratch memory of
@@ -61,7 +64,7 @@ of non-streaming models [7].
 **Synthetic, low-resource and personalised KWS.** Synthesised speech is established practice for
 under-covered keywords [16], and few-shot multilingual KWS the standard answer when a word has no
 corpus coverage [17]. Ours is the extreme case, so what we measure is the synthetic-to-real gap
-itself — closed for the device's main users, with the numbers labelled accordingly.
+itself — closed for the device's one user, with the numbers labelled accordingly.
 
 **On-device stacks, SLU and data.** ESP-SR/MultiNet [10] and microWakeWord [9] target the ESP32-S3;
 Rhino [11] is the closed reference for on-device German speech-to-intent; edge SLU with slot filling
@@ -104,8 +107,11 @@ content gate before its clips enter the build.
 
 ### 4.3 Splits and reproducibility
 
-Splits are **speaker-disjoint**: real words by `speaker_id`, TTS words by a synthetic speaker id. In
-the frozen v2 features behind every §6.1–§6.9 number that id was `tts:{engine}:{voice}:{rate}`, so
+Splits are **speaker-disjoint**: real words by `speaker_id`, TTS words by a synthetic speaker id.
+Every device recording is one voice, the owner's: a device `spkNN` id is a recording session (day,
+room, microphone, guided or field), not a person, so for device clips the split is session-disjoint
+and nothing here measures generalisation to a second speaker. In
+the frozen v2 features behind every §6.1–§6.9 number the TTS id was `tts:{engine}:{voice}:{rate}`, so
 *one voice at two speaking rates could land in both train and test*. This is a real leak, flagged
 wherever a v2 number is quoted; v3 closes it by dropping rate from the id. The dataset also carries a
 **validation split**, a **manifest** (counts, config, content hashes — verifiable without shipping
@@ -125,7 +131,7 @@ mode word, plus `an` and Aufstelldach — are 100 % TTS; `_unknown_` holds 2,400
 
 The **v3 build behind the deployed model** (2026-09-06, seed 0) is larger and differently sourced:
 **38,646 / 6,417 / 11,291** train / val / test rows, of which 13,774 / 1,993 / 2,163 are real
-speech. Its real material is 2,378 MSWC clips plus **285 device clips** from six speakers merged at
+speech. Its real material is 2,378 MSWC clips plus **285 device clips** from six recording sessions merged at
 build time (Licht 76, an 26, Außen 22, aus 19, Kühlschrank 17, Heizung 12, Lesen 12, `_unknown_`
 104, the rest single digits), each real clip expanded by the noise and van augmentations; every
 TTS clip was regenerated through the §4.6 gate from a pool of 252 admitted voices. Because van
@@ -137,7 +143,7 @@ is no longer a clip count; the manifest carries both.
 Real microphone data is collected by the device and folded back into training by one pipeline: a
 **guided recorder** on the CoreS3 (`spkNN` ids, two reads per prompt, energy-VAD end-pointing) → `scripts/ingest.sh` → `kws-qc`, an audio gate then a Whisper large-v3 **content gate**
 that also segments approved sentence takes into 1 s word clips → `kws-dataset build` → train →
-export → `kws-eval --recordings` (§6.11), chained by `scripts/data-loop.sh`. On the first session (208 takes, two speakers) it approved **65/208
+export → `kws-eval --recordings` (§6.11), chained by `scripts/data-loop.sh`. On the first session (208 takes, two sessions) it approved **65/208
 (31 %)**, up from 48/208 — three QC fixes, not a looser gate: Whisper writes light levels as numerals,
 glues keywords into one token, and one hallucinated two-letter keyword was rejecting clean negatives.
 A fourth fix requiring whole-token matches moved the count *back down* 69 → 65 by removing false
@@ -257,8 +263,8 @@ use:
 |---|---|---|
 | synthetic held-out | MSWC + TTS clips, noise-mixed | voice/speaker-disjoint split (v2 rows carry the §4.3 leak) |
 | synthetic catalog | TTS-synthesised phrases | test voices also in training — **in-domain** |
-| real speech, held-out | device microphone | speaker not in train |
-| real speech, user-customised | device microphone | speaker's own clips in train |
+| real speech, held-out | device microphone | recording session not in train (same voice) |
+| real speech, user-customised | device microphone | session's own clips in train |
 
 "Catalog full-intent accuracy" scores every valid command end-to-end (audio → MFCC → detector →
 grammar → intent); one wrong or missed word fails the entry.
@@ -340,8 +346,8 @@ QC-approved through §4.5, as their own feature set at sampling weight 5:
 | Generic synthetic "hey bus", laptop speaker | 3 of 3 (0.96–0.99) | 0 of 3 (0.59–0.64) |
 
 The last row is the stated price, **generic-voice margin**: the wake model is customised to the
-device's main users, the policy the command model follows (§6.11), and each further user's five takes
-go through the same loop. The false-accept rate on conversational speech is **unmeasured**.
+device's user, the policy the command model follows (§6.11); a second user's five takes would go
+through the same loop, untested so far. The false-accept rate on conversational speech is **unmeasured**.
 
 ### 6.4 E5 — voice diversity: a net regression containing a large per-device gain
 
@@ -423,7 +429,7 @@ architecture, same held-out split, 2026-09-03):
 
 QAT recovers all of PTQ's loss **and adds 1.8 points over the float model**: the fake-quant fine-tune
 found a better minimum for the quantised graph, not just a less lossy one. It moves real speech the
-same way rather than trading it — on the same two device speakers (*user-customised, in-training*)
+same way rather than trading it — on the same two device sessions (*user-customised, in-training*)
 isolated-word accuracy goes 0.538 → **0.615** and 0.553 → **0.737**, false accepts flat at 0/10. This
 export was the model flashed on 2026-09-03; §6.13 follows it through four more deploys. A gap
 threshold measured on one dataset was not a safe basis for closing a technique. Full table: models
@@ -439,8 +445,8 @@ wide margin. Real-speech figures are *user-customised, in-training*.
 | 5,879 → 3,839 → 2,183 params | **91.2** → 88.7 → 84.7 % | **0.615** → 0.462 → 0.385 | **0.737** → 0.605 → 0.500 | 0/10 |
 
 **Keep width 32** was the verdict, because width 24 misses a ≤ 1.0-point synthetic-accuracy bar by
-2.5 points, and — the reason this is worth reporting — *both* narrower widths lose real-speaker
-accuracy on *both* speakers: narrowing trades real-voice recognition, not a synthetic fraction. The
+2.5 points, and — the reason this is worth reporting — *both* narrower widths lose real-voice
+accuracy on *both* sessions: narrowing trades real-voice recognition, not a synthetic fraction. The
 sweep had only gone in one direction; §6.13 goes the other way. Full table: models page of the
 project docs.
 
@@ -488,8 +494,8 @@ were unchanged on the QAT v3 model (§6.8); §6.12 removes the interpreter, and 
 
 ### 6.11 E6 — real microphone speech, and the reporting policy
 
-`kws-eval --recordings` reports real-recordings accuracy under exactly two labels, matched at speaker
-level against the training manifest and **never mixed**: *held-out* and *user-customised*.
+`kws-eval --recordings` reports real-recordings accuracy under exactly two labels, matched at session
+(`spkNN`) level against the training manifest and **never mixed**: *held-out* and *user-customised*.
 
 | Model | spk01 | spk02 | False accepts |
 |---|---|---|---|
@@ -501,7 +507,7 @@ The first row is the paper's central number and it is a gap: **a model reporting
 held-out MSWC/TTS split recognises roughly a quarter of what the real microphone hears.** The failure
 mode is legible — a healthy model still classifies real command speech as `_unknown_` at 0.7–0.8 —
 and invisible from the synthetic split. Rows 2 and 3 answer a *narrower* question, how
-well the model knows the people who trained it: this is a **deliberately user-customised** assistant,
+well the model knows the voice that trained it, across sessions: this is a **deliberately user-customised** assistant,
 on the command side and, with an explicit price, on the wake side (§6.3).
 The limits at this point: n is small, phrase accuracy on real speech is **0 of 4**, and zero false
 accepts on ten negatives says nothing about conversation. §6.13 and §6.15 revisit all three.
@@ -548,15 +554,15 @@ esp-nn's channel-packed vector path. On the wake model the residual outside the 
 ### 6.13 Command model: capacity, data recipe, and a deploy rule (2026-09-04 → 09-07)
 
 After §6.11, five command-model deploys and five rejected candidates followed, all scored the same
-way: `eval_recordings` over the full QC-approved set, every speaker labelled against the training
+way: `eval_recordings` over the full QC-approved set, every session labelled against the training
 manifest, plus a **deploy rule** fixed before the second candidate was trained — *aggregate
-real-voice words ≥ the deployed model's, false accepts no worse, and the weakest speaker
-improved* — applied as two hard filters and a ranking objective. Isolated-word accuracy per speaker
+real-voice words ≥ the deployed model's, false accepts no worse, and the weakest session
+improved* — applied as two hard filters and a ranking objective. Isolated-word accuracy per session (all one voice)
 (n in the header; all *user-customised, in-training* unless marked held-out):
 
 | Model (w = width) | spk01 (13) | spk02 (38) | spk10 (146) | spk18 (36) | all | FA |
 |---|---|---|---|---|---|---|
-| v3 QAT w32, 2 speakers (§6.11) | 0.615 | 0.737 | 0.479 ho | — | 0.538 | 3/29 |
+| v3 QAT w32, 2 sessions (§6.11) | 0.615 | 0.737 | 0.479 ho | — | 0.538 | 3/29 |
 | + spk10 in training, w32 | 0.538 | 0.605 | 0.678 | — | 0.655 | 1/29 |
 | **w48**, same data | 0.923 | 0.895 | 0.856 | 0.333 ho | 0.785 | **0/32** |
 | w48, TTS regenerated, per-clip gate | 0.846 | 0.895 | 0.815 | 0.667 ho | 0.807 | 1/32 |
@@ -565,9 +571,9 @@ improved* — applied as two hard filters and a ranking objective. Isolated-word
 | **w48, same recipe, + field takes** (deployed) | **1.000** | **1.000** | **0.952** | **0.778** | **0.936** | **0/32** |
 | + per-clip van draws (run 4) | 0.923 | 0.974 | 0.938 | 0.750 | 0.914 | 2/32 |
 
-Four findings. **Capacity, not crowding.** Adding a third speaker at width 32 cost both existing
-speakers 8 and 13 points; width 48 recovered both past their two-speaker numbers *and* lifted the
-third, which is what "the model ran out of parameters" predicts and "the third speaker crowded the
+Four findings. **Capacity, not crowding.** Adding a third session at width 32 cost both existing
+sessions 8 and 13 points; width 48 recovered both past their two-session numbers *and* lifted the
+third, which is what "the model ran out of parameters" predicts and "the third session crowded the
 others out" does not. Width 40 was trained too and must not be deployed at any accuracy: 40 channels
 miss esp-nn's 16-alignment fast path, so a model 28 % smaller in MACs asks for **59,632 B** of
 internal scratch against width 48's 29,824 B. On the device the wider model's `Invoke` rose 1.55× on
@@ -581,7 +587,7 @@ dominant lever, not width.** An 8-run grid (width {32, 48} × real-weight {1, 3}
 {10, 20}) on one fixed dataset: every `real-weight 3` row beats its counterpart by 0.15–0.32
 aggregate points, width by ~0.1–0.15 at matched recipe, and QAT length reads as a small
 false-accept/aggregate trade on top. Three rounds of *data* work — regenerating the TTS cache, the
-voice gate, van augmentation — each cleared the false-accept and weakest-speaker bars and missed the
+voice gate, van augmentation — each cleared the false-accept and weakest-session bars and missed the
 aggregate by a few points; one *recipe* change cleared all three by the widest margin yet, at
 identical MACs and bytes, and survived a from-scratch rebuild with 285 new field clips folded in
 (0.919 → **0.936**, the deployed `86b7105e`). The plain-recipe retrain on the same rebuild is the
@@ -607,7 +613,7 @@ and 30 % left recall pinned at the ceiling (every real positive, held-out sessio
 0.996) and moved only the safety side: TTS near-miss false fires 1–5 → 15 → 33 of 48, and three
 ordinary commands in the held-out session fired the wake word. Ten real recordings are a far
 narrower target than nine thousand Piper clips, and that narrowness is what rejects the near-miss
-family; the fix for two-speaker overfitting is more real speakers, not less real weight.
+family; the fix for overfitting to a few sessions is more real sessions (and, untested, more voices), not less real weight.
 
 The same rounds found why the wake word felt slow. Spliced into real room tone and measured from the
 phrase *end*, the deployed model fired **1.06 s** late (median; 1.20 s worst), on a second
@@ -636,7 +642,7 @@ Split 50/50 by clip, the held-out halves became the acceptance rows:
 | Fire latency, held out (median) | 0.14 s | **0.02 s** |
 
 The cost lands where the round expected, on the synthetic gate, and it is the same trade round 5's
-user-customisation decision already made once. The wake model is, deliberately, tuned to the people
+user-customisation decision already made once. The wake model is, deliberately, tuned to the voice
 and the room it lives with; the false-accept rate on *generic* German conversation remains
 unmeasured beyond 2.9 minutes of room tone and one session.
 
@@ -647,7 +653,7 @@ on the full QC-approved set with `kws-eval --recordings --width 48 --qat`, same 
 phrases are read command sentences (guided and field-derived) decoded through the streaming detector
 and the grammar exactly as on the device, and a phrase counts only if the *exact* intent comes out:
 
-| Speaker | Isolated words | E2E phrase → exact intent | Negatives, false accepts |
+| Session | Isolated words | E2E phrase → exact intent | Negatives, false accepts |
 |---|---|---|---|
 | spk01 | 1.000 (13) | — | — |
 | spk02 | 1.000 (38) | 0.000 (4) | 0/10 |
@@ -657,8 +663,8 @@ and the grammar exactly as on the device, and a phrase counts only if the *exact
 | spk20 | 0.800 (20) | 0.083 (12) | 0/1 |
 | **All** | **0.911 (269)** | **≈ 0.10 (14/139)** | **0/43** |
 
-The classifier is at 0.94 on words on the deploy scoreboard, 0.91 over all six speakers, and
-0 false accepts in 43; the streaming decoder over the same speakers' read sentences yields ≈ 0.10
+The classifier is at 0.94 on words on the deploy scoreboard, 0.91 over all six sessions, and
+0 false accepts in 43; the streaming decoder over the same sessions' read sentences yields ≈ 0.10
 exact intents. Every command-model change in §6.13 moved phrase intent by at most a few points
 (spk10: 0.062 → 0.082 → 0.113 → 0.082 across four models), and a read-only sweep of the decoder's
 threshold and hangover over 88 field takes moved device–transcript agreement from 3/18 to 4/18 with
@@ -670,6 +676,83 @@ and the device's own answer agreed with the transcript on 0.125 (spk18), 0.500 (
 not today's — with 18 false alarms at either wake gate. §6.2's catalog result (0.689 on synthetic
 phrases, in-domain) was never a real-speech number, and this is the real-speech number.
 
+### 6.16 Enrollment matching against the fixed classifier, for the device's one user (2026-10-09/10)
+
+§6.15 leaves one question for this device: it has one user, who can record their own commands,
+so does a recogniser that *matches* new speech against those recordings (query-by-example
+[17]) do better than the trained classifier plus grammar? Three matchers share one interface
+(templates per label → ranked distances): **MFCC-DTW** (the front-end's cepstra over the whole
+utterance, per-utterance mean/variance normalisation, length-normalised path cost, best
+template wins); **embedding** (the deployed INT8 model's 48-d global-average-pool output, a
+prototype for short clips, cosine DTW over 1 s windows for long ones); and a
+**learned encoder** (13,120-parameter DS-CNN, AM-softmax with a reject logit). The baseline is the
+deployed system itself: the command model with the device's window decoder and grammar.
+
+**Protocol.** Leave-one-take-out over two pools of the owner's QC-approved recordings: *W*, 651
+isolated words and sentence-cut word clips, and *P*, 228 read command sentences
+labelled by intent (49 intents). Templates are at most five takes per session and label, the
+query take always excluded. The open set is the 85 approved negatives — the owner's own
+non-command speech, the only negatives that exist. A reject threshold is calibrated on one
+session fold of the negatives (spk20 + spk22, 43 clips) and tested on the other (spk02/10/18/19,
+42), and vice versa; **AC@0FA** is the share of held-out commands accepted *and* correct at that
+threshold (mean of both folds), FA the false accepts summed over both test folds. Two decision
+modes: *streamed*, a sliding decision every 100 ms (fire on two consecutive steps), and *gated*,
+one decision per utterance — the device's real use, a single match after the wake word. The
+classifier's sentence column is its exact device decode: a negative counts as a false accept only
+if it parses to a valid intent.
+
+| Method, mode | W top-1 | W AC@0FA | W FA | P top-1 | P AC@0FA | P FA | P AC, spk22 | ms/match P |
+|---|---|---|---|---|---|---|---|---|
+| Deployed classifier + grammar, streamed | 0.736 | 0.086 | 2 | 0.061 | 0.061 | 0 | 0.047 | 26 |
+| Deployed classifier + grammar, gated | 0.736 | 0.000 | 0 | 0.061 | 0.061 | 0 | 0.047 | 17 |
+| MFCC-DTW, streamed | 0.856 | 0.610 | 1 | 0.895 | 0.439 | 1 | 0.000 | 144 |
+| **MFCC-DTW, gated** | **0.856** | **0.638** | 1 | **0.895** | **0.664** | 1 | **0.561** | 134 |
+| Embedding, streamed | 0.790 | 0.244 | 2 | 0.877 | 0.776 | 1 | — | 73 |
+| Embedding, gated | 0.790 | 0.776 | **10** | 0.877 | 0.792 | **10** | — | 61 |
+| DTW ∧ second method agree, gated | 0.856 | 0.591 | 1 | 0.895 | 0.779 | 3 | — | 154 |
+| Learned encoder, streamed | 0.76 | 0.31–0.39 | 2 | 0.86–0.89 | 0.78–0.79 | 1–2 | — | 61 |
+
+(spk22 is the only session in no model's training data; its column applies the threshold of the
+fold without it. Times are one desktop CPU core, not the device.)
+
+**Recognition is not the problem; rejection decides.** Closed-set, every matcher beats the
+classifier, on sentences by an order of magnitude (0.86–0.90 against 0.06): the classifier's
+sentence figure is limited by the word→sentence path of §6.15, which a whole-utterance match does
+not have. Open-set, the ranking that matters for a device that must stay silent when not
+addressed: **MFCC-DTW in gated mode is the only method that is both accurate and stable** — 0.664
+of commanded sentences turned into the right intent with one false accept in 85 across held-out
+folds, 0.561 on the unseen session, against 0.061 and 0.047 for the deployed path. The embedding's
+gated numbers look better (0.79) but are not a result: positives and negatives fall in a 0.007–0.02
+band of cosine distance, so each fold's threshold lets 10 negatives through on the other. Requiring
+two methods to agree costs both and buys nothing on words; the learned encoder (paper notes E69)
+lost to the plain embedding on closed-set accuracy and swung between seeds. Gating — one decision
+per utterance instead of a stream — is worth 0.44 → 0.66 for DTW on sentences and nothing for the
+classifier.
+
+**The classifier is confidently wrong on the owner's other speech.** As a word spotter its INT8
+softmax reaches the top code (255/256) on whole negative clips from several sessions, so in gated
+word mode no threshold accepts anything at zero false accepts; on the device only the grammar keeps
+those words from becoming intents. This holds although the approved negatives are *in its
+training set* as `_unknown_` windows, which tilts every FA column toward the classifier.
+
+**What the comparison does not show.** Every recording is one voice: enrollment fits that by
+construction (a second user enrolls their own takes), but whether one user's templates reject
+another person's speech is unmeasured, and so is any classifier figure for a second voice.
+Leave-one-take-out lets neighbouring sentence cuts of one take serve as template and query, so
+the W figures are optimistic; P is not affected. 85 negatives, 41 from one session, and 42–43 per
+calibration fold cannot pin a false-accept rate below a few percent. The DTW cost is measured on a
+desktop core against every enrolled template; on the ESP32-S3 it is unmeasured, and a gated match
+against 49 intents × a few takes is the budget to measure, not the 100 ms streaming step.
+
+**Conclusion for this device.** For the use case it was built for — one user, a wake word, then one
+spoken command — **wake word → one MFCC-DTW match against the user's enrolled sentences → reject
+threshold** is the better recogniser: ten times the deployed path's exact intents, at one false accept in 85
+against the classifier's none, on held-out folds and on the unseen session, with no training step,
+and enrollment instead of retraining when a command is added. The classifier keeps two jobs it
+does well: isolated words (0.94–1.00 on the deploy scoreboard), and a fallback for a sentence the
+user never enrolled. Nothing is deployed on this evidence; the open items are the on-device DTW
+cost, more of the owner's non-command speech, and a second voice.
+
 ## 7. Limitations and future work
 
 - **The sentence gap is the finding and the open problem.** Isolated words at 0.91–0.94, exact
@@ -678,12 +761,17 @@ phrases, in-domain) was never a real-speech number, and this is the real-speech 
   lattice parse over the existing posteriors so the grammar weighs in before the decoder commits
   (specified, unrun), per-word segmentation diagnostics on the 125 failing phrases, and the
   streaming transducer of §6.6 once phrase data is no longer 392 synthetic sentences.
-- **Real-speech evaluation is thin, and the deploy rule inherits that.** Six speakers, most cells
+- **Enrollment matching is the measured way past the sentence gap, not yet a deployed one.** MFCC-DTW
+  after the wake word beats the classifier path tenfold on exact intents (§6.16), but its on-device cost,
+  its false-accept rate beyond 85 negatives of one voice, and how a user's templates treat another
+  person's speech are unmeasured.
+- **Real-speech evaluation is thin, and the deploy rule inherits that.** Six sessions of one voice, most cells
   13–38 clips, one clip per word for two of them; a single false accept on 19 negatives flips the
-  rule and has done so between identical runs. Seed variance is being measured; grouped speaker
-  k-fold is planned once enough speaker groups cover every word. Every real-voice number is
-  *user-customised*: the held-out speakers of one round are in training the next, by design.
-- **Synthetic data.** 15 of 21 command words have no real clips beyond the device's users, so those
+  rule and has done so between identical runs. Seed variance is being measured; grouped session
+  k-fold is planned once enough session groups cover every word. Every real-voice number is
+  *user-customised*: the held-out sessions of one round are in training the next, by design, and
+  all of them are one speaker — performance for any second voice is unmeasured.
+- **Synthetic data.** 15 of 21 command words have no real clips beyond the device's one user, so those
   per-word numbers are not real-speech performance; the voice gate proves a voice is German and
   intelligible, not that its rendering of a 0.3 s word matches how people say it.
 - **The combined mode is measured for cost and field agreement, not recall.** A field take exists
@@ -705,10 +793,12 @@ intent validity out of the model. What we most want to travel is methodological:
 on the test axis as well as the training axis, a machine check for the one property of synthetic
 data nobody verifies by ear, and a device-to-dataset loop with a fixed deploy rule that turned the
 project's biggest assumptions into measurements. Those measurements are the findings. On real speech
-the stock model recognised a quarter of what it claimed on its own split; closing that gap for named
-users took capacity and a 3× weight on real clips more than it took data, and is a design choice with
+the stock model recognised a quarter of what it claimed on its own split; closing that gap for the
+device's one user took capacity and a 3× weight on real clips more than it took data, and is a design choice with
 a stated price. And a word classifier at 0.94 composes into an intent recogniser at 0.10: the next
-gap is not in the model.
+gap is not in the model. For a device with one user, the measured answer is not a better classifier
+but no classifier on that path: one template match per utterance against the user's own recordings
+turned 0.66 of sentences into the right intent where the deployed path managed 0.06.
 
 ## References
 

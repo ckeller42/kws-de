@@ -1,4 +1,4 @@
-"""E70: grammar-constrained decoding (review S1) measured offline, host-only.
+"""E72: grammar-constrained decoding (review S1) measured offline, host-only.
 
 Runs each model ONCE over every approved phrase and negative clip, caches the
 per-step posteriors, then replays `kws_de.window_intent.align_scores` +

@@ -111,11 +111,11 @@ def rescore(words: list, seconds: list, floor: float = RESCORE_FLOOR):
 # docs/superpowers/specs/2026-10-10-grammar-constrained-decoding-design.md).
 # Instead of firing words and parsing them, every valid intent is aligned
 # against the window's smoothed posteriors and the best one is taken on a
-# margin. Defaults here are the E70 sweep's starting grid, not device constants
+# margin. Defaults here are the E72 sweep's starting grid, not device constants
 # yet: the firmware port pins them once the sweep has chosen.
 ALIGN_SMOOTH_WIN = 3  # stream.c's KWS_SMOOTH_WIN: align over the same smoothed vector
 BACKGROUND_LABELS = ("_silence_", "_unknown_")  # what a step not on a token must explain itself as
-# Pinned to intent.h by tests/test_window_intent.py (chosen by E70's sweep).
+# Pinned to intent.h by tests/test_window_intent.py (chosen by E72's sweep).
 ALIGN_FLOOR = 0.10  # intent.h INTENT_ALIGN_FLOOR
 ALIGN_TAU = 0.70  # intent.h INTENT_ALIGN_TAU
 ALIGN_MAX_STEPS = 32  # intent.h INTENT_ALIGN_MAX_STEPS: the device keeps a window's first 32 steps
@@ -254,7 +254,7 @@ def decode_window(
     """Run the device's per-window path over `steps` (one posterior per
     recogniser step; the first `first_ms` after the window opened, default
     `step_ms`) and return the intent (Intent or Rejection) wake.cc would report:
-    the grammar-constrained alignment first (E70; `align=False` is the pre-E70
+    the grammar-constrained alignment first (E72; `align=False` is the pre-E72
     device), then the fired-word parse + rescore as the fallback."""
     from kws_de.stream import KeywordStream
 

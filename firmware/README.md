@@ -52,7 +52,7 @@ commands (mode switching, status) — see "Serial commands" below.
 Docker (no local IDF needed):
 
 ```bash
-docker run --rm -v "$PWD/firmware:/project" -w /project espressif/idf:v5.5.5 idf.py build
+docker run --rm -v "$PWD/firmware:/project" -w /project espressif/idf:v6.1 idf.py build
 ```
 
 Native, with ESP-IDF already installed and exported:
@@ -66,8 +66,9 @@ idf.py build
 Host-only unit tests (`mfcc`, `stream`, `wav`, `prompts`, `vad`,
 `wakefront`; needs `cc`/`c++` and nothing else): `make -C firmware/test`.
 
-The firmware is pinned to **ESP-IDF v5.5.5** (a newer esp_tinyusb needs an
-`esp_vfs_fat_register` signature that only lands in v6.x — untested here).
+The firmware is pinned to **ESP-IDF v6.1**, with the M5Stack CoreS3 BSP `^4`
+and esp_tinyusb `^2` — the same framework as the open-california satellite
+firmware, so the two can share code.
 The pin is kept equal in three places: the version-check warning in
 `firmware/CMakeLists.txt`, `esp_idf_version` in
 `.github/workflows/firmware.yml`, and this README — update all three
@@ -90,7 +91,7 @@ From a local build instead, flash straight from the container:
 
 ```bash
 docker run --rm -v "$PWD/firmware:/project" -w /project --device=/dev/ttyACM0 \
-  espressif/idf:v5.5.5 idf.py -p /dev/ttyACM0 flash
+  espressif/idf:v6.1 idf.py -p /dev/ttyACM0 flash
 ```
 
 ## Modes and the selection screen
@@ -475,7 +476,7 @@ answers again).
 A Raspberry Pi with ESP-IDF at `~/esp/esp-idf` can build natively:
 
 ```bash
-git -C ~/esp/esp-idf checkout v5.5.5
+git -C ~/esp/esp-idf checkout v6.1
 ~/esp/esp-idf/install.sh esp32s3
 . ~/esp/esp-idf/export.sh
 cd firmware && idf.py build

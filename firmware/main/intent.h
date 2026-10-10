@@ -45,11 +45,11 @@ typedef struct {
 intent_t intent_parse(const char *words);
 
 /* Grammar-constrained decoding at window close (architecture review S1,
-   docs/paper-notes.md E70): instead of parsing the words the stream decoder
+   docs/paper-notes.md E72): instead of parsing the words the stream decoder
    fired, every valid intent is aligned against the window's smoothed
    posteriors and the best one is taken when its confidence clears
    INTENT_ALIGN_TAU. The constants were chosen by scripts/sweep-align.py on
-   the E68 gain2 models and belong with the model export (E70: the older
+   the E68 gain2 models and belong with the model export (E72: the older
    86b7105e needs its own tau), not here forever. kws_de.window_intent pins
    its copies to these defines. */
 /** @brief A token cannot sit on a step whose smoothed posterior is below this. */

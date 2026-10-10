@@ -75,7 +75,7 @@ static volatile int64_t s_off_at_us;   /* assist window deadline, 0 = run until 
 static volatile int64_t s_win_open_us; /* when the current window opened (recognise_listen_for); ASSIST_WAKE_TAIL_MS anchor */
 static volatile bool s_cmd_fired;      /* assist mode: a command fired in this window, tone still owed */
 /* The assist window's smoothed posteriors, one row per step, for
-   recognise_align_window() (E70). 32 x 23 floats = 2.9 kB of .bss.
+   recognise_align_window() (E72). 32 x 23 floats = 2.9 kB of .bss.
    ponytail: float for bit-parity with the Python reference; uint8 (0.7 kB)
    if internal RAM gets tight. Guarded by s_lock like the window_* buffers. */
 static float s_win_post[INTENT_ALIGN_MAX_STEPS][KWS_NUM_LABELS];

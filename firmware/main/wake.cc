@@ -433,7 +433,7 @@ static void wake_task(void *)
                            verdict instead of each re-deriving it. */
                         recognise_status_t rst;
                         recognise_get_status(&rst);
-                        /* Grammar-constrained decode first (E70): every valid
+                        /* Grammar-constrained decode first (E72): every valid
                            intent aligned against the window's posteriors. The
                            fired-word parse + rescore is the fallback, so a
                            window the aligner is unsure about does exactly what

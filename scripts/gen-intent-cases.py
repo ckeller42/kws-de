@@ -101,7 +101,7 @@ RESCORE_CASES = [
 ]
 
 
-# intent_align() cases (E70): the window's smoothed posteriors as the device
+# intent_align() cases (E72): the window's smoothed posteriors as the device
 # holds them (one row per step), expected verdict from
 # kws_de.window_intent.align_scores()+decide() at the firmware constants.
 # Built from raw per-step vectors and smoothed like stream.c (trailing mean

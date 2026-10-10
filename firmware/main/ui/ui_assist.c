@@ -96,7 +96,7 @@ void ui_show_assist(void)
     lv_obj_add_event_cb(sw_field, on_field, LV_EVENT_VALUE_CHANGED, NULL);
     s_field_on = wake_field_get();
     if (s_field_on) lv_obj_add_state(sw_field, LV_STATE_CHECKED);
-    else lv_obj_add_flag(l_rec, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_set_hidden(l_rec, true);
 
     lv_obj_t *b = lv_button_create(scr);
     lv_obj_set_size(b, 120, 44);
@@ -113,7 +113,7 @@ void ui_show_assist(void)
     lv_obj_center(card);
     lv_obj_set_style_border_width(card, 0, 0);
     lv_obj_set_style_radius(card, 12, 0);
-    lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_hidden(card, true);
 
     l_card_text = lv_label_create(card);
     lv_obj_set_style_text_font(l_card_text, &font_prompt_28, 0);
@@ -166,10 +166,10 @@ void ui_assist_refresh(const wake_status_t *wst, const recognise_status_t *rst, 
     if (fon != s_field_on) {
         s_field_on = fon;
         if (fon) {
-            lv_obj_clear_flag(l_rec, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_hidden(l_rec, false);
             lv_obj_add_state(sw_field, LV_STATE_CHECKED);
         } else {
-            lv_obj_add_flag(l_rec, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_hidden(l_rec, true);
             lv_obj_remove_state(sw_field, LV_STATE_CHECKED);
         }
     }
@@ -191,7 +191,7 @@ void ui_assist_refresh(const wake_status_t *wst, const recognise_status_t *rst, 
    lifetime is entirely LVGL-side once ui_assist_show_result() has shown it. */
 static void card_hide_cb(lv_timer_t *t)
 {
-    lv_obj_add_flag(card, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_hidden(card, true);
     s_card_timer = NULL;
     lv_timer_delete(t);
 }
@@ -202,7 +202,7 @@ void ui_assist_show_result(bool valid, const char *text, const char *heard_words
     lv_obj_set_style_bg_color(card, valid ? lv_palette_main(LV_PALETTE_GREEN) : lv_color_hex(0x8a94a0), 0);
     lv_label_set_text(l_card_text, valid ? text : "nicht verstanden");
     lv_label_set_text(l_card_words, valid ? "" : (heard_words && *heard_words ? heard_words : "(nichts gehoert)"));
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_hidden(card, false);
     if (s_card_timer) lv_timer_delete(s_card_timer);
     s_card_timer = lv_timer_create(card_hide_cb, UI_ASSIST_CARD_MS, NULL);
     lv_timer_set_repeat_count(s_card_timer, 1);

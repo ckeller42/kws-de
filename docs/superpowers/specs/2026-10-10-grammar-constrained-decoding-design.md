@@ -75,7 +75,7 @@ log line gains `intent: <text> (aligned: <score>)` so field takes record which p
 The sweep in §3 also measures the reverse order (fires first, align as fallback) so the
 choice is evidence, not taste.
 
-## 3. Measurement before any firmware (E70, host-only)
+## 3. Measurement before any firmware (E72, host-only)
 
 One script, `scripts/sweep-align.py`, in the shape of `scripts/sweep-decoder.py`: run each
 model once over the 247 approved phrases and 85 negatives, cache the per-step posteriors,
@@ -99,13 +99,13 @@ Pass: every model clears the target rows at one shared `(tau, delta, g, floor)`.
 Fail: write the entry, keep the Python reference as the measurement tool, and the next lever
 is the wider-context model (E8 transducer or two-window input), not another decoder.
 
-**Result (E70, 2026-10-10): pass.** One setting shared by the three gain2 seeds (smooth 3,
+**Result (E72, 2026-10-10): pass.** One setting shared by the three gain2 seeds (smooth 3,
 floor 0.10, tau 0.70, delta 0): phrases 28 / 28 / 33 → 72 / 80 / 77 of 247, false accepts
 0 / 0 / 1 → 0 / 0 / 1 (unchanged), report set 20 / 20 / 22 → 46 / 48 / 51 of 150. The deployed
 model needs its own tau (floor 0.25, tau 0.70: 19 → 36, 0 FA); at the gain2 setting it accepts 2
 negatives, so `tau` is exported with the model, not fixed in the firmware. `delta` only costs
 and is not ported. Order: align first (fires first lands within 1–2 clips, and only align first
-fixes the E58 case). Details in `docs/paper-notes.md` E70.
+fixes the E58 case). Details in `docs/paper-notes.md` E72.
 
 ## 4. Firmware port (second PR, only after §3 passes)
 
@@ -124,7 +124,7 @@ fixes the E58 case). Details in `docs/paper-notes.md` E70.
   pins `tau`/`delta`/`g`/`floor` to the C header.
 - Flashing and the field session are the owner's; the PR ships host-tested only.
 
-**Done (E71, 2026-10-10)** as described, with two deviations: log-posteriors are computed on the
+**Done (E73, 2026-10-10)** as described, with two deviations: log-posteriors are computed on the
 fly inside the Viterbi instead of tabulated (stack budget on the wake task), and `delta` is not
 ported. The ring is `float[32][23]` in `.bss`. `tau`/`floor` are `#define`s in `intent.h` for
 now; moving them into the model export is the owner's call when the next model is deployed.

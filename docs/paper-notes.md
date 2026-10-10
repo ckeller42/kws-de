@@ -5421,7 +5421,77 @@ model or more negatives before judging open-set again. Artifacts: `scripts/e69_{
 embed,triplet}.py`; models `models/e69_triplet_*` on the data host. `86b7105e` and
 `firmware/main/gen/` untouched.
 
-### E70 — grammar-constrained decoding at window close: 28 → 72–80 of 247 phrases at zero added false accepts (2026-10-10, host-only, feat/grammar-align)
+### E70 — firmware moves to ESP-IDF v6.1, the satellite's framework (2026-10-09, chore/idf-6.1)
+
+Why: the plan is to run the wake word + command recogniser on the camper's ESP32-S3 satellite
+(open-california), which is built on ESP-IDF v6.1 with the M5Stack CoreS3 BSP 4.1.0. One
+framework on both sides means the recogniser can be moved over as a component instead of
+being ported at the same time. v6.1 is the newest stable IDF release at this date.
+
+What changed: IDF v5.5.5 → v6.1, BSP `^2` → `^4` (LVGL 9.6), esp_tinyusb `^1` → `^2`. The
+USB-storage code moved to esp_tinyusb 2's handle-based MSC API (`tinyusb_msc_new_storage_*`,
+mount point switched with `tinyusb_msc_set_storage_mount_point`, which does not report mount
+failures, so the mount is now checked through the VFS). The BSP's `bsp_sdcard` global became
+`bsp_sdcard_get_handle()`, and the USB-Serial-JTAG driver is now its own component. No
+inference code changed: esp-nn stays pinned at 1.3.1, so the bit-exactness chain is the same.
+
+Checked: the default build and the TFLM-fallback build compile without warnings, and the host
+parity tests pass. Size on v6.1: DIRAM 212,330 of 341,760 B, command arena 47,040 B in PSRAM,
+IRAM 100 %. Not yet checked on the device (the board was offline): recording, USB-drive mode,
+and the wake/recogniser timings all need a flash before the timings in this log can be quoted
+for v6.1.
+
+Satellite budget, for context (measured by the open-california side on its v6.1 build with
+WiFi, NimBLE and the display up): 96,719 B internal heap free, largest free block 31,744 B.
+The recogniser fits only with its wake arena and scratch as static buffers and the default
+32 KB data cache; the 64 KB cache used here would not fit.
+
+### E71 — enrollment vs the deployed classifier on one protocol, streamed and gated (2026-10-10, host-only, exp/e71-gated)
+
+**Question.** E69 compared the matchers against each other but had no open-set number for the
+deployed classifier, and only a streamed decision. Which method should the device use for its
+real case: one user, wake word, then one command?
+
+**Change.** `scripts/e69_cnn.py` adds the deployed model (`86b7105e`) as an arm on the E69
+harness: W = per-word max posterior over 1 s windows (unknown/silence never a label), distance
+1 − p; P = the device's `decode_window` (identical intent on a 20-phrase self-check), distance 1 −
+the weakest fired word, no intent = reject. `--gated` gives each negative one whole-clip decision
+(positives already were). `scripts/e69_agree.py`: accept only if DTW and the classifier (W) or the
+embedding (P) agree; score = max of the two d1/d2 margins, or DTW's distance
+(`E71_AGREE_SCORE=dtw`). `scripts/e71_table.py [--spk spkNN]` regenerates both tables from the
+saved per-clip scores.
+
+| arm, mode | W top-1 | W AC@0FA | W FA | P top-1 | P AC@0FA | P AC@≤1FA | P FA | ms/match W / P |
+|---|---|---|---|---|---|---|---|---|
+| classifier, streamed | 0.736 | 0.086 | 2 | 0.061 | 0.061 | 0.061 | 0 | 2.4 / 26 |
+| classifier, gated | 0.736 | 0.000 | 0 | 0.061 | 0.061 | 0.061 | 0 | 2.7 / 17 |
+| DTW, streamed | 0.856 | 0.610 | 1 | 0.895 | 0.439 | 0.864 | 1 | 52 / 144 |
+| DTW, gated | 0.856 | 0.638 | 1 | 0.895 | 0.664 | 0.864 | 1 | 46 / 134 |
+| embed, streamed | 0.790 | 0.244 | 2 | 0.877 | 0.776 | 0.798 | 1 | 4.1 / 73 |
+| embed, gated | 0.790 | 0.776 | 10 | 0.877 | 0.792 | 0.803 | 10 | 3.9 / 61 |
+| agree (margin), gated | 0.856 | 0.591 | 1 | 0.895 | 0.779 | 0.789 | 3 | 43 / 154 |
+| agree (DTW score), gated | 0.856 | 0.566 | 2 | 0.895 | 0.794 | 0.794 | 2 | 43 / 154 |
+
+spk22 only (threshold from the fold without it): classifier P 0.047 in every mode, W gated 0.000;
+DTW gated W 0.716, P 0.561 (streamed P 0.000, the E69 outlier negative).
+
+**Findings.** (1) DTW gated is the only arm both accurate and stable at 0 FA; on sentences it is
+0.664 vs the classifier's 0.061, 0.561 vs 0.047 on spk22. (2) The embedding's gated 0.79 is not
+usable: positives and negatives sit in a 0.007–0.02 cosine band, each fold's threshold lets 10
+negatives through on the other. (3) Agreement does not beat DTW on W and costs both arms.
+(4) Gating moves DTW on P 0.439 → 0.664 and the classifier not at all. (5) The classifier's INT8
+softmax hits the top code 255/256 on whole negative clips of several sessions, so as a word
+spotter no 0-FA threshold exists; only the grammar keeps it at 0 intents. This with the negatives
+*in its training* as `_unknown_` windows — the FA columns favour it.
+
+**Caveats.** One voice throughout (spkNN = sessions). W leave-one-take-out is optimistic
+(neighbouring cuts), P is not. Gated W compares ~2.5 s negatives with ~1 s templates, which
+favours DTW somewhat. Times are one desktop core after warm-up; device cost unmeasured.
+
+**Decision.** Paper §6.16 written on this; nothing deployed. Next if pursued: DTW match cost on
+the ESP32-S3 for 49 intents × a few takes, more owner negatives, a second voice. Raw results stay
+on the data host (`.e67/results-*-gated.*`, untracked).
+### E72 — grammar-constrained decoding at window close: 28 → 72–80 of 247 phrases at zero added false accepts (2026-10-10, host-only, feat/grammar-align)
 
 **Question.** The architecture review's S1 and spec §10, finally measured. The device decides
 words before the grammar can weigh in (`stream_push()`: smooth, threshold 0.5, a run of 2 steps
@@ -5508,9 +5578,9 @@ Nothing deployed, nothing flashed; `86b7105e` and `firmware/main/gen/` untouched
 the per-speaker breakdown in the session scratch; posterior caches under
 `<data root>/cache/e70/` (regenerable).
 
-### E71 — firmware: grammar-constrained decoding at window close, ported (2026-10-10, host-only, feat/grammar-align)
+### E73 — firmware: grammar-constrained decoding at window close, ported (2026-10-10, host-only, feat/grammar-align)
 
-E70's decoder on the device, spec §4. Host-tested only — no flashing, no field session, nothing
+E72's decoder on the device, spec §4. Host-tested only — no flashing, no field session, nothing
 deployed; `86b7105e` and `firmware/main/gen/` untouched.
 
 **Firmware.** `intent.c` gains `intent_align(post, n_steps, first_ms, step_ms, floor, tau, &conf)`:
@@ -5520,7 +5590,7 @@ log-posteriors taken on the fly (a 32 × 23 float table would be 2.9 kB of stack
 task, which `intent_rescore` already overflowed once, E56); `aus` masked on steps inside
 `ASSIST_WAKE_TAIL_MS` through the same `assist_gate_in_wake_tail()` the fire path uses. Constants
 `INTENT_ALIGN_FLOOR` 0.10, `INTENT_ALIGN_TAU` 0.70, `INTENT_ALIGN_MAX_STEPS` 32 in `intent.h`;
-`delta` not ported (E70: it only costs). `recognise.cc` keeps each step's `stream.last_smoothed`
+`delta` not ported (E72: it only costs). `recognise.cc` keeps each step's `stream.last_smoothed`
 in a 32 × 23 float ring while an assist window is open (2.9 kB of `.bss`; a window extended past
 3.2 s by later fires loses its tail), cleared by `recognise_listen_for()`; `recognise_align_window()`
 runs the alignment over it under the status lock, so the window close never copies it. `wake.cc`'s
@@ -5530,7 +5600,7 @@ field take records which path answered. `window_words`/`window_intent` and field
 untouched.
 
 **Reference and parity.** `kws_de.window_intent.decode_window()` now aligns first too
-(`align=False` is the pre-E70 device), with `ALIGN_FLOOR`/`ALIGN_TAU`/`ALIGN_MAX_STEPS`/
+(`align=False` is the pre-E72 device), with `ALIGN_FLOOR`/`ALIGN_TAU`/`ALIGN_MAX_STEPS`/
 `ALIGN_SMOOTH_WIN` pinned to `intent.h`/`features_config.h` by `tests/test_window_intent.py`;
 `eval_recordings` therefore scores phrases and negatives through the aligned path from now on.
 `scripts/gen-intent-cases.py` emits 15 align cases — the window's smoothed posteriors as the
@@ -5540,8 +5610,8 @@ support, below tau, nothing above the floor, wrong order, a single step, `aus` i
 same window opened late, an exact tie (grammar order wins), an action the device does not take,
 and a window longer than the ring. `test_intent.c` checks them against `intent_align` plus NULL /
 zero-step inputs: 0/15 mismatch, clean under ASan + UBSan; `make -C firmware/test`: host tests OK.
-Replaying E70's cached posteriors through `decode_window()` at the firmware constants reproduces
-E70 to the clip: 37 / 72 / 80 / 77 of 247, false accepts 2 / 0 / 0 / 1.
+Replaying E72's cached posteriors through `decode_window()` at the firmware constants reproduces
+E72 to the clip: 37 / 72 / 80 / 77 of 247, false accepts 2 / 0 / 0 / 1.
 
 **Cost.** Per window close: 49 candidates × up to 7 states × ≤ 32 steps ≈ 11 k state updates with
 one `logf` each, once per 2.5 s window — negligible against the 46 ms per 100 ms the recogniser
@@ -5550,7 +5620,7 @@ boot-time free figure are the firmware CI job's and the owner's to confirm.
 
 **What the host cannot tell.** The device's first window reaches back over "…Bus"; the tail mask
 handles that on paper and in the parity cases, not yet on a real window. The constants are the
-gain2 models' (E70); the deployed `86b7105e` needs floor 0.25 to stay at 0 false accepts, so
+gain2 models' (E72); the deployed `86b7105e` needs floor 0.25 to stay at 0 false accepts, so
 flashing this firmware with the old model is not the measured configuration — deploy gain2 s1 with
 it, or export the model's own `tau`.
 
@@ -5560,8 +5630,8 @@ it, or export the model's own `tau`.
   effective n ≈ (speaker, word) pairs; `kws-benchmark --folds 5` over real speakers only, TTS always
   train-side, mean ± std + per-speaker table. Build after v3 once ≥ 5 speaker groups cover every
   command.
-- Probabilistic slot decoding (spec §10): measured as E70 — grammar-constrained alignment over the
+- Probabilistic slot decoding (spec §10): measured as E72 — grammar-constrained alignment over the
   window's posteriors lifts phrases 28 → 72–80 of 247 at unchanged false accepts on the E68 models.
-  Ported as E71 (host-tested). Open: the field session that tests the wake-tail mask on real
+  Ported as E73 (host-tested). Open: the field session that tests the wake-tail mask on real
   windows; temperature calibration and a per-class background only if the port's field numbers
   call for them.
