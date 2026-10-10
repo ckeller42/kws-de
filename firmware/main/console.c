@@ -7,7 +7,7 @@
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_log.h"
 #include "field.h"
-#include "tusb_cdc_acm.h"
+#include "tinyusb_cdc_acm.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gen/model_config.h"
