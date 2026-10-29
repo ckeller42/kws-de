@@ -433,14 +433,25 @@ static void wake_task(void *)
                            verdict instead of each re-deriving it. */
                         recognise_status_t rst;
                         recognise_get_status(&rst);
-                        intent_t iv = intent_parse(rst.window_intent);
+                        /* Grammar-constrained decode first (E72): every valid
+                           intent aligned against the window's posteriors. The
+                           fired-word parse + rescore is the fallback, so a
+                           window the aligner is unsure about does exactly what
+                           it did before. */
+                        float align_conf = 0.f;
+                        intent_t iv = recognise_align_window(&align_conf);
+                        bool aligned = iv.valid;
                         const char *rescored_from = nullptr, *rescored_to = nullptr;
+                        if (!iv.valid) iv = intent_parse(rst.window_intent);
                         if (!iv.valid)
                             iv = intent_rescore(rst.window_intent, rst.window_seconds, INTENT_RESCORE_FLOOR,
                                                  &rescored_from, &rescored_to);
                         char text[64];
                         intent_format(&iv, text, sizeof text);
-                        if (iv.valid && rescored_to)
+                        if (aligned)
+                            ESP_LOGI(TAG, "intent: %s (aligned %.2f; fires: %s)", text, (double)align_conf,
+                                     rst.window_intent);
+                        else if (iv.valid && rescored_to)
                             ESP_LOGI(TAG, "intent: %s (rescored: %s->%s)", text, rescored_from, rescored_to);
                         else if (iv.valid) ESP_LOGI(TAG, "intent: %s", text);
                         else ESP_LOGI(TAG, "intent: none (%s)", rst.window_intent);

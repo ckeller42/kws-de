@@ -8,6 +8,9 @@ Run from the repo root: uv run python scripts/gen-intent-cases.py
 
 import pathlib
 
+import numpy as np
+
+from kws_de import config, window_intent
 from kws_de.grammar import Intent, parse
 from kws_de.window_intent import rescore
 
@@ -98,6 +101,71 @@ RESCORE_CASES = [
 ]
 
 
+# intent_align() cases (E72): the window's smoothed posteriors as the device
+# holds them (one row per step), expected verdict from
+# kws_de.window_intent.align_scores()+decide() at the firmware constants.
+# Built from raw per-step vectors and smoothed like stream.c (trailing mean
+# over KWS_SMOOTH_WIN) so the C function sees exactly stream_t.last_smoothed.
+def _post(label, p=0.9, second=None, p2=0.0):
+    v = np.full(len(config.COMMAND_LABELS), 0.001)
+    v[config.COMMAND_LABELS.index(label)] = p
+    if second:
+        v[config.COMMAND_LABELS.index(second)] = p2
+    return v
+
+
+_SIL = [_post("_silence_")]
+ALIGN_CASES = [
+    # (name, raw steps, first_ms)
+    ("licht an", _SIL * 2 + [_post("Licht")] * 3 + [_post("an")] * 3, 100),
+    (
+        "licht kueche an",
+        _SIL * 2 + [_post("Licht")] * 3 + [_post("Küche")] * 2 + [_post("an")] * 3,
+        100,
+    ),
+    ("licht fuenfzig (level)", _SIL + [_post("Licht")] * 3 + [_post("fünfzig")] * 3, 100),
+    ("aufstelldach auf", [_post("Aufstelldach")] * 3 + [_post("auf")] * 3, 100),
+    # a one-step zone the fire path cannot emit (run 1 < KWS_MIN_CONSECUTIVE)
+    (
+        "one-step zone",
+        _SIL * 3
+        + [_post("Licht")] * 3
+        + [_post("Küche", 0.6, "_unknown_", 0.39)]
+        + [_post("_unknown_", 0.6, "Küche", 0.39)]
+        + [_post("an")] * 3,
+        100,
+    ),
+    # zone never above background: not invented
+    (
+        "zone unsupported",
+        [_post("Licht")] * 3 + [_post("_unknown_", 0.5, "Küche", 0.45)] * 3 + [_post("an")] * 3,
+        100,
+    ),
+    # weak everything: a candidate exists but its confidence is under tau
+    (
+        "below tau",
+        [_post("Licht", 0.4, "_unknown_", 0.5)] * 3 + [_post("an", 0.4, "_unknown_", 0.5)] * 3,
+        100,
+    ),
+    # nothing clears the floor: no candidate at all
+    ("noise", [np.full(len(config.COMMAND_LABELS), 1 / len(config.COMMAND_LABELS))] * 8, 100),
+    # action before device: no monotone path
+    ("wrong order", [_post("an")] * 3 + _SIL * 3 + [_post("Licht")] * 3, 100),
+    # a single step cannot carry two tokens
+    ("one step", [_post("Licht", 0.6, "an", 0.3)], 100),
+    # "aus" inside the wake tail is the "...Bus" artefact: masked, Licht + an remain
+    ("tail aus", [_post("aus")] * 2 + [_post("Licht")] * 3 + [_post("an")] * 3, 100),
+    # the same window opened late enough that "aus" is real: duplicate action, "an" wins the path
+    ("late aus", [_post("aus")] * 2 + [_post("Licht")] * 3 + [_post("an")] * 3, 600),
+    # exact tie between two actions: the first candidate in grammar order wins (an before aus)
+    ("tie", [_post("Licht")] * 3 + [_post("an", 0.5, "aus", 0.5)] * 3, 100),
+    # an action the device does not take: Kühlschrank + auf has no candidate; rejected or weak
+    ("invalid action", [_post("Kühlschrank")] * 3 + [_post("auf")] * 3, 100),
+    # longer than the device keeps: steps past INTENT_ALIGN_MAX_STEPS are dropped
+    ("too long", _SIL * 30 + [_post("Licht")] * 3 + [_post("an")] * 3, 100),
+]
+
+
 def c_str(s: str | None) -> str:
     """A C string literal holding `s` verbatim (UTF-8 source, like gen/labels.h)."""
     if s is None:
@@ -160,9 +228,53 @@ def main() -> None:
             f"{c_str(d)}, {c_str(z)}, {c_str(a)}, {c_str(sub[1] if sub else None)}}},"
         )
     lines.append("};")
+    lines += [
+        "",
+        "typedef struct {",
+        "    const char *name;",
+        "    int n_steps;",
+        "    int first_ms;",
+        "    const float *post; /* n_steps x KWS_NUM_LABELS smoothed posteriors, row-major */",
+        "    bool valid;",
+        "    const char *device;",
+        "    const char *zone;",
+        "    const char *action;",
+        "} align_case_t;",
+        "",
+        f"#define ALIGN_CASE_COUNT {len(ALIGN_CASES)}",
+    ]
+    refs = []
+    for i, (name, raw, first_ms) in enumerate(ALIGN_CASES):
+        sm = window_intent.smoothed(raw, window_intent.ALIGN_SMOOTH_WIN)
+        got, _, _ = window_intent.decide(
+            window_intent.align_scores(
+                sm[: window_intent.ALIGN_MAX_STEPS],
+                config.COMMAND_LABELS,
+                floor=window_intent.ALIGN_FLOOR,
+                step_ms=100,
+                first_ms=first_ms,
+                smooth_win=1,  # already smoothed above
+            ),
+            window_intent.ALIGN_TAU,
+            0.0,
+        )
+        ok = isinstance(got, Intent)
+        d, z, a = (got.device, got.zone, got.action) if ok else (None, None, None)
+        vals = ", ".join(f"{x:.6f}f" for x in sm.ravel())
+        lines.append(f"static const float ALIGN_POST_{i}[{sm.size}] = {{{vals}}};")
+        refs.append(
+            f"  {{{c_str(name)}, {sm.shape[0]}, {first_ms}, ALIGN_POST_{i}, "
+            f"{'true' if ok else 'false'}, {c_str(d)}, {c_str(z)}, {c_str(a)}}},"
+        )
+    lines.append("static const align_case_t ALIGN_CASES[ALIGN_CASE_COUNT] = {")
+    lines += refs
+    lines.append("};")
     lines.append("")
     OUT.write_text("\n".join(lines))
-    print(f"wrote {OUT} ({len(rows)} parse + {len(RESCORE_CASES)} rescore cases)")
+    print(
+        f"wrote {OUT} ({len(rows)} parse + {len(RESCORE_CASES)} rescore + "
+        f"{len(ALIGN_CASES)} align cases)"
+    )
 
 
 if __name__ == "__main__":

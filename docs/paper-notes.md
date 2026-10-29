@@ -5492,13 +5492,154 @@ favours DTW somewhat. Times are one desktop core after warm-up; device cost unme
 the ESP32-S3 for 49 intents × a few takes, more owner negatives, a second voice. Raw results stay
 on the data host (`.e67/results-*-gated.*`, untracked).
 
+### E72 — grammar-constrained decoding at window close: 28 → 72–80 of 247 phrases at zero added false accepts (2026-10-10, host-only, feat/grammar-align)
+
+**Question.** The architecture review's S1 and spec §10, finally measured. The device decides
+words before the grammar can weigh in (`stream_push()`: smooth, threshold 0.5, a run of 2 steps
+fires one word; then `intent_parse()` all-or-nothing, one `_unknown_` retry). E41–E43 showed the
+in-context top-1 run is 1–2 steps wide and the argmax-only oracle 0.29, so no run-based decoder
+can pass that; E58 showed `Licht _unknown_ an` loses a confident zone because rescoring only runs
+when the parse fails. Proposal (`docs/superpowers/specs/2026-10-10-grammar-constrained-decoding-design.md`):
+at window close, align every valid intent against the window's posteriors and take the best on a
+confidence gate. Does that lift phrase exact-intent without adding false accepts on negatives?
+
+**Code.** `kws_de/window_intent.py`: `candidates()` (the 49 valid intents as token sequences),
+`align_scores()` (Viterbi over the chain `bg w1 bg … wL bg` per candidate — every step is
+explained by the token it sits on or as background = `_silence_` + `_unknown_` mass; tokens
+below `floor` cannot sit on a step; `aus` masked in the wake tail as the fire path does), and
+`decide()` (accept when the geometric mean of the token-step posteriors ≥ `tau` and the path-score
+margin over the best different intent ≥ `delta`). A first draft scored only the aligned tokens by
+geometric mean; its unit test showed that always prefers the shorter intent (`Licht an` beats
+`Licht Küche an` whenever the zone step is below the others), so it was replaced before any data
+was looked at. `scripts/sweep-align.py` runs each model once over the 247 approved phrases and
+85 negatives, caches the posteriors, and replays the grid (smooth 1/3 × floor 0.10/0.25 × tau
+0–0.9 × delta 0–0.2) in both window-close orders (align first with the device path as fallback,
+or fires first with align as fallback) against today's `decode_window()`. Five unit tests
+(`tests/test_window_intent.py`): the 49 candidates all parse; a one-step zone the fire path
+cannot emit is kept; a zone the evidence does not support is not invented; noise under the floor
+and an exact tie are rejected; order, step occupancy and the tail mask. `eval_recordings` and the firmware are untouched.
+
+**Protocol.** Models: deployed `86b7105e` (the bytes in `gen/model_data.h`) and E68's three
+`gain2` seeds (`3d80dec5`, `e6063c81`, `05ff578c`). Tuning set spk10's 97 phrases, report set the
+other speakers' 150 (spk22 108, spk18 17, spk20 12, spk19 9, spk02 4). A setting is eligible only
+if its false accepts on the 85 negatives are ≤ today's on the same model (0 / 0 / 0 / 1); among
+eligible settings the one with the best tuning-set exact-intent wins, ties to the higher
+`tau`/`delta`. The negatives therefore did shape the choice of `tau` (as a hard cap, not an
+objective); with 85 clips one false accept is 1.2 points, so the cap is coarse. Posterior
+stream as in `eval_recordings` (first window ends 1 s in, 100 ms stride; read phrases carry no
+"Hey Bus", so the tail mask never triggers on this data).
+
+**Result** (`align-first`, one setting shared by the three gain2 seeds: smooth 3, floor 0.10,
+tau 0.70, delta 0):
+
+| | deployed `86b7105e` | gain2 s0 | gain2 s1 | gain2 s2 |
+|---|---|---|---|---|
+| phrases exact intent, today (n=247) | 19 | 28 | 28 | 33 |
+| **align-first, shared setting** | 37 | **72** | **80** | **77** |
+| false accepts, today → aligned (n=85) | 0 → 2 | 0 → 0 | 0 → 0 | 1 → 1 |
+| align-first, best setting with FA ≤ today | 36 (floor 0.25, tau 0.70, FA 0) | 72 | 80 | 77 |
+| tune spk10 (n=97) today → aligned | 8 → 14 | 8 → 26 | 8 → 32 | 11 → 26 |
+| report, other speakers (n=150) | 11 → 22 | 20 → 46 | 20 → 48 | 22 → 51 |
+| 2-word phrases (n=111) | 16 → 26 | 25 → 46 | 22 → 43 | 28 → 44 |
+| 3-word phrases (n=136) | 3 → 10 | 3 → 26 | 6 → 37 | 5 → 33 |
+| zone dropped / invented | 22 / 0 | 1 / 0 | 1 / 1 | 4 / 0 |
+| alignment oracle (expected intent is the top candidate, no gate) | 83 | 116 | 128 | 113 |
+
+The one remaining false accept on gain2 s2 is today's (`wie spät ist es`, spk10), reached through
+the fallback — the aligner itself accepts no negative on any gain2 seed at tau 0.70. Per speaker
+on gain2 s1: spk10 8 → 32, spk22 12 → 35, spk18 3 → 5, spk20 2 → 4, spk19 3 → 3, spk02 0 → 1 —
+the lift is not one speaker's. `fires-first` lands within 1–2 clips of `align-first` on every
+model; `delta` only costs (gain2 s1 at tau 0.70: 80 / 76 / 70 / 64 for delta 0 / 0.05 / 0.10 /
+0.20, false accepts 0 throughout) because the negatives that do align have large margins — the
+token confidence `tau` is the only gate that separates. Smoothing 3 beats raw (oracle 128 vs
+115 on gain2 s1): the trailing mean does flatten one-step peaks, but it also removes the
+single-step spikes that produced most of the raw false candidates. Floor 0.10 beats 0.25.
+
+**Reading.** On the E68 models the window→intent path goes from ≈ 0.11 to 0.29–0.32 exact intent
+at unchanged false accepts, 2.6–2.9×, and the 3-word phrases — the middle-word problem of E43 —
+from ≈ 0.04 to 0.19–0.27. The classifier was never the bottleneck for sentences (E41); given the
+whole window's posteriors and the grammar as the search space, the same 25.8 kB model answers
+2–3× more sentences. The gate costs a lot: the oracle says the expected intent is the top
+candidate on 128/247 for gain2 s1, the confidence gate keeps 80 of them, and the separation is
+narrow (no negative above 0.67, correct phrases median 0.72, 10th percentile 0.57). `tau` is
+model-specific: the deployed model's confidences run lower (correct median 0.68), so at the gain2
+setting it accepts 2 negatives and needs floor 0.25 / tau 0.70 of its own for 36 at 0 FA — `tau`
+belongs with the model export, like `KWS_THRESHOLD`, not in the firmware as a constant for all
+time. Spec §3's gate as written (+10 clips on every model at ONE shared setting, false accepts
+not above today's) is therefore not met: no setting serves all four models. Its gain2 clause
+holds (+44 / +52 / +44 at one shared setting) and the deployed model clears +10 at its own floor
+(+17); the deploy candidate is gain2 (E68). What is ported is the structure plus a per-model
+floor.
+
+**Decision.** Port it (spec §4), second PR: posterior ring over the window in `recognise.cc`,
+`intent_align()` in `intent.c` over the generated grammar tables, align first at window close
+with today's parse + rescore as the fallback, parity cases through `gen-intent-cases.py`.
+Constants: smooth = `KWS_SMOOTH_WIN` (3), floor 0.10, tau 0.70; `delta` is not ported (0 adds
+nothing). What the host cannot tell: the device's first window reaches back over the "…Bus"
+tail, which the mask handles on paper only — the field session after flashing is the test.
+Nothing deployed, nothing flashed; `86b7105e` and `firmware/main/gen/` untouched. Grid CSVs and
+the per-speaker breakdown in the session scratch; posterior caches under
+`<data root>/cache/e70/` (regenerable).
+
+### E73 — firmware: grammar-constrained decoding at window close, ported (2026-10-10, host-only, feat/grammar-align)
+
+E72's decoder on the device, spec §4. Host-tested only — no flashing, no field session, nothing
+deployed; `86b7105e` and `firmware/main/gen/` untouched.
+
+**Firmware.** `intent.c` gains `intent_align(post, n_steps, first_ms, step_ms, floor, tau, &conf)`:
+the 49 candidates enumerated from the generated grammar tables (`KWS_DEVICE_ACTIONS` ×
+`KWS_ZONED_DEVICE_MASK`, no new table), Viterbi over `bg w1 bg … wL bg` per candidate with
+log-posteriors taken on the fly (a 32 × 23 float table would be 2.9 kB of stack on the wake
+task, which `intent_rescore` already overflowed once, E56); `aus` masked on steps inside
+`ASSIST_WAKE_TAIL_MS` through the same `assist_gate_in_wake_tail()` the fire path uses. Constants
+in `intent.h`: `INTENT_ALIGN_TAU` 0.70 (E72, holds for all four models), `INTENT_ALIGN_MAX_STEPS`
+32, and `INTENT_ALIGN_FLOOR` **0.25 — the embedded model's**: this firmware still carries
+`86b7105e` (`gen/model_config.h`), which accepts 2 of 85 negatives at E72's gain2 floor 0.10 and
+0 at 0.25, so the floor follows the model and moves to 0.10 in the change that exports gain2 into
+`gen/`. `delta` not ported (E72: it only costs). `recognise.cc` keeps each step's `stream.last_smoothed`
+in a 32 × 23 float ring while an assist window is open (2.9 kB of `.bss`; a window extended past
+3.2 s by later fires loses its tail), cleared by `recognise_listen_for()`; `recognise_align_window()`
+runs the alignment over it under the status lock, so the window close never copies it. `wake.cc`'s
+close edge tries the alignment first and falls back to `intent_parse` → `intent_rescore`
+unchanged; the log line reads `intent: <text> (aligned <conf>; fires: <window_intent>)` so a
+field take records which path answered. `window_words`/`window_intent` and field capture are
+untouched.
+
+**Reference and parity.** `kws_de.window_intent.decode_window()` now aligns first too
+(`align=False` is the pre-E72 device), with `ALIGN_FLOOR`/`ALIGN_TAU`/`ALIGN_MAX_STEPS`/
+`ALIGN_SMOOTH_WIN` pinned to `intent.h`/`features_config.h` by `tests/test_window_intent.py`;
+`eval_recordings` therefore scores phrases and negatives through the aligned path from now on.
+`scripts/gen-intent-cases.py` emits 15 align cases — the window's smoothed posteriors as the
+device holds them (built from raw vectors and smoothed like `stream.c`), expected verdict from the
+reference: 2- and 3-word accepts, a brightness level, a one-step zone, a zone the evidence does not
+support, below tau, nothing above the floor, wrong order, a single step, `aus` in the tail vs the
+same window opened late, an exact tie (grammar order wins), an action the device does not take,
+and a window longer than the ring. `test_intent.c` checks them against `intent_align` plus NULL /
+zero-step inputs: 0/15 mismatch, clean under ASan + UBSan; `make -C firmware/test`: host tests OK.
+Replaying E72's cached posteriors through `decode_window()` at the firmware constants (floor 0.25,
+tau 0.70): deployed `86b7105e` 19 → 36 of 247 at 0 false accepts; gain2 s0 / s1 / s2 61 / 70 / 66
+with false accepts 0 / 1 / 1 — the gain2 models want their own floor 0.10 (72 / 80 / 77, FA 0 / 0 /
+1), which the replay at 0.10 reproduces to the clip, so the two constants are one `#define` apart
+from the measured configuration either way.
+
+**Cost.** Per window close: 49 candidates × up to 7 states × ≤ 32 steps ≈ 11 k state updates with
+one `logf` each, once per 2.5 s window — negligible against the 46 ms per 100 ms the recogniser
+already spends. RAM +2.9 kB `.bss` (free internal was 37.8 kB at E44); the compile and the
+boot-time free figure are the firmware CI job's and the owner's to confirm.
+
+**What the host cannot tell.** The device's first window reaches back over "…Bus"; the tail mask
+handles that on paper and in the parity cases, not yet on a real window. Flashing this firmware as
+is (`86b7105e`, floor 0.25) is the measured 36/247-at-0-FA configuration; deploying gain2 s1 means
+exporting it into `gen/` and setting the floor to 0.10 in the same change.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
   effective n ≈ (speaker, word) pairs; `kws-benchmark --folds 5` over real speakers only, TTS always
   train-side, mean ± std + per-speaker table. Build after v3 once ≥ 5 speaker groups cover every
   command.
-- Probabilistic slot decoding (spec §10): detector thresholds before the grammar can weigh in;
-  n-best lattice parse over the existing posteriors (≤ 8 sequences per phrase, score = ∏ probs,
-  accept on tau/delta, temperature-calibrated), E11 offline re-decode of the catalog eval with
-  false-accept rate on negatives as the gate; catalog DP decoding only if > 5 points remain.
+- Probabilistic slot decoding (spec §10): measured as E72 — grammar-constrained alignment over the
+  window's posteriors lifts phrases 28 → 72–80 of 247 at unchanged false accepts on the E68 models.
+  Ported as E73 (host-tested). Open: the field session that tests the wake-tail mask on real
+  windows; temperature calibration and a per-class background only if the port's field numbers
+  call for them.

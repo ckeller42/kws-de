@@ -74,6 +74,13 @@ static FILE *s_log;
 static volatile int64_t s_off_at_us;   /* assist window deadline, 0 = run until told otherwise */
 static volatile int64_t s_win_open_us; /* when the current window opened (recognise_listen_for); ASSIST_WAKE_TAIL_MS anchor */
 static volatile bool s_cmd_fired;      /* assist mode: a command fired in this window, tone still owed */
+/* The assist window's smoothed posteriors, one row per step, for
+   recognise_align_window() (E72). 32 x 23 floats = 2.9 kB of .bss.
+   ponytail: float for bit-parity with the Python reference; uint8 (0.7 kB)
+   if internal RAM gets tight. Guarded by s_lock like the window_* buffers. */
+static float s_win_post[INTENT_ALIGN_MAX_STEPS][KWS_NUM_LABELS];
+static int s_win_steps;
+static int s_win_first_ms;             /* ms since the window opened at step 0 (tail-mask anchor) */
 
 static void log_fire(const char *word, float conf)
 {
@@ -372,6 +379,13 @@ static void recognise_task(void *)
         }
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_off_at_us && s_win_steps < INTENT_ALIGN_MAX_STEPS) {
+            /* Windowed session: keep this step's smoothed vector for the
+               window-close alignment, whether or not anything fired. */
+            if (s_win_steps == 0)
+                s_win_first_ms = (int)((esp_timer_get_time() - s_win_open_us) / 1000);
+            memcpy(s_win_post[s_win_steps++], stream.last_smoothed, sizeof s_win_post[0]);
+        }
         s_st.infer_ms = ms;
 #if KWS_CMD_TFLM
         s_st.arena_used = interp.arena_used_bytes();
@@ -495,6 +509,7 @@ extern "C" void recognise_listen_for(uint32_t ms)
     s_st.window_intent[0] = 0;
     s_st.window_words[0] = 0;
     s_st.window_seconds[0] = 0;
+    s_win_steps = 0;
     xSemaphoreGive(s_lock);
     s_cmd_fired = false;      /* a new window never inherits the last one's owed tone */
     int64_t now_us = esp_timer_get_time();
@@ -509,3 +524,11 @@ extern "C" bool recognise_take_command_fired(void)
     return v;
 }
 extern "C" void recognise_get_status(recognise_status_t *out) { xSemaphoreTake(s_lock, portMAX_DELAY); *out = s_st; xSemaphoreGive(s_lock); }
+extern "C" intent_t recognise_align_window(float *conf)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    intent_t r = intent_align(&s_win_post[0][0], s_win_steps, s_win_first_ms, 100,
+                              INTENT_ALIGN_FLOOR, INTENT_ALIGN_TAU, conf);
+    xSemaphoreGive(s_lock);
+    return r;
+}
