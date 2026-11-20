@@ -141,14 +141,14 @@ default `kws_de.config` resolves — nothing is baked in. It is dry-run by defau
 
 ```bash
 # See what a push would transfer (no changes):
-scripts/sync-data.sh --to thinky
+scripts/sync-data.sh --to odelly
 
 # Actually push, then confirm byte-for-byte:
-scripts/sync-data.sh --to thinky --run
-scripts/sync-data.sh --to thinky --verify   # sha256-manifests both ends, diffs them
+scripts/sync-data.sh --to odelly --run
+scripts/sync-data.sh --to odelly --verify   # sha256-manifests both ends, diffs them
 
 # Pull the other way (e.g. refresh the Mac backup from the primary):
-scripts/sync-data.sh --from thinky --run
+scripts/sync-data.sh --from odelly --run
 ```
 
 `kws-verify` is the manifest/diff underneath, usable on its own — `kws-verify manifest
