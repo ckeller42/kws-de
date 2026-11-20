@@ -82,3 +82,10 @@ def test_cpu_model_errors_propagate():
 
     with pytest.raises(RuntimeError, match="boom"):
         _with_cpu_fallback(state, run, lambda: "cpu")
+
+
+def test_preload_pip_cuda_libs_never_raises():
+    # With or without the nvidia wheels: a count, never an exception.
+    from kws_de.qc import _preload_pip_cuda_libs
+
+    assert _preload_pip_cuda_libs() >= 0
