@@ -1,7 +1,11 @@
 dependencies:
   idf: ">=6.1"
   espressif/m5stack_core_s3: "^4"
-  espressif/esp-tflite-micro: "^1"
+  # Pinned exactly: 1.4.2 (2026-11-02) no longer ships
+  # tensorflow/lite/schema/schema_generated.h, which recognise.cc and wake.cc
+  # include, so a floating "^1" broke the build with no change on our side.
+  # Move it in a reviewed diff together with the include paths.
+  espressif/esp-tflite-micro: "==1.4.1"
   # esp-tflite-micro pulls esp-nn in as a private dependency with a floor of
   # >=1.1.1, which would let the registry hand the device a different release
   # from the one firmware/test/Makefile links the host parity harness against —
