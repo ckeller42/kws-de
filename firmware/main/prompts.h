@@ -18,7 +18,7 @@
  * approved/scene/<token>/. */
 typedef enum {
     PROMPT_WORDS = 0, PROMPT_SENTENCES = 1, PROMPT_NEGS = 2, PROMPT_WAKE = 3, PROMPT_ELICIT = 4,
-    PROMPT_SCENE = 5,
+    PROMPT_SCENE = 5, PROMPT_LIGHT = 6,
 } prompt_set_t;
 /** @brief A shuffled walk through one prompt set. */
 typedef struct {
@@ -59,5 +59,8 @@ uint32_t    prompt_hangover_ms(prompt_set_t set);
  * clips, so grab several takes of each of the four triggers per speaker). */
 int         prompt_takes_per_prompt(prompt_set_t set);
 /** @brief Set name as used in session.csv and the UI progress line
- * ("words"|"sentences"|"negatives"|"wake"|"elicit"|"scene"). */
+ * ("words"|"sentences"|"negatives"|"wake"|"elicit"|"scene"). PROMPT_LIGHT
+ * ("Licht", #136) is written as "elicit": its takes are QC'd exactly like a
+ * Situationen answer — wake phrase cut into approved/wake/, the command filed
+ * as a phrase and compared against the expected intent. */
 const char *prompt_set_name(prompt_set_t set);

@@ -52,11 +52,15 @@ void ui_assist_show_result(bool valid, const char *text, const char *heard_words
  * UI_MODE_RECORD_SCENE is its "Szenen" session (PROMPT_SCENE): the speaker reads
  * one fixed scene-trigger phrase ("Gute Nacht"), collecting bootstrap positives
  * for the pending scene-trigger classes (config.SCENE_TRIGGERS).
+ * UI_MODE_RECORD_WORDS ("Einzelwort") reads the 21 isolated command words, twice each;
+ * UI_MODE_RECORD_LIGHT ("Licht") reads "Hey Bus, Licht an" / "Hey Bus, Licht aus",
+ * KWS_LIGHT_TAKES takes each — the light-only firmware's positives (#133, #136).
  * UI_MODE_WAKE is the unrelated wake-*model* test screen ("Hey Bus" demo button).
  * UI_MODE_ASSIST is the deployment shape both of those measure: the wake model
  * runs continuously and a fire opens a short window for the recogniser. */
 typedef enum {
     UI_MODE_RECORD, UI_MODE_RECORD_WAKE, UI_MODE_RECORD_ELICIT, UI_MODE_RECORD_SCENE,
+    UI_MODE_RECORD_WORDS, UI_MODE_RECORD_LIGHT,
     UI_MODE_USB, UI_MODE_RECOGNISE, UI_MODE_WAKE, UI_MODE_ASSIST, UI_MODE_MENU,
 } ui_mode_t;
 /** @brief Switch app mode. Defined in main.c; the only place that suspends/resumes consumer tasks. */

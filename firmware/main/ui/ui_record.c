@@ -145,6 +145,8 @@ void ui_record_refresh(const record_status_t *st)
        words, wake phrase included. */
     if (st->set == PROMPT_ELICIT)
         snprintf(buf, sizeof buf, "Sag es dem Bus - %d/%d", st->index + 1, st->count);
+    else if (st->set == PROMPT_LIGHT)  /* its set name is "elicit" (QC path); say what it is */
+        snprintf(buf, sizeof buf, "Licht %d/%d - take %d/%d", st->index + 1, st->count, st->take, st->takes);
     else
         snprintf(buf, sizeof buf, "%s %d/%d - read %d/%d", prompt_set_name(st->set), st->index + 1, st->count, st->take, st->takes);
     lv_label_set_text(l_counter, buf);

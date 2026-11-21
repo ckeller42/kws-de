@@ -328,3 +328,17 @@ static const char *const KWS_ELICIT_INTENTS[30] = {
   "Licht Lesen heller",
   "Licht Dach heller"
 };
+#define KWS_NUM_LIGHT_PROMPTS 2
+#define KWS_LIGHT_TAKES 10
+static const char *const KWS_LIGHT_PROMPTS[2] = {
+  "Hey Bus, Licht an",
+  "Hey Bus, Licht aus"
+};
+static const char *const KWS_LIGHT_SLUGS[2] = {
+  "hey-bus-licht-an",
+  "hey-bus-licht-aus"
+};
+static const char *const KWS_LIGHT_INTENTS[2] = {
+  "Licht an",
+  "Licht aus"
+};

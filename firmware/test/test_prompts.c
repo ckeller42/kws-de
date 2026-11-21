@@ -83,6 +83,21 @@ int main(void)
         prompt_advance(&a);
     }
 
+    /* light ("Licht", #136) set: the two light-only commands, wake word in the
+       display, the expected intent for session.csv, written as set "elicit" so
+       QC takes the elicitation path, KWS_LIGHT_TAKES takes per prompt. */
+    prompt_session_init(&a, PROMPT_LIGHT, 1);
+    assert(a.count == KWS_NUM_LIGHT_PROMPTS && a.count == 2);
+    assert(!strcmp(prompt_set_name(PROMPT_LIGHT), "elicit"));
+    assert(prompt_takes_per_prompt(PROMPT_LIGHT) == KWS_LIGHT_TAKES && KWS_LIGHT_TAKES == 10);
+    assert(prompt_cap_ms(PROMPT_LIGHT) == 9800);
+    for (int i = 0; i < a.count; i++) {
+        assert(!strncmp(prompt_text(&a), "Hey Bus, Licht a", 16));
+        assert(!strncmp(prompt_intent(&a), "Licht a", 7));
+        assert(strlen(prompt_slug(&a)) > 0);
+        prompt_advance(&a);
+    }
+
     puts("test_prompts OK");
     return 0;
 }

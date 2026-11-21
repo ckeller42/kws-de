@@ -58,6 +58,13 @@ def prompt_sets() -> tuple[list, list, list, list, list, list]:
     return words, sentences, negs, wake, elicit, scene
 
 
+def light_prompts() -> list[tuple[str, str, str]]:
+    """The "Licht" recording set (#136): (display, slug, expected intent) from
+    config.LIGHT_PROMPTS, shaped like the elicit set so record.c and QC treat a
+    take the same way: display read from the screen, intent into session.csv."""
+    return [(display, slug(display), intent) for display, intent in config.LIGHT_PROMPTS]
+
+
 def mfcc_tables() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Periodic Hann window, Slaney mel filterbank, ortho DCT-II rows — the
     three constant matrices librosa.feature.mfcc uses with our config."""
@@ -189,6 +196,12 @@ def generate(out) -> None:
     p += _c_strings("KWS_ELICIT_PROMPTS", [d for d, _, _ in elicit])
     p += _c_strings("KWS_ELICIT_SLUGS", [s for _, s, _ in elicit])
     p += _c_strings("KWS_ELICIT_INTENTS", [i for _, _, i in elicit])
+    light = light_prompts()
+    p += f"#define KWS_NUM_LIGHT_PROMPTS {len(light)}\n"
+    p += f"#define KWS_LIGHT_TAKES {config.LIGHT_TAKES}\n"
+    p += _c_strings("KWS_LIGHT_PROMPTS", [d for d, _, _ in light])
+    p += _c_strings("KWS_LIGHT_SLUGS", [s for _, s, _ in light])
+    p += _c_strings("KWS_LIGHT_INTENTS", [i for _, _, i in light])
     (out / "prompts.h").write_text(p)
 
     win, mel, dct = mfcc_tables()

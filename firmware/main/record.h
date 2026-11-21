@@ -23,6 +23,10 @@ typedef enum {
     REC_CMD_START_SCENE_SESSION, /**< Bump the speaker id, start the "Szenen" scene-trigger set
                                         (PROMPT_SCENE); session ends when it's exhausted, no
                                         chaining into negatives — same shape as the wake session. */
+    REC_CMD_START_WORDS_SESSION, /**< Bump the speaker id, start the isolated-word set (PROMPT_WORDS,
+                                        2 reads per word); session ends when it's exhausted (#136). */
+    REC_CMD_START_LIGHT_SESSION, /**< Bump the speaker id, start the "Licht" set (PROMPT_LIGHT: "Hey Bus,
+                                        Licht an" / "... aus", KWS_LIGHT_TAKES takes each); ends when exhausted (#136). */
     REC_CMD_PAUSE,               /**< Pause the recorder (goes idle, waits for a command). */
     REC_CMD_FIELD_TAKE,          /**< Assist mode: copy one field take out of the audio ring and save it.
                                       The payload is set by record_post_field_take(). */

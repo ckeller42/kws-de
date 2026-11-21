@@ -29,6 +29,8 @@ static const char *mode_name(ui_mode_t m)
     case UI_MODE_RECORD_WAKE:   return "recordwake";
     case UI_MODE_RECORD_ELICIT: return "elicit";
     case UI_MODE_RECORD_SCENE:  return "recordscene";
+    case UI_MODE_RECORD_WORDS:  return "recordwords";
+    case UI_MODE_RECORD_LIGHT:  return "recordlight";
     case UI_MODE_USB:           return "usb";
     case UI_MODE_RECOGNISE:   return "recognise";
     case UI_MODE_WAKE:        return "wake";
@@ -63,6 +65,8 @@ static void handle_line(char *line)
         else if (strcmp(arg, "recordwake") == 0) m = UI_MODE_RECORD_WAKE;
         else if (strcmp(arg, "elicit") == 0) m = UI_MODE_RECORD_ELICIT;
         else if (strcmp(arg, "recordscene") == 0) m = UI_MODE_RECORD_SCENE;
+        else if (strcmp(arg, "recordwords") == 0) m = UI_MODE_RECORD_WORDS;
+        else if (strcmp(arg, "recordlight") == 0) m = UI_MODE_RECORD_LIGHT;
         else if (strcmp(arg, "recognise") == 0) m = UI_MODE_RECOGNISE;
         else if (strcmp(arg, "wake") == 0) m = UI_MODE_WAKE;
         else if (strcmp(arg, "assist") == 0) m = UI_MODE_ASSIST;
@@ -132,7 +136,8 @@ static void handle_line(char *line)
         wake_get_last_intent(li, sizeof li);
         if (li[0]) printf("intent %s\n", li);
         if (m == UI_MODE_RECORD || m == UI_MODE_RECORD_WAKE ||
-            m == UI_MODE_RECORD_ELICIT || m == UI_MODE_RECORD_SCENE)
+            m == UI_MODE_RECORD_ELICIT || m == UI_MODE_RECORD_SCENE ||
+            m == UI_MODE_RECORD_WORDS || m == UI_MODE_RECORD_LIGHT)
             printf("phase %s index %d count %d speaker %s\n",
                    phase_name(st.phase), st.index, st.count, st.speaker);
         printf("ok\n");

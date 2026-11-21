@@ -117,6 +117,17 @@ WAKE_WORD = "Hey Bus"
 # doubled reads like the word/sentence/negative sets (real wake positives,
 # not review pairs).
 WAKE_PROMPT_REPEATS = 5
+# Guided-recorder "Licht" session (#136): the light-only firmware's two
+# commands (#133) read whole, wake word included, LIGHT_TAKES takes each — the
+# positives for enrollment (E71) and the device test. (display, expected
+# intent): the take is QC'd like a Situationen answer (session.csv set
+# "elicit"), so the wake phrase is cut into approved/wake/ and the command
+# filed as a phrase.
+LIGHT_PROMPTS: list[tuple[str, str]] = [
+    ("Hey Bus, Licht an", "Licht an"),
+    ("Hey Bus, Licht aus", "Licht aus"),
+]
+LIGHT_TAKES = 10
 WAKE_LABELS = ["wake", "_not_"]
 DEVICES = ["Licht", "Kühlschrank", "Heizung", "Aufstelldach"]
 ZONES = ["Küche", "Dach", "Außen", "Lesen"]  # light zones — apply to Licht only
