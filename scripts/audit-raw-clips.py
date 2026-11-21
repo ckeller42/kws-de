@@ -60,6 +60,7 @@ def main() -> None:
     by_src = collections.Counter()  # (src, finding) -> n, word labels only
     level = collections.defaultdict(lambda: collections.defaultdict(list))
     groups = collections.defaultdict(list)  # waveform -> [(label, speaker id)]
+    lengths = collections.defaultdict(list)
     rows = {}
     for w, items in ws.items():
         cnt = collections.Counter()
@@ -74,15 +75,18 @@ def main() -> None:
             waves[k].add(h)
             groups[h].append((w, s))
             if not np.isfinite(x).all():
-                issues["nan"] += 1
+                issues[("nan", k)] += 1
                 continue
             rms = float(np.sqrt(np.mean(x**2))) if x.size else 0.0
             db = 20 * np.log10(rms + 1e-9)
             level[k][w].append(db)
-            issues["length != 16,000"] += len(x) != N
-            issues["very quiet (< -50 dBFS)"] += db < -50
-            issues["clipped (> 10 samples at |x| > 0.99)"] += int((np.abs(x) > 0.99).sum() > 10)
-            issues["DC offset (|mean| > 0.02)"] += abs(float(x.mean())) > 0.02
+            lengths[k].append(len(x))
+            issues[("length != 16,000", k)] += int(len(x) != N)
+            issues[("very quiet (< -50 dBFS)", k)] += int(db < -50)
+            issues[("clipped (> 10 samples at |x| > 0.99)", k)] += int(
+                (np.abs(x) > 0.99).sum() > 10
+            )
+            issues[("DC offset (|mean| > 0.02)", k)] += int(abs(float(x.mean())) > 0.02)
             if w == "_unknown_":
                 continue
             # The window the build feeds: pad at the end, keep the first second
@@ -123,9 +127,15 @@ def main() -> None:
         if med:
             print(f"  {k:6} {np.median(med):6.1f}  ({min(med):.1f} .. {max(med):.1f})")
 
-    print("\n== issues, all clips ==")
-    for k, v in issues.most_common():
-        print(f"  {k}: {v}")
+    print("\n== issues, all clips, by source ==")
+    for f in dict.fromkeys(f for f, _ in issues):
+        per = {k: issues[(f, k)] for k in SRCS if issues[(f, k)]}
+        print(f"  {f}: {sum(per.values())}  {per}")
+    print("\n== clip length per source (samples; p10 / p50 / p90) ==")
+    for k in SRCS:
+        if lengths[k]:
+            p10, p50, p90 = (int(v) for v in np.percentile(lengths[k], [10, 50, 90]))
+            print(f"  {k:6} {p10:7} {p50:7} {p90:7}")
     print("\n== window findings, command-word clips, by source ==")
     for k in SRCS:
         n = by_src[(k, "n")]
