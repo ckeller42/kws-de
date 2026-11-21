@@ -5632,6 +5632,98 @@ handles that on paper and in the parity cases, not yet on a real window. Flashin
 is (`86b7105e`, floor 0.25) is the measured 36/247-at-0-FA configuration; deploying gain2 s1 means
 exporting it into `gen/` and setting the floor to 0.10 in the same change.
 
+### E74 — raw-clip audit: the `say` pool is one voice, and its twins leak across the split (2026-11-21, exp/e74-data-audit)
+
+Audit of `raw_clips_v3.pkl` (sha256 `6a63151a…`, 5,434 clips; 6,303 with the merged QC-approved
+recordings) with `scripts/audit-raw-clips.py` (read-only; prints every table below). Each finding of
+the first, ad-hoc audit (#129), confirmed or rejected:
+
+| finding | verdict |
+|---|---|
+| 15 of 21 command classes have no MSWC speech; TTS is 71–98 % of their clips | **confirmed** (MSWC only for `Licht`, `Kühlschrank`, `Heizung`, `Außen`, `aus`, `auf`) |
+| 2,666 `say` clips = 120 waveforms | **confirmed, and worse**: 119 of the 120 groups carry all nine voice ids, so the nine "voices" are one set of waveforms at about seven rates (2–7 per word). Why `say` gave the same audio for every voice name cannot be tested on this host (#131) |
+| TTS at −16 to −19 dBFS, real at −30 to −34 | confirmed (`say` −18.6, Piper −16.0, MSWC −29.9, device −34.0); `--synthetic-level` (E67/E68) already removes it |
+| 1,630 clips with speech at the window edge (cut words) | **count confirmed, cause split in two**: 1,374 `say` clips have speech in the first 50 ms (no lead-in, so a negative ±200 ms shift cuts the onset; only 72 at the end), and Piper clips are long (median 1.8 s, 294 of 390 over 1 s) while the build keeps the first second — 100 Piper clips have more than half their energy after it |
+| 132 clips below −50 dBFS, 18 DC offset, 8 clipped | confirmed, no action: the quiet ones are real speech (117 MSWC, 11 device recordings, 4 context cuts), the DC offsets are all Piper, the clipped ones MSWC |
+| all TTS and 38 MSWC clips not 16,000 samples | confirmed (3,094); the build pads at the end and keeps the first 16,000 samples (`kws_de.data._random_shift`) — the Piper truncation above |
+| Piper: 390 clips from 108 voices | confirmed (390 distinct waveforms); the first audit's per-label voice counts were wrong (it grouped all voices as one) |
+
+**The leak.** The speaker id of a TTS clip is its voice, and the split is speaker-disjoint. With nine
+voice ids on one waveform, every val/test `say` clip has an exact twin in train: seed 0 val 308/308,
+test 298/298 (seeds 1 and 2 the same, or no `say` in test at all). The cache as of 7 October
+(sha256 `015c8c4e…`, the copy kept from before the first run on this host, 5,338 clips) carries
+the same 120-waveform pool and the same leak (seed 0: test 599/599), so E68's 0.898 on
+level-matched TTS rows most likely measured recall of training clips, not unseen voices. The deploy rule is not affected:
+it reads the guided scoreboard and the REAL test rows.
+
+**Fix: `kws-dataset build --dedupe`** drops exact duplicate waveforms after the split (first copy in
+train; any val/test clip already in train). The speaker draw does not change, so the real rows are
+the same clips. Opt-in, so a default build still leaks; making it the default is the owner's call. `say` cannot be regenerated on Linux: #131.
+
+**A/B under the deploy rule.** Same cache copy (top-up off, `KWS_TTS_ENGINES=" "`), same split seed
+0, `--synthetic-level -36 -24` (the E68 gain2 recipe), deployed training recipe, training seeds 0/1,
+one build per arm: A without, B with `--dedupe` (2,546 clips dropped; 33,524 → 19,932 train rows).
+The deployed model is scored on each arm's own test split: the dedupe changes the augmentation
+draws, so the real rows are the same clips with different noise. Scoring:
+`scripts/recipe-grid.py` `score()`/`passes()`/`beats_deployed()`, with false accepts counted over
+all 85 negatives of six speakers, as E64–E68 did (`score()` itself counts only its four scoreboard
+speakers' negatives, 32 of the 85).
+
+| | deployed `86b7105e` @A | A s0 `bc5444c3` | A s1 `09ed8445` | deployed @B | B s0 `2ca6551b` | B s1 `f9acafc8` |
+|---|---|---|---|---|---|---|
+| guided-only (n=51) | 51 | 50 | 49 | 51 | 49 | 51 |
+| false accepts (n=85) | 0 | 0 | 0 | 0 | **1** (spk19) | **1** (spk10) |
+| INT8 test, real rows (n=1,404) | 0.689 | 0.746 | 0.687 | 0.703 | 0.698 | 0.707 |
+| INT8 test, TTS rows | 0.651 (n=2,680) | 0.785 | 0.794 | **0.245** (n=600) | 0.332 | 0.285 |
+| val (float, best epoch) | — | 0.763 (ep 34) | 0.763 (ep 28) | — | 0.647 (ep 40) | 0.660 (ep 38) |
+| `passes()` | PASS | PASS | PASS | PASS | FAIL | FAIL |
+| `beats_deployed()` | | **no** (49.5 < 50) | | | **no** (0.7025 < 0.703; and both seeds fail `passes()`) | |
+
+Neither arm beats the deployed model; nothing is exported to the deploy path. On the scoreboard
+and the real rows the dedupe is inside the seed band (mean 50.0 vs 49.5 guided; 0.698/0.707 vs
+0.746/0.687 real), but it adds one false accept in each seed, on two different speakers'
+negatives (one plausible cause, not tested: 2,546 fewer training rows to separate commands from other speech), so
+removing the twins is not free and should land together with new voices (#131, #132), not alone. It
+does make the held-out TTS rows honest: what is left are Piper clips of voices outside train,
+and every model — the deployed one included — gets a quarter to a third of them right. Two causes
+are not separated here: unheard voices, and broken clips (the first second of a long Piper clip,
+see the edge finding above). The val drop (0.76 → 0.65)
+is the same correction; the best epoch moves later (28–34 → 38–40), which suggests that the
+leaked rows also steered the val-based checkpoint selection. Two seeds, one build: a direction,
+not a significant difference.
+
+**Ranked additions.** Real speakers first, where they exist: the owner's guided takes for the 15
+TTS-only classes (1–7 clips, 1–2 speakers each) are the cheapest real gain. For TTS, voice variety
+is what is missing, not clips. The data stays private, so the non-commercial clone licenses are
+acceptable; the model trained on them must stay non-commercial.
+
+| rank | source | voices | license | note |
+|---|---|---|---|---|
+| 1 | XTTS-v2 clones of many anonymous MSWC speakers (~6 s references from joined 1 s clips) | hundreds | CPML (non-commercial) | E64 cloned only the three scoreboard speakers; engine code on `exp/voice-clone` (#132) |
+| 2 | F5-TTS German (HPI fine-tune), same references | hundreds | CC-BY-NC weights | trained on German Common Voice / Emilia (#132) |
+| 3 | Parler-TTS multilingual | many (text-described) | Apache-2.0 | already an engine; the permissive control (#132) |
+| 4 | more Piper voices | ~8 families cached | MIT / per voice | ~3 % keep rate; fix the 1 s truncation first |
+| 5 | macOS `say`, regenerated with working voices | 9 | Apple | #131, needs a Mac |
+| 6 | NVIDIA Magpie TTS Multilingual 357M | 5 fixed (English speakers) | NVIDIA Open Model License | no cloning in this release; 93 % gate keep rate (probe below) — the cleanest filler |
+
+For every engine: synthesize the word inside a carrier sentence and cut it out with the context-cut
+alignment, so the gate and the 1 s window see one whole word.
+
+**Magpie probe.** 21 command words × 5 voices × 3 takes (seeded sampling), German, no text
+normalisation, resampled to 16 kHz, through the build's per-clip gate (forced-German Whisper):
+**294 of 315 kept (93 %)**, against Piper's ~3 % (E66, and this cache's 390 survivors). All 315
+are distinct waveforms; median 10,403 samples (35 over 1 s); median −25.5 dBFS, close to the
+device band. Misses: the short words (`an` 8/15, `auf` 11/15, `aus` 13/15, `zu` 12/15 — too short or
+heard as something else), `Licht` 13/15. Per voice 57–61 of 63. So Magpie is the cleanest
+single-word source measured here, but it adds five voices, not hundreds: a clean filler for the
+TTS-only classes, behind the clone sources for variety. Not yet trained on; the clips stay on the
+data host. The probe needed NeMo's tokenizer extras (`jieba`, `pyopenjtalk`, …) and ~3.4 GB of
+VRAM, so it cannot run beside a training run on a 6 GB card.
+
+**Use case.** All approved recordings are the owner's voice, so the scoreboard and the deploy rule
+already measure the product's main user; the TTS and clone sources serve the fallback for people
+who have not enrolled (E69/E71). Data stays private; `86b7105e` and `firmware/main/gen/` untouched.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,
