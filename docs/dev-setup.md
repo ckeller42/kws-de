@@ -144,8 +144,7 @@ default `kws_de.config` resolves — nothing is baked in. It is dry-run by defau
 scripts/sync-data.sh --to odelly
 
 # Actually push, then confirm byte-for-byte:
-scripts/sync-data.sh --to odelly --run
-scripts/sync-data.sh --to odelly --verify   # sha256-manifests both ends, diffs them
+scripts/sync-data.sh --to odelly --run --verify   # --verify sha256-manifests both ends, diffs them
 
 # Pull the other way (e.g. refresh the Mac backup from the primary):
 scripts/sync-data.sh --from odelly --run
