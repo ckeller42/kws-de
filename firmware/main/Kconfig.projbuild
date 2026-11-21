@@ -1,5 +1,14 @@
 menu "kws-de inference"
 
+config KWS_INTENTS_LIGHT_ONLY
+    bool "Light-only firmware: only \"Hey Bus, Licht an\" and \"Hey Bus, Licht aus\""
+    default n
+    help
+      Restrict the assist window to two intents, Licht -> an and Licht -> aus
+      (#133). The window-close aligner (E72/E73) aligns only these two, and
+      any other intent the fallback parse produces is dropped. The wake model
+      and the command model are unchanged.
+
 config KWS_INFER_GENERATED
     bool "Use the generated inference runtime instead of the TFLite Micro interpreter"
     default y

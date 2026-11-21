@@ -42,6 +42,20 @@ static int label_index(const char *tok)
 
 static const intent_t kInvalid; /* all-zero: valid=false, every pointer NULL */
 
+/* #133: the light-only firmware. One predicate on label strings, used by both
+   the aligner's candidate loop and wake.cc's window-close filter. */
+static bool allowed_tokens(const char *device, const char *zone, const char *action)
+{
+#ifdef CONFIG_KWS_INTENTS_LIGHT_ONLY
+    return !zone && strcmp(device, "Licht") == 0 && (strcmp(action, "an") == 0 || strcmp(action, "aus") == 0);
+#else
+    (void)device, (void)zone, (void)action;
+    return true;
+#endif
+}
+
+bool intent_allowed(const intent_t *in) { return in && in->valid && allowed_tokens(in->device, in->zone, in->action); }
+
 intent_t intent_parse(const char *words)
 {
     if (!words || !*words) return kInvalid;
@@ -244,6 +258,9 @@ intent_t intent_align(const float *post, int n_steps, int first_ms, int step_ms,
         for (int z = -1; z < nz; z++) {
             for (int a = 0; a < N_ACTIONS; a++) {
                 if (!((kDeviceActions[d] >> a) & 1u)) continue;
+                if (!allowed_tokens(KWS_LABELS[d], z >= 0 ? KWS_LABELS[N_DEVICES + z] : NULL,
+                                    KWS_LABELS[N_DEVICES + N_ZONES + a]))
+                    continue;
                 int idx[ALIGN_MAX_TOKENS], L = 0;
                 idx[L++] = d;
                 if (z >= 0) idx[L++] = N_DEVICES + z;

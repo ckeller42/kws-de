@@ -446,6 +446,14 @@ static void wake_task(void *)
                         if (!iv.valid)
                             iv = intent_rescore(rst.window_intent, rst.window_seconds, INTENT_RESCORE_FLOOR,
                                                  &rescored_from, &rescored_to);
+                        /* #133: a light-only build lets only Licht an/aus out;
+                           any other intent ends the window as "none". */
+                        if (iv.valid && !intent_allowed(&iv)) {
+                            ESP_LOGI(TAG, "intent: dropped by KWS_INTENTS_LIGHT_ONLY (fires: %s)", rst.window_intent);
+                            iv = intent_t{};
+                            aligned = false;
+                            rescored_to = nullptr;
+                        }
                         char text[64];
                         intent_format(&iv, text, sizeof text);
                         if (aligned)
