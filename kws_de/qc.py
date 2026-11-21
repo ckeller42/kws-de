@@ -1337,6 +1337,36 @@ def whisper_transcriber(
     return transcribe
 
 
+def _preload_pip_cuda_libs() -> int:
+    """Load the pip-installed cuBLAS/cuDNN (the `nvidia-*-cu12` wheels torch and TF
+    bring along) into the process, so CTranslate2's later dlopen of
+    `libcublas.so.12` finds them already loaded. Without this the GPU gate needs
+    LD_LIBRARY_PATH set by hand -- and without that it fell back to a CPU/int8 gate
+    ~12x slower. Best effort: no wheels, or a lib that will not load, just leaves
+    the CPU fallback in place. Returns how many libraries were loaded."""
+    try:
+        import nvidia  # namespace package of the nvidia-*-cu12 wheels
+    except ImportError:
+        return 0
+    import ctypes
+
+    loaded = 0
+    for base in nvidia.__path__:
+        # libcublasLt before libcublas: the latter links against the former.
+        for pat in (
+            "cublas/lib/libcublasLt.so.*",
+            "cublas/lib/libcublas.so.*",
+            "cudnn/lib/libcudnn*.so.*",
+        ):
+            for lib in sorted(Path(base).glob(pat)):
+                try:
+                    ctypes.CDLL(str(lib), mode=ctypes.RTLD_GLOBAL)
+                    loaded += 1
+                except OSError:
+                    pass
+    return loaded
+
+
 def _load_whisper_model(ctor, model_id: str, device: str, compute_type: str):
     """Build a faster-whisper model, falling back to CPU/int8 when the GPU is
     unusable. The gate on thinky was silently disabled by `CUDA failed with error
@@ -1377,6 +1407,8 @@ def faster_whisper_transcriber(
     check on a real clip set — same language ID + transcript decision — is NOT done here.
     See docs/paper-notes.md; it gates flipping QC to faster-whisper on Linux.
     """
+    if device != "cpu":
+        _preload_pip_cuda_libs()
     from faster_whisper import WhisperModel
 
     model, on_cpu = _load_whisper_model(WhisperModel, model_id, device, compute_type)
