@@ -24,7 +24,7 @@ import tensorflow as tf  # noqa: E402
 
 from kws_de import config  # noqa: E402
 from kws_de.eta import Timed  # noqa: E402
-from kws_de.model import build_dscnn  # noqa: E402
+from kws_de.model import build_dscnn, set_random_seed  # noqa: E402
 
 
 def _class_weights(y) -> dict:
@@ -89,7 +89,7 @@ def train(
     forwarded to `build_dscnn` when `model` is not given. `cosine` decays Adam's
     default 1e-3 learning rate to 0 over the whole run (CosineDecay) instead of
     holding it flat."""
-    tf.keras.utils.set_random_seed(seed)
+    set_random_seed(seed)
     X = np.asarray(X, np.float32)[..., None]
     y = np.asarray(y)
     if model is None:
@@ -149,7 +149,7 @@ def train_qat(
     layer's fake-quant min/max ranges) and its fit history."""
     import tensorflow_model_optimization as tfmot
 
-    tf.keras.utils.set_random_seed(seed)
+    set_random_seed(seed)
     X = np.asarray(X, np.float32)[..., None]
     y = np.asarray(y)
     qmodel = tfmot.quantization.keras.quantize_model(model)

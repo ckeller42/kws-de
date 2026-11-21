@@ -17,7 +17,7 @@ import numpy as np
 import tensorflow as tf
 
 from kws_de import config
-from kws_de.model import build_dscnn
+from kws_de.model import build_dscnn, set_random_seed
 
 _EPS = 1e-9
 
@@ -84,7 +84,7 @@ def distill(
     inverse-frequency balancing) but via `sample_weight`, since a 2-D target rules
     out `class_weight`. `batch_size` overrides `config.BATCH_SIZE` — only meant for
     toy-data tests too small to take a full-size batch as one training step."""
-    tf.keras.utils.set_random_seed(seed)
+    set_random_seed(seed)
     num_classes = num_classes if num_classes is not None else len(config.COMMAND_LABELS)
     Xc = np.asarray(X, np.float32)[..., None]
     y = np.asarray(y)
@@ -154,7 +154,7 @@ def main() -> None:  # pragma: no cover - training + TTS + tflite
     X_test, y_test, _ = load_split("test", args.features)
     shape = (config.N_FRAMES, config.N_MFCC, 1)
 
-    tf.keras.utils.set_random_seed(args.seed)
+    set_random_seed(args.seed)
     teacher, _ = _best_val_checkpoint(
         lambda cb: train(
             X_train,
