@@ -83,3 +83,16 @@ def test_load_split_prefix_selects_file(tmp_path, monkeypatch):
     )
     X, y, is_tts = dataset.load_split("test", prefix="features_v3")
     assert X.shape == (2, 49, 10) and list(y) == [1, 2] and list(is_tts) == [False, True]
+
+
+def test_drop_duplicate_clips_keeps_first_train_copy_and_drops_leaks():
+    from kws_de.dataset import drop_duplicate_clips
+
+    a, b, c = (np.full(4, v, np.float32) for v in (0.1, 0.2, 0.3))
+    train = {"x": [(a, "tts:say:A"), (a, "tts:say:B"), (b, "s1")]}
+    val = {"x": [(a, "tts:say:C"), (c, "s2"), (c, "s3")]}
+    test = {"x": [(c, "s4"), (b, "s5")]}
+    assert drop_duplicate_clips(train, val, test) == 4
+    assert [s for _, s in train["x"]] == ["tts:say:A", "s1"]
+    assert [s for _, s in val["x"]] == ["s2"]
+    assert [s for _, s in test["x"]] == ["s4"]  # c is in val, not train: kept

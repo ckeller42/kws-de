@@ -4,6 +4,7 @@ docs/superpowers/plans/2026-09-01-kws-dataset-phase0.md.
 """
 
 import argparse
+import hashlib
 import json
 import pickle
 
@@ -80,6 +81,38 @@ def force_rec_to_train(train: dict, *others: dict) -> int:
     return moved
 
 
+def drop_duplicate_clips(train: dict, *others: dict) -> int:
+    """Drop exact duplicate waveforms, after the split (E74). macOS `say` ignored the voice
+    for the cached clips: 2,666 `say` clips are 120 waveforms, each filed under all nine
+    voice ids, so the speaker-disjoint split put every val/test `say` clip's twin in train.
+    Keeps the first copy within `train`; drops from each of `others` any clip already in
+    `train` or earlier in that split. The speaker draw is untouched, so real rows stay the
+    same. Returns the number of clips dropped."""
+
+    def key(clip) -> bytes:
+        return hashlib.sha1(np.asarray(clip, np.float32).tobytes()).digest()
+
+    def drop(split: dict, seen: set) -> int:
+        n = 0
+        for label, items in split.items():
+            keep = []
+            for c, s in items:
+                k = key(c)
+                if k in seen:
+                    n += 1
+                else:
+                    seen.add(k)
+                    keep.append((c, s))
+            split[label] = keep
+        return n
+
+    train_keys: set = set()
+    dropped = drop(train, train_keys)
+    for other in others:
+        dropped += drop(other, set(train_keys))
+    return dropped
+
+
 def build(  # pragma: no cover - I/O
     seed: int = 0,
     cache_name: str = "raw_clips_merged.pkl",
@@ -88,6 +121,7 @@ def build(  # pragma: no cover - I/O
     shift_ms: int = 200,
     context_mix: int = 0,
     synthetic_level=None,
+    dedupe: bool = False,
 ):
     """Dataset build, deterministic from one seed given the cached raw clips (Piper TTS
     synthesis itself is stochastic per call, so newly-filled clips are persisted back to
@@ -130,6 +164,8 @@ def build(  # pragma: no cover - I/O
         moved = force_rec_to_train(tr_ws, va_ws, te_ws)
         if moved:
             print(f"[recordings] moved {moved} device clips into train (--recordings-split train)")
+    if dedupe:
+        print(f"[dedupe] dropped {drop_duplicate_clips(tr_ws, va_ws, te_ws)} duplicate clips")
     splits = {}
     speakers = {}
     for i, (name, ws) in enumerate((("train", tr_ws), ("val", va_ws), ("test", te_ws))):
@@ -199,6 +235,12 @@ def main() -> None:  # pragma: no cover - CLI wrapper
         "[LO_DB, HI_DB] dBFS before augmentation (E67/E68; the device band is about -36 -24); "
         "default off",
     )
+    ap.add_argument(
+        "--dedupe",
+        action="store_true",
+        help="drop exact duplicate waveforms after the split (E74: the cached `say` clips "
+        "are 120 waveforms under nine voice ids); default off",
+    )
     ap.add_argument("--cache", default="raw_clips_merged.pkl", help="raw clip cache under data/")
     ap.add_argument("--prefix", default="features", help="output npz prefix (features_v3 ...)")
     ap.add_argument(
@@ -219,4 +261,5 @@ def main() -> None:  # pragma: no cover - CLI wrapper
         shift_ms=args.shift_ms,
         context_mix=args.context_mix,
         synthetic_level=tuple(args.synthetic_level) if args.synthetic_level else None,
+        dedupe=args.dedupe,
     )
