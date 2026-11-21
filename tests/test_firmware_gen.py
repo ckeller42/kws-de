@@ -66,6 +66,20 @@ def test_elicit_prompts_match_situations_and_parse_to_the_expected_intent():
         assert isinstance(got, Intent), (intent, got)
 
 
+def test_light_prompts_say_the_wake_word_and_parse_to_licht_an_aus():
+    """The Licht set (#136): each display starts with the wake word, and its
+    expected intent parses (the QC elicit path) to Licht an / Licht aus."""
+    from kws_de.grammar import Intent
+    from kws_de.qc import field_intent, normalise
+
+    light = firmware_gen.light_prompts()
+    assert [i for _, _, i in light] == ["Licht an", "Licht aus"]
+    for display, slug, intent in light:
+        assert display.startswith(config.WAKE_WORD)
+        assert slug == firmware_gen.slug(display)
+        assert field_intent(normalise(intent)) == Intent("Licht", None, intent.split()[1])
+
+
 def test_scene_prompts_are_the_trigger_spellings_slugged_and_qc_recovers_the_token():
     """The scene set emits (display, slug) for each config.SCENE_TRIGGER_PROMPTS
     spelling; the slug comes from the spelling, and kws_de.qc.scene_trigger_token

@@ -101,7 +101,7 @@ static int next_path(char *out, size_t n)
     int slugdir = s_prompts.set == PROMPT_WORDS || s_prompts.set == PROMPT_WAKE;
     const char *sub = slugdir ? prompt_slug(&s_prompts)
                     : s_prompts.set == PROMPT_SENTENCES ? "_phrase_"
-                    : s_prompts.set == PROMPT_ELICIT ? "_elicit_"
+                    : s_prompts.set == PROMPT_ELICIT || s_prompts.set == PROMPT_LIGHT ? "_elicit_"
                     : s_prompts.set == PROMPT_SCENE ? "_scene_" : "_neg_";
     snprintf(dir, sizeof dir, "%s/%s", storage_root(), s_st.speaker);         mkdir(dir, 0777);
     snprintf(dir, sizeof dir, "%s/%s/%s", storage_root(), s_st.speaker, sub); mkdir(dir, 0777);
@@ -127,7 +127,8 @@ static void append_session_csv(const char *path, uint32_t ms, float peak_dbfs)
        PROMPT_ELICIT the prompt column is the EXPECTED INTENT ("Licht Küche
        an"), not the scene/question shown on screen — QC compares what the
        speaker actually said against this, not against the display text. */
-    const char *csv_prompt = s_prompts.set == PROMPT_ELICIT ? prompt_intent(&s_prompts) : prompt_text(&s_prompts);
+    const char *csv_prompt = s_prompts.set == PROMPT_ELICIT || s_prompts.set == PROMPT_LIGHT
+                                 ? prompt_intent(&s_prompts) : prompt_text(&s_prompts);
     fprintf(f, "\"%s\",%s,%lu,%.1f,%s,%lu,%lld\n", csv_prompt, path + strlen(storage_root()) + 1,
             (unsigned long)ms, peak_dbfs, prompt_set_name(s_prompts.set), (unsigned long)s_prompts.seed,
             esp_timer_get_time() / 1000);
@@ -403,6 +404,18 @@ static void record_task(void *arg)
             prompt_session_init(&s_prompts, PROMPT_SCENE, (uint32_t)esp_timer_get_time());
             s_paused = 0;
             break;
+        case REC_CMD_START_WORDS_SESSION:
+            s_take_idx = 0; s_saved_takes = 0;
+            nvs_bump_speaker();
+            prompt_session_init(&s_prompts, PROMPT_WORDS, (uint32_t)esp_timer_get_time());
+            s_paused = 0;
+            break;
+        case REC_CMD_START_LIGHT_SESSION:
+            s_take_idx = 0; s_saved_takes = 0;
+            nvs_bump_speaker();
+            prompt_session_init(&s_prompts, PROMPT_LIGHT, (uint32_t)esp_timer_get_time());
+            s_paused = 0;
+            break;
         }
     }
 }
@@ -415,8 +428,8 @@ void record_start(void)
     assert(s_take);
     nvs_load();
     /* Idle-state placeholder only; REC_CMD_START_SESSION re-seeds this for real
-       when the menu's Record button is tapped. PROMPT_WORDS stays unused here
-       (isolated words are not part of the guided session). */
+       when the menu's Record button is tapped. Isolated words have their own
+       session ("Wörter aufnehmen", REC_CMD_START_WORDS_SESSION). */
     prompt_session_init(&s_prompts, PROMPT_SENTENCES, (uint32_t)esp_timer_get_time() | 1);
     snprintf(s_st.speaker, sizeof s_st.speaker, "spk%02lu", (unsigned long)s_speaker);
     task_spawn(TAG, record_task, "record", 8192, NULL, 5, 0);

@@ -4,6 +4,7 @@
 _Static_assert(KWS_NUM_SENTENCE_PROMPTS <= 64, "grow prompt_session_t.order");
 _Static_assert(KWS_NUM_ELICIT_PROMPTS <= 64, "grow prompt_session_t.order");
 _Static_assert(KWS_NUM_SCENE_PROMPTS <= 64, "grow prompt_session_t.order");
+_Static_assert(KWS_NUM_LIGHT_PROMPTS <= 64, "grow prompt_session_t.order");
 
 static uint32_t xorshift(uint32_t *s) { *s ^= *s << 13; *s ^= *s >> 17; *s ^= *s << 5; return *s; }
 
@@ -15,6 +16,7 @@ static void set_tables(prompt_set_t set, const char *const **text, const char *c
     case PROMPT_WAKE:      *text = KWS_WAKE_PROMPTS;     *slug = KWS_WAKE_SLUGS;     *n = KWS_NUM_WAKE_PROMPTS;     break;
     case PROMPT_ELICIT:    *text = KWS_ELICIT_PROMPTS;   *slug = KWS_ELICIT_SLUGS;   *n = KWS_NUM_ELICIT_PROMPTS;   break;
     case PROMPT_SCENE:     *text = KWS_SCENE_PROMPTS;    *slug = KWS_SCENE_SLUGS;    *n = KWS_NUM_SCENE_PROMPTS;    break;
+    case PROMPT_LIGHT:     *text = KWS_LIGHT_PROMPTS;    *slug = KWS_LIGHT_SLUGS;    *n = KWS_NUM_LIGHT_PROMPTS;    break;
     default:               *text = KWS_WORD_PROMPTS;     *slug = KWS_WORD_SLUGS;     *n = KWS_NUM_WORD_PROMPTS;     break;
     }
 }
@@ -46,7 +48,7 @@ const char *prompt_slug(const prompt_session_t *p)
 
 const char *prompt_intent(const prompt_session_t *p)
 {
-    return KWS_ELICIT_INTENTS[p->order[p->index]];
+    return p->set == PROMPT_LIGHT ? KWS_LIGHT_INTENTS[p->order[p->index]] : KWS_ELICIT_INTENTS[p->order[p->index]];
 }
 
 int prompt_advance(prompt_session_t *p)
@@ -59,7 +61,7 @@ int prompt_advance(prompt_session_t *p)
 uint32_t prompt_cap_ms(prompt_set_t set)
 {
     if (set == PROMPT_WORDS) return 4000;
-    if (set == PROMPT_ELICIT) return 9800;  /* an unscripted answer runs longer than a read sentence */
+    if (set == PROMPT_ELICIT || set == PROMPT_LIGHT) return 9800;  /* an unscripted answer runs longer than a read sentence; light shares elicit's QC cap */
     return 6000;
 }
 
@@ -69,11 +71,12 @@ int prompt_takes_per_prompt(prompt_set_t set)
 {
     if (set == PROMPT_WAKE || set == PROMPT_ELICIT) return 1;
     if (set == PROMPT_SCENE) return 3;  /* bootstrap class: no real clips yet, grab several per trigger */
+    if (set == PROMPT_LIGHT) return KWS_LIGHT_TAKES;  /* enrollment wants ~10 takes per phrase (E71) */
     return 2;
 }
 
 const char *prompt_set_name(prompt_set_t set)
 {
-    static const char *names[] = {"words", "sentences", "negatives", "wake", "elicit", "scene"};
+    static const char *names[] = {"words", "sentences", "negatives", "wake", "elicit", "scene", "elicit"};
     return names[set];
 }

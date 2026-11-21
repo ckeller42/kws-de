@@ -30,6 +30,15 @@ selection screen" below).
   takes each, straight to the success screen — no sentence/negative sets
   chained on. Collects bootstrap positives for the pending scene-trigger
   classes (`config.SCENE_TRIGGERS`, paper notes E54/E55).
+- **Einzelwort mode** ("Einzelwort aufnehmen") — an isolated-word session:
+  the 21 command words (`PROMPT_WORDS`), each read twice, straight to the
+  success screen. Collects the real single-word takes the guided-only
+  scoreboard and the TTS-heavy classes need (paper notes E74).
+- **Licht mode** ("Licht aufnehmen") — the light-only firmware's two
+  commands (#133), read whole with the wake word: "Hey Bus, Licht an" and
+  "Hey Bus, Licht aus", 10 takes each (`config.LIGHT_PROMPTS`,
+  `config.LIGHT_TAKES`). The positives for enrollment (E71) and the device
+  test. QC'd like a Situationen answer (see the walkthrough below).
 - **Recognise mode** — an on-device keyword recogniser: mic -> MFCC -> the
   int8 TFLite Micro model -> the same streaming detector logic as
   `kws_de.stream`, shown live on the LCD and logged to the recording
@@ -97,9 +106,10 @@ docker run --rm -v "$PWD/firmware:/project" -w /project --device=/dev/ttyACM0 \
 ## Modes and the selection screen
 
 The device boots into a dark-theme selection menu: a small "kws-de" title
-over a column of eight big buttons — **Assistent**, **Recognition**, **Hey
+over a column of ten buttons — **Assistent**, **Recognition**, **Hey
 Bus**, **Record**, **Hey Bus aufnehmen**, **Situationen**, **Szenen
-aufnehmen**, **USB** — each switching straight to that mode. Every mode's own back/abort button returns
+aufnehmen**, **Einzelwort aufnehmen**, **Licht aufnehmen**, **USB** — each
+switching straight to that mode. Every mode's own back/abort button returns
 to this menu; no mode links directly to another mode. `app_set_mode()`
 (`firmware/main/main.c`) is the only place that suspends/resumes the
 consumer task for the mode being left/entered.
@@ -160,6 +170,30 @@ fixed phrase whole (no wake word), like the words set. Takes land under
 `approved/scene/<trigger>/` — a class pending until the next retrain
 (paper notes E55). Recording cap is 6 s (a two-word trigger read with a
 pause runs past the 4 s word cap), 1200 ms hangover.
+
+**Einzelwort aufnehmen** runs the same machinery for the isolated command
+words: it bumps the speaker id, then walks the 21 words, two reads each,
+straight to the success screen. Takes land under `spkNN/<word-slug>/NNN.wav`
+with `set` = `words`; recording cap 4 s, 500 ms hangover.
+
+**Licht aufnehmen** runs it for the two light-only commands: it bumps the
+speaker id, then prompts "Hey Bus, Licht an" and "Hey Bus, Licht aus" (in
+shuffled order), 10 takes each, straight to the success screen. The speaker
+reads the whole phrase, wake word included. Takes land under
+`spkNN/_elicit_/hey-bus-licht-an_NNN.wav` (or `-aus`), and each
+`session.csv` row has `set` = `elicit` with `prompt` = the expected intent
+(`Licht an` / `Licht aus`): QC (`kws_de.qc`) handles them exactly like a
+Situationen answer — the wake phrase is cut into `approved/wake/`, the
+command is filed as a phrase, and `expected_match` says whether it was
+heard as meant. Recording cap 9.8 s, 1200 ms hangover. The progress line
+reads `Licht <n>/2 - take <t>/10`.
+
+**What to record for the light-only firmware.** One session per speaker of
+**Licht aufnehmen** (20 takes) gives the positives; **Record** (sentences
+then negatives) gives the negatives, the false-accept set the deploy rule
+counts; **Einzelwort aufnehmen** adds the isolated `Licht`, `an` and `aus`
+(and every other command word) for training; **Hey Bus aufnehmen** adds
+wake positives. Pull with `scripts/pull-recordings.sh`, then run QC.
 
 ## Where recordings are stored
 
