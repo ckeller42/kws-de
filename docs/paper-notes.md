@@ -332,6 +332,11 @@ work on a microcontroller is mostly building the instrument.
   off-by-one there first: decrement-then-check let a sustained word re-fire) that
   conflated same-word debounce and next-word gating into one cooldown knob and could
   not satisfy both at once (see §3 E3).
+- Guided on-device recorder as the data protocol (`firmware/README.md`): read sentences
+  plus negatives, wake word, elicited answers, scene triggers, and (#136) isolated words
+  and the light-only commands read whole with the wake word ("Hey Bus, Licht an/aus",
+  10 takes each — the enrollment and device-test positives of E71/E75). Every take is
+  QC'd against the prompt or the expected intent before it is filed (`kws_de.qc`).
 
 ## 5. War stories / lessons (talk material)
 
