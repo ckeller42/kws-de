@@ -1,3 +1,6 @@
+import random
+import sys
+
 import tensorflow as tf
 
 from kws_de import config
@@ -14,6 +17,24 @@ for _gpu in tf.config.list_physical_devices("GPU"):
         tf.config.experimental.set_memory_growth(_gpu, True)
     except RuntimeError:  # already initialised elsewhere -- too late to change, not fatal
         pass
+
+
+class _IntRandom(random.Random):
+    """`random.Random` whose `randint` accepts integral floats. tf_keras 2.18's
+    `_create_seed` calls `randint(1, 1e9)`, which Python 3.12 rejects; on 3.11
+    the float was coerced with the same result, so the sequence is unchanged."""
+
+    def randint(self, a, b):
+        return super().randint(int(a), int(b))
+
+
+def set_random_seed(seed: int) -> None:
+    """`tf.keras.utils.set_random_seed` plus the Python 3.12 shim for tf_keras's
+    seed generator. Use this instead of calling Keras directly."""
+    tf.keras.utils.set_random_seed(seed)
+    tfk = sys.modules.get("tf_keras.src.backend")
+    if tfk is not None:
+        tfk._SEED_GENERATOR.generator = _IntRandom(seed)
 
 
 def build_dscnn(num_classes: int | None = None, width: int = 32) -> tf.keras.Model:

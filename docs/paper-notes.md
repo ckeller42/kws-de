@@ -342,6 +342,10 @@ work on a microcontroller is mostly building the instrument.
   12-way thread pool → whole data build hung at 0.1 % CPU. Bound every external call.
 - **`python -m pkg.mod` ≠ console script** when the module lacks a `__main__` block —
   an entire train→export→eval chain "succeeded" as a no-op. Verify artifacts, not exit codes.
+- **A Python minor version broke training, not the model:** tf_keras 2.18 seeds with
+  `randint(1, 1e9)`; Python 3.12 rejects the float, so every run failed at model build and
+  training stayed pinned to 3.11. A `random.Random` subclass that casts the bounds
+  (`kws_de.model.set_random_seed`) fixes it with the same seed sequence (#128).
 - **License landscape for German TTS** (HF survey): permissive core = Piper + Parler-TTS
   (Apache); XTTS-v2/MMS are non-commercial — matters for a public/commercial artifact.
 - **The model learned the noise floor, not the words:** `build_dataset` added command-word

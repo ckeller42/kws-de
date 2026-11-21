@@ -85,6 +85,8 @@ def evaluate_architecture(
     epoch), then `_evaluate_int8` with a class-balanced calibration set."""
     import tensorflow as tf
 
+    from kws_de.model import set_random_seed
+
     n_classes = len(config.COMMAND_LABELS)
     input_shape = (config.N_FRAMES, config.N_MFCC, 1)
 
@@ -92,7 +94,7 @@ def evaluate_architecture(
     X_val, y_val, _ = load_split("val", features)
     X_test, y_test, _ = load_split("test", features)
 
-    tf.keras.utils.set_random_seed(seed)
+    set_random_seed(seed)
     model = ARCHITECTURES[name](input_shape, n_classes=n_classes)
 
     with tempfile.TemporaryDirectory() as td:

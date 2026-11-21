@@ -15,6 +15,7 @@ import tensorflow as tf
 from kws_de.architectures.ctc_encoder import build_ctc_encoder
 from kws_de.ctc import CTC_TOKENS, logits_to_intent
 from kws_de.grammar import Intent
+from kws_de.model import set_random_seed
 from kws_de.phrases import make_phrase, phrase_features
 
 
@@ -81,7 +82,7 @@ def ctc_train(
     `kws_de.phrases.build_phrase_batch`) with full-batch gradient descent on
     `tf.nn.ctc_loss` (blank index 0, length-masked -- see `_pad_batch`). If
     `history` is given, each epoch's mean loss is appended to it."""
-    tf.keras.utils.set_random_seed(seed)
+    set_random_seed(seed)
     model = build_ctc_encoder(n_tokens, encoder=encoder)
     X, logit_lengths, Y, label_lengths = _pad_batch(batches)
     X_t = tf.constant(X)
