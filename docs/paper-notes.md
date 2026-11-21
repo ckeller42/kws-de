@@ -5632,6 +5632,46 @@ handles that on paper and in the parity cases, not yet on a real window. Flashin
 is (`86b7105e`, floor 0.25) is the measured 36/247-at-0-FA configuration; deploying gain2 s1 means
 exporting it into `gen/` and setting the floor to 0.10 in the same change.
 
+### E75 — light-only firmware: "Hey Bus, Licht an / Licht aus" as a two-intent build option (2026-11-21, host-only, feat/light-only)
+
+The owner asked for one firmware that does only "Hey Bus, Licht an" and "Hey Bus, Licht aus"
+(#133). `CONFIG_KWS_INTENTS_LIGHT_ONLY` (Kconfig, default off) restricts the window-close aligner
+(E72/E73, `intent_align`) to the two intents `Licht -> an` and `Licht -> aus`, and `wake.cc` drops
+any other intent the fallback parse produces. The wake model, the command model (`86b7105e`) and
+`gen/` are unchanged. `kws_de.window_intent` mirrors it (`LIGHT_ONLY`, `decode_window(allowed=…)`).
+
+**Host evaluation** (`scripts/eval-light-only.py`): the E72 posterior cache (same clips, same
+models), decoded with the full grammar and with the light-only decoder. "hits" = Licht an/aus
+phrases decoded to their own intent; "other" = other phrases decoded to Licht an/aus; false
+accepts over all 85 negatives.
+
+| model | full: hits / other / FA | light, tau 0.70: hits / other / FA | light, tau 0.60: hits / other / FA |
+|---|---|---|---|
+| deployed `86b7105e` | 3/33 / 11 / 0 | 3/33 / 12 / 0 | **7/33** / 17 / 0 |
+| gain2 s0 | 4/33 / 1 / 0 | 4/33 / 2 / 0 | 7/33 / 5 / 0 |
+| gain2 s1 | 3/33 / 0 / 1 | 3/33 / 0 / 0 | **10/33** / 1 / 0 |
+| gain2 s2 | 5/33 / 3 / 1 | 5/33 / 5 / 1 | 9/33 / 6 / 2 |
+
+**Restricting the candidates alone changes nothing** (tau 0.70: the same hits). The misses are
+not confusions with other intents — "wrong" is 0 everywhere — but windows that the decoder
+rejects. They come in two groups. (1) Cold start: many takes give one step, or `Licht` falls before
+the first full window, so only `an`/`aus` is seen (the host-eval artefact of E72; on the device the
+ring holds the wake pre-roll). (2) The path `Licht … an` is found, with confidence 0.53–0.70, just
+under `INTENT_ALIGN_TAU`. With two candidates instead of 49 a lower threshold is safer, so the
+light build uses `INTENT_ALIGN_TAU_LIGHT` = 0.60: hits about double on every model, false accepts
+stay 0 on three of the four (gain2 s2: 1 → 2). At 0.50 false accepts appear on the deployed model
+and gain2 s1 too. Every "other" decode is a zoned light command with the same action ("Licht Küche
+an" → `Licht an`), which is the intended behaviour of a light-only device.
+
+**Caveats.** 0.60 is chosen on the same 33 + 85 clips it is reported on — there is no held-out set
+with enough Licht an/aus takes; the cold-start artefact makes every hit figure pessimistic, so the
+device numbers decide. The option-on build compiles `intent.c` on the host (`test_intent_light`);
+`wake.cc`/`recognise.cc` with the option on are not compiled here (no ESP-IDF on this host).
+
+**Next.** Build with `CONFIG_KWS_INTENTS_LIGHT_ONLY=y`, flash, field session: "Hey Bus, Licht an /
+aus" takes plus negatives. If the device still misses, the next levers are the owner's own takes of
+the two phrases (enrollment, E71) or a dedicated Licht/an/aus/other model.
+
 ## Open questions
 
 - Grouped speaker k-fold evaluation (spec §9): single split tests few independent real voices,

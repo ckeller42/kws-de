@@ -528,7 +528,13 @@ extern "C" intent_t recognise_align_window(float *conf)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
     intent_t r = intent_align(&s_win_post[0][0], s_win_steps, s_win_first_ms, 100,
-                              INTENT_ALIGN_FLOOR, INTENT_ALIGN_TAU, conf);
+                              INTENT_ALIGN_FLOOR,
+#ifdef CONFIG_KWS_INTENTS_LIGHT_ONLY
+                              INTENT_ALIGN_TAU_LIGHT,
+#else
+                              INTENT_ALIGN_TAU,
+#endif
+                              conf);
     xSemaphoreGive(s_lock);
     return r;
 }

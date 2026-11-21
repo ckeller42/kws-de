@@ -44,6 +44,16 @@ typedef struct {
  */
 intent_t intent_parse(const char *words);
 
+/**
+ * @brief Whether @p in may leave the window (#133).
+ *
+ * With CONFIG_KWS_INTENTS_LIGHT_ONLY only "Licht -> an" and "Licht -> aus"
+ * (no zone) are allowed; intent_align() then aligns only those two, and the
+ * window-close path in wake.cc drops any other intent. Without the option,
+ * every valid intent is allowed.
+ */
+bool intent_allowed(const intent_t *in);
+
 /* Grammar-constrained decoding at window close (architecture review S1,
    docs/paper-notes.md E72): instead of parsing the words the stream decoder
    fired, every valid intent is aligned against the window's smoothed
@@ -60,6 +70,10 @@ intent_t intent_parse(const char *words);
 #define INTENT_ALIGN_FLOOR 0.25f
 /** @brief Minimum geometric-mean token posterior along the best path to accept it. */
 #define INTENT_ALIGN_TAU 0.70f
+/** @brief INTENT_ALIGN_TAU of the light-only build (#133): two candidates, not 49.
+ *  scripts/eval-light-only.py: 0.60 more than doubles the Licht an/aus hits on the
+ *  deployed and E68 gain2 models at 0 added false accepts; 0.50 adds them. */
+#define INTENT_ALIGN_TAU_LIGHT 0.60f
 /** @brief Steps of one window intent_align() reads; later steps are dropped
  *  (ASSIST_WINDOW_MS / 100 ms = 25, extended windows beyond 3.2 s lose their tail). */
 #define INTENT_ALIGN_MAX_STEPS 32

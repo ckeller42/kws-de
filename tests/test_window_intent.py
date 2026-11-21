@@ -21,6 +21,9 @@ def test_constants_match_the_firmware():
     )
     assert window_intent.ALIGN_FLOOR == float(_define("intent.h", "INTENT_ALIGN_FLOOR").rstrip("f"))
     assert window_intent.ALIGN_TAU == float(_define("intent.h", "INTENT_ALIGN_TAU").rstrip("f"))
+    assert window_intent.ALIGN_TAU_LIGHT == float(
+        _define("intent.h", "INTENT_ALIGN_TAU_LIGHT").rstrip("f")
+    )
     assert window_intent.ALIGN_MAX_STEPS == int(_define("intent.h", "INTENT_ALIGN_MAX_STEPS"))
     assert window_intent.ALIGN_SMOOTH_WIN == int(_define("gen/features_config.h", "KWS_SMOOTH_WIN"))
     rh = (FW / "recognise.h").read_text()
@@ -170,3 +173,23 @@ def test_decode_window_falls_back_to_the_fire_path_when_unsure():
     got, conf, _ = window_intent.align(steps, labels, tau=window_intent.ALIGN_TAU, delta=0.0)
     assert not isinstance(got, Intent) and conf < window_intent.ALIGN_TAU
     assert window_intent.decode_window(steps, labels, step_ms=100) == Intent("Licht", None, "an")
+
+
+def test_light_only_aligns_and_returns_only_licht_an_aus():
+    labels = config.COMMAND_LABELS
+    allowed = window_intent.LIGHT_ONLY
+    assert [i for _, i in window_intent.candidates(allowed)] == [
+        Intent("Licht", None, "an"),
+        Intent("Licht", None, "aus"),
+    ]
+    licht_an = [_post("_silence_")] * 3 + [_post("Licht")] * 4 + [_post("an")] * 4
+    assert window_intent.decode_window(
+        licht_an, labels, step_ms=100, first_ms=5000, allowed=allowed
+    ) == Intent("Licht", None, "an")
+    heizung_an = [_post("_silence_")] * 3 + [_post("Heizung")] * 4 + [_post("an")] * 4
+    full = window_intent.decode_window(heizung_an, labels, step_ms=100, first_ms=5000)
+    assert full == Intent("Heizung", None, "an")
+    got = window_intent.decode_window(
+        heizung_an, labels, step_ms=100, first_ms=5000, allowed=allowed
+    )
+    assert not isinstance(got, Intent) or got in allowed

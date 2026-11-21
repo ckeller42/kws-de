@@ -119,19 +119,27 @@ BACKGROUND_LABELS = ("_silence_", "_unknown_")  # what a step not on a token mus
 # the floor is the embedded model's (0.25 for 86b7105e, 0.10 once gain2 ships).
 ALIGN_FLOOR = 0.25  # intent.h INTENT_ALIGN_FLOOR
 ALIGN_TAU = 0.70  # intent.h INTENT_ALIGN_TAU
+ALIGN_TAU_LIGHT = 0.60  # intent.h INTENT_ALIGN_TAU_LIGHT: the light-only build (#133)
 ALIGN_MAX_STEPS = 32  # intent.h INTENT_ALIGN_MAX_STEPS: the device keeps a window's first 32 steps
 
 
-def candidates() -> list[tuple[list[str], Intent]]:
+LIGHT_ONLY = frozenset({Intent("Licht", None, "an"), Intent("Licht", None, "aus")})
+"""#133: the light-only firmware's intents (intent.c, CONFIG_KWS_INTENTS_LIGHT_ONLY)."""
+
+
+def candidates(allowed=None) -> list[tuple[list[str], Intent]]:
     """Every valid intent as the token sequence a speaker says it in
-    (device, zone for zoned devices only, action). 49 for the current grammar."""
+    (device, zone for zoned devices only, action). 49 for the current grammar;
+    only the intents in `allowed` when it is given (the light-only build)."""
     out = []
     for device in config.DEVICES:
         zones = [None, *config.ZONES] if device in config.ZONED_DEVICES else [None]
         for zone in zones:
             for action in config.DEVICE_ACTIONS[device]:
                 toks = [device] + ([zone] if zone else []) + [action]
-                out.append((toks, Intent(device, zone, action)))
+                intent = Intent(device, zone, action)
+                if allowed is None or intent in allowed:
+                    out.append((toks, intent))
     return out
 
 
@@ -192,6 +200,7 @@ def align_scores(
     step_ms: float = 100.0,
     first_ms: float | None = None,
     smooth_win: int = ALIGN_SMOOTH_WIN,
+    allowed=None,
 ) -> list[tuple[float, float, Intent]]:
     """Every valid intent aligned against the window's smoothed posteriors,
     best first: (path score = exp(mean per-step log-prob), confidence = geometric
@@ -213,7 +222,7 @@ def align_scores(
             lp[tail, k] = -np.inf
     T = len(sm)
     scored = []
-    for toks, intent in candidates():
+    for toks, intent in candidates(allowed):
         s, conf = _path_score(lp, bg, [labels.index(t) for t in toks])
         if np.isfinite(s):
             scored.append((float(np.exp(s / T)), conf, intent))
@@ -251,12 +260,15 @@ def decode_window(
     first_ms: float | None = None,
     stream_kwargs=None,
     align: bool = True,
+    allowed=None,
 ):
     """Run the device's per-window path over `steps` (one posterior per
     recogniser step; the first `first_ms` after the window opened, default
     `step_ms`) and return the intent (Intent or Rejection) wake.cc would report:
     the grammar-constrained alignment first (E72; `align=False` is the pre-E72
-    device), then the fired-word parse + rescore as the fallback."""
+    device), then the fired-word parse + rescore as the fallback. `allowed`
+    (`LIGHT_ONLY`) mirrors the light-only build: only those intents align, and
+    any other result is a Rejection."""
     from kws_de.stream import KeywordStream
 
     first_ms = step_ms if first_ms is None else first_ms
@@ -269,8 +281,9 @@ def decode_window(
                 step_ms=step_ms,
                 first_ms=first_ms,
                 smooth_win=ALIGN_SMOOTH_WIN,
+                allowed=allowed,
             ),
-            ALIGN_TAU,
+            ALIGN_TAU if allowed is None else ALIGN_TAU_LIGHT,
             0.0,
         )
         if isinstance(got, Intent):
@@ -284,4 +297,9 @@ def decode_window(
             second, second_p = runner_up(ks.last_smoothed, labels, fired)
             p = float(np.asarray(post)[labels.index(fired)])
             buf.add(fired, p, second, second_p)
-    return rescore(buf.intent, buf.seconds)[0]
+    got = rescore(buf.intent, buf.seconds)[0]
+    if allowed is not None and isinstance(got, Intent) and got not in allowed:
+        from kws_de.grammar import Rejection
+
+        return Rejection("not allowed")
+    return got
